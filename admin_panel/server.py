@@ -6229,50 +6229,6 @@ def api_settings(admin=Depends(require_permission("settings"))):
     return db.get_all_settings()
 
 
-class NetworkMapConfigBody(BaseModel):
-    config: Dict[str, Any]
-
-@app.get("/api/settings/network-map")
-def api_get_network_map_settings(admin=Depends(require_permission("settings"))):
-    raw = db.get_setting("network_map_config", "") or ""
-    try: cfg = json.loads(raw) if raw else {"enabled": True, "refresh_seconds": 30, "nodes": [], "routes": []}
-    except Exception: cfg = {"enabled": True, "refresh_seconds": 30, "nodes": [], "routes": []}
-    return {"config": cfg}
-
-@app.post("/api/settings/network-map")
-def api_set_network_map_settings(body: NetworkMapConfigBody, admin=Depends(require_permission("settings"))):
-    cfg = body.config if isinstance(body.config, dict) else {}
-    nodes = cfg.get("nodes", []); routes = cfg.get("routes", [])
-    if not isinstance(nodes, list) or len(nodes) > 40: raise HTTPException(400, "فهرست گره‌ها نامعتبر است یا بیش از ۴۰ گره دارد.")
-    if not isinstance(routes, list) or len(routes) > 40: raise HTTPException(400, "فهرست مسیرها نامعتبر است یا بیش از ۴۰ مسیر دارد.")
-    clean_nodes=[]; ids=set()
-    for n in nodes:
-        if not isinstance(n, dict): raise HTTPException(400, "ساختار گره نامعتبر است.")
-        nid=str(n.get("id", "")).strip()
-        host=str(n.get("host", "")).strip()
-        try: port=int(n.get("port",443)); lat=float(n.get("lat",0)); lon=float(n.get("lon",0))
-        except Exception: raise HTTPException(400, "پورت یا مختصات گره نامعتبر است.")
-        if not nid or nid in ids or len(nid)>48: raise HTTPException(400, "شناسه گره باید یکتا باشد.")
-        if not host or len(host)>253 or any(c.isspace() for c in host) or "/" in host: raise HTTPException(400, "آدرس میزبان گره نامعتبر است.")
-        if not 1 <= port <= 65535 or not -85 <= lat <= 85 or not -180 <= lon <= 180: raise HTTPException(400, "پورت یا مختصات خارج از محدوده است.")
-        ids.add(nid); cn={"id":nid,"name":str(n.get("name",nid))[:80],"country":str(n.get("country",""))[:8],"host":host,"port":port,"lat":lat,"lon":lon}
-        if n.get("hub"): cn["hub"]=True
-        try:
-            if n.get("traffic_mbps") not in (None,""): cn["traffic_mbps"]=max(0.0,min(1000000.0,float(n["traffic_mbps"])))
-        except Exception: raise HTTPException(400, "مقدار ترافیک گره نامعتبر است.")
-        clean_nodes.append(cn)
-    clean_routes=[]
-    for r in routes:
-        if not isinstance(r,dict): raise HTTPException(400,"ساختار مسیر نامعتبر است.")
-        rids=[str(x) for x in r.get("nodes",[]) ]
-        if len(rids)<2 or any(x not in ids for x in rids): raise HTTPException(400,"هر مسیر باید حداقل دو گره معتبر داشته باشد.")
-        clean_routes.append({"id":str(r.get("id","route"))[:48],"name":str(r.get("name","مسیر شبکه"))[:80],"nodes":rids,"enabled":bool(r.get("enabled",True))})
-    clean={"enabled":bool(cfg.get("enabled",True)),"refresh_seconds":max(30,min(60,int(cfg.get("refresh_seconds",30) or 30))),"nodes":clean_nodes,"routes":clean_routes}
-    db.set_setting("network_map_config", json.dumps(clean,ensure_ascii=False))
-    db.log_admin_action(admin["id"],"network_map_settings_change",f"تنظیمات نقشه شبکه به‌روزرسانی شد (پنل وب - {admin['username']})","setting","network_map_config")
-    return {"ok":True,"config":clean}
-
-
 @app.get("/api/settings/sub-page-preview")
 def api_sub_page_preview(admin=Depends(require_permission("settings"))):
     """Render a safe, data-only mock of the subscription web page for the admin live preview."""
@@ -6309,15 +6265,6 @@ def api_sub_page_preview(admin=Depends(require_permission("settings"))):
         "content-security-policy": csp, "cache-control": "no-store", "referrer-policy": "no-referrer",
         "x-content-type-options": "nosniff", "x-robots-tag": "noindex, nofollow",
     })
-
-
-@app.get("/api/settings/web-store-preview-url")
-def api_web_store_preview_url(admin=Depends(require_permission("settings"))):
-    """Public origin of the web store service, used by the admin live preview iframe."""
-    url = (os.getenv("SHOPVPN_SEO_SITE_URL", "") or "").strip().rstrip("/")
-    if not url.startswith(("http://", "https://")):
-        url = ""
-    return {"url": url}
 
 
 class SettingBody(BaseModel):
