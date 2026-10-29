@@ -6255,7 +6255,12 @@ def api_set_network_map_settings(body: NetworkMapConfigBody, admin=Depends(requi
         if not nid or nid in ids or len(nid)>48: raise HTTPException(400, "شناسه گره باید یکتا باشد.")
         if not host or len(host)>253 or any(c.isspace() for c in host) or "/" in host: raise HTTPException(400, "آدرس میزبان گره نامعتبر است.")
         if not 1 <= port <= 65535 or not -85 <= lat <= 85 or not -180 <= lon <= 180: raise HTTPException(400, "پورت یا مختصات خارج از محدوده است.")
-        ids.add(nid); clean_nodes.append({"id":nid,"name":str(n.get("name",nid))[:80],"country":str(n.get("country",""))[:8],"host":host,"port":port,"lat":lat,"lon":lon})
+        ids.add(nid); cn={"id":nid,"name":str(n.get("name",nid))[:80],"country":str(n.get("country",""))[:8],"host":host,"port":port,"lat":lat,"lon":lon}
+        if n.get("hub"): cn["hub"]=True
+        try:
+            if n.get("traffic_mbps") not in (None,""): cn["traffic_mbps"]=max(0.0,min(1000000.0,float(n["traffic_mbps"])))
+        except Exception: raise HTTPException(400, "مقدار ترافیک گره نامعتبر است.")
+        clean_nodes.append(cn)
     clean_routes=[]
     for r in routes:
         if not isinstance(r,dict): raise HTTPException(400,"ساختار مسیر نامعتبر است.")
