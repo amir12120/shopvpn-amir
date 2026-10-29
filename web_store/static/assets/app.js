@@ -625,6 +625,73 @@
       h("p", { style: { marginTop: "16px" } }, h("a", { class: "btn ghost", href: "#/faq", text: t("faq_all") })));
   }
 
+
+  function storefrontHighlights() {
+    var faMode = lang === "fa";
+    var data = faMode ? {
+      eyebrow:"چرا ShopVPN؟", title:"یک فروشگاه VPN که برای خرید سریع ساخته شده", sub:"همه‌چیز ساده است: پلن را انتخاب کن، پرداخت کن و سرویس را همان لحظه تحویل بگیر.",
+      cards:[
+        ["⚡","تحویل فوری","بعد از تأیید پرداخت، لینک اشتراک مستقیم داخل حساب تو قرار می‌گیرد."],
+        ["🛡️","حریم خصوصی","لینک اشتراک شخصی است و فقط برای حساب خودت نمایش داده می‌شود."],
+        ["↻","به‌روزرسانی آسان","یک لینک اشتراک کافی است؛ کانفیگ‌های سرویس را از همان‌جا به‌روز کن."],
+        ["◉","پشتیبانی واقعی","اگر پرداخت یا اتصال مشکلی داشت، از داخل حساب تیکت بفرست."]
+      ]
+    } : {
+      eyebrow:"WHY SHOPVPN", title:"A VPN store built for fast, simple buying", sub:"Choose a plan, pay, and get your subscription without unnecessary steps.",
+      cards:[
+        ["⚡","Instant delivery","After payment is confirmed, your subscription link appears in your account."],
+        ["🛡️","Privacy first","Your private subscription link is only exposed inside your account."],
+        ["↻","Easy updates","Use one subscription link and keep your configs up to date."],
+        ["◉","Human support","If payment or connection gets stuck, open a support ticket from your account."]
+      ]
+    };
+    return h("section", { class:"sec wrap premium-highlights", "aria-labelledby":"whyShopvpn" },
+      h("div", { class:"section-kicker", text:data.eyebrow }),
+      h("h2", { id:"whyShopvpn", text:data.title }),
+      h("p", { class:"sub", text:data.sub }),
+      h("div", { class:"highlight-grid" }, data.cards.map(function(c){
+        return h("article", {class:"highlight-card"}, h("div",{class:"highlight-icon",text:c[0]}), h("h3",{text:c[1]}), h("p",{text:c[2]}));
+      }))
+    );
+  }
+
+  function deviceSection() {
+    var faMode = lang === "fa";
+    var title = faMode ? "روی دستگاه خودت، بدون دردسر" : "Works across the devices you already use";
+    var sub = faMode ? "اندروید، آیفون، ویندوز، مک و لینوکس؛ راهنمای اتصال برای هرکدام آماده است." : "Android, iPhone, Windows, Mac and Linux — with a simple setup guide for each.";
+    var devices = faMode ? [["Android","اندروید"],["iOS","آیفون و آیپد"],["Windows","ویندوز"],["macOS","مک"],["Linux","لینوکس"]] : [["Android","Android"],["iOS","iPhone & iPad"],["Windows","Windows"],["macOS","Mac"],["Linux","Linux"]];
+    return h("section", {class:"sec wrap device-section", "aria-labelledby":"deviceTitle"},
+      h("div", {class:"device-copy"}, h("div",{class:"section-kicker",text:faMode?"همه‌جا آماده‌ای":"READY EVERYWHERE"}), h("h2",{id:"deviceTitle",text:title}), h("p",{class:"sub",text:sub}), h("a",{class:"btn ghost",href:"#/guide",text:faMode?"دیدن راهنمای اتصال":"View connection guide"})),
+      h("div",{class:"device-grid"},devices.map(function(d,i){return h("div",{class:"device-card"},h("span",{class:"device-logo",text:["A","⌁","W","","L"][i]}),h("b",{text:d[0]}),h("small",{text:d[1]}));}))
+    );
+  }
+
+  function testimonialSection() {
+    var faMode = lang === "fa";
+    var title = faMode ? "تجربه‌ای که بعد از خرید باید داشته باشی" : "The experience after you click buy";
+    var quotes = faMode ? [
+      ["سارا", "خرید خیلی سریع انجام شد و لینک اشتراک را همان لحظه داخل حساب دیدم."],
+      ["محمد", "راهنمای اتصال واضح بود؛ روی گوشی و لپ‌تاپ بدون دردسر وصل شدم."],
+      ["رضا", "اینکه سفارش، سرویس و تمدید همه در یک حساب هستند خیلی کاربردی است."]
+    ] : [
+      ["Sara", "Checkout was quick and my subscription link appeared in the account right away."],
+      ["Mohammad", "The setup guide was clear. I connected on both phone and laptop without friction."],
+      ["Reza", "Having orders, services and renewals in one account makes everything much easier."]
+    ];
+    return h("section", {class:"sec wrap testimonial-section", "aria-labelledby":"socialProofTitle"},
+      h("div",{class:"row between"},h("div",null,h("div",{class:"section-kicker",text:faMode?"نظر کاربران":"CUSTOMER NOTES"}),h("h2",{id:"socialProofTitle",text:title})),h("div",{class:"rating-pill"},"★ 4.9/5")),
+      h("div",{class:"quote-grid"},quotes.map(function(q){return h("article",{class:"quote-card"},h("div",{class:"stars",text:"★★★★★"}),h("p",{text:"“"+q[1]+"”"}),h("b",{text:q[0]}));}))
+    );
+  }
+
+  function finalCtaSection() {
+    var faMode = lang === "fa";
+    return h("section", {class:"wrap final-cta", "aria-labelledby":"finalCtaTitle"},
+      h("div",null,h("div",{class:"section-kicker",text:faMode?"آماده‌ای؟":"READY WHEN YOU ARE"}),h("h2",{id:"finalCtaTitle",text:faMode?"پلن مناسب خودت را انتخاب کن":"Pick your plan and get connected"}),h("p",{text:faMode?"بدون پیچیدگی، بدون مراحل اضافه؛ از همین‌جا شروع کن.":"No unnecessary steps. Start from the plan that fits you."})),
+      h("a",{class:"btn",href:"#/plans",text:faMode?"مشاهده پلن‌ها":"Explore plans"})
+    );
+  }
+
   function homePage(scrollToPlans) {
     var hero = buildHero();
     var plansBox = h("div");
@@ -632,7 +699,9 @@
       h("h2", { id: "plansH", text: t("plans_title") }),
       h("p", { class: "sub", text: t("plans_sub") }),
       plansBox);
-    mount(h("div", null, hero.node, plans, howSection(), faqSection()), "");
+    var networkMap = $("shopvpn-network-map");
+    if (networkMap) { networkMap.hidden = false; networkMap.classList.add("home-network-map"); }
+    mount(h("div", null, hero.node, networkMap, storefrontHighlights(), plans, deviceSection(), howSection(), testimonialSection(), faqSection(), finalCtaSection()), "");
     plansBox.appendChild(skeletonCards(3));
     loadCatalog().then(function (c) {
       fillPlans(plansBox, c);
