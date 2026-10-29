@@ -7109,14 +7109,6 @@ const SETTINGS_GROUPS = [
   // نکته: متن/رنگ/ترتیب/فعال‌سازی دکمه‌های منوی اصلی ربات، و همچنین رنگ
   // دکمه‌های مسیر خرید (انتخاب دسته/محصول/ادامه/کد تخفیف/بازگشت) دیگر اینجا
   // نیست؛ برای یکپارچه‌سازی، همه‌شان به تب «دکمه‌های ربات» منتقل شدند.
-
-  { tab: 'content', title: '🛍️ برندینگ و ظاهر فروشگاه وب', fields: [
-    { key: 'web_store_logo', label: 'لوگوی فروشگاه وب', type: 'image' },
-    { key: 'web_store_tagline', label: 'شعار کوتاه فروشگاه وب', type: 'text' },
-    { key: 'web_store_primary_color', label: 'رنگ اصلی فروشگاه وب (HEX)', type: 'text' },
-    { key: 'web_store_support_url', label: 'لینک پشتیبانی فروشگاه وب', type: 'text' },
-    { key: 'web_store_preview_theme', label: 'تم پیش‌فرض پیش‌نمایش', type: 'select', options: [['light','روشن'],['dark','تیره'],['auto','خودکار']] },
-  ]},
   { tab: 'content', title: '🔗 برندینگ و پیش‌نمایش صفحه لینک ساب', fields: [
     { key: 'dsub_brand', label: 'نام برند صفحه لینک ساب', type: 'text' },
     { key: 'dsub_logo_url', label: 'لوگوی صفحه لینک ساب', type: 'text' },
@@ -7382,20 +7374,6 @@ function renderSettingsGroups(settings) {
         </div></div>
       </div>`;
     }).join('')}
-  </div>
-  <div class="settings-live-preview network-map-admin-card" data-settings-tab="content" style="${settingsActiveTab === 'content' ? '' : 'display:none'}">
-    <div class="settings-live-preview-head"><div><strong>🌐 تنظیمات نقشه زنده شبکه فروشگاه</strong><div class="card-sub">گره‌ها و مسیرها را تعریف کن؛ پینگ با بررسی واقعی TCP محاسبه می‌شود.</div></div></div>
-    <label class="field"><span>پیکربندی گره‌ها و مسیرها (JSON)</span><textarea id="network-map-config" class="input" rows="12" dir="ltr" spellcheck="false" placeholder="{\&quot;enabled\&quot;:true,\&quot;refresh_seconds\&quot;:30,\&quot;nodes\&quot;:[],\&quot;routes\&quot;:[]}"></textarea></label>
-    <div class="card-sub">هر گره باید شناسه یکتا، نام، host، port و مختصات lat/lon داشته باشد. مسیرها با شناسه گره‌ها ساخته می‌شوند. نمونه: تهران → فرانکفورت.</div>
-    <div class="row-actions"><button type="button" class="btn btn-primary" id="network-map-load">بارگذاری تنظیمات</button><button type="button" class="btn" id="network-map-save">ذخیره تنظیمات نقشه</button></div>
-    <pre id="network-map-result" class="card-sub" aria-live="polite"></pre>
-  </div>
-  <div class="settings-live-preview" data-settings-tab="content" style="${settingsActiveTab === 'content' ? '' : 'display:none'}">
-    <div class="settings-live-preview-head">
-      <div><strong>👁️ پیش‌نمایش زنده فروشگاه وب</strong><div class="card-sub">تغییرات برندینگ را قبل از ذخیره هم می‌توانی ببینی.</div></div>
-      <button type="button" class="btn btn-sm" id="web-store-preview-open">باز کردن در تب جدید</button>
-    </div>
-    <iframe id="web-store-preview-frame" title="پیش‌نمایش فروشگاه وب" loading="lazy"></iframe>
   </div>
   <div class="settings-live-preview" data-settings-tab="content" style="${settingsActiveTab === 'content' ? '' : 'display:none'}">
     <div class="settings-live-preview-head">
@@ -9295,60 +9273,6 @@ document.addEventListener('click', async e => {
   } catch (err) { handleErr(err); (en || dis).disabled = false; }
 });
 
-function bindWebStoreLivePreview(root) {
-  const frame = $('#web-store-preview-frame', root);
-  if (!frame) return;
-  const send = () => {
-    const get = (k) => { const el = $(`[data-key="${k}"]`, root); return el ? el.value : ''; };
-    const sw = $('.switch[data-key="web_store_preview_enabled"]', root);
-    const payload = {
-      store_name: get('store_name'),
-      logo: get('web_store_logo'),
-      tagline: get('web_store_tagline'),
-      primary_color: get('web_store_primary_color'),
-      support_url: get('web_store_support_url'),
-      theme: get('web_store_preview_theme') || 'light'
-    };
-    try { frame.contentWindow.postMessage({ type: 'shopvpn-web-store-preview', payload }, '*'); } catch(e) {}
-  };
-  const openBtn = $('#web-store-preview-open', root);
-  frame.addEventListener('load', send);
-  apiGet('/settings/web-store-preview-url').then(r => {
-    const base = (r && r.url) || '';
-    if (!base) {
-      frame.style.display = 'none';
-      if (openBtn) openBtn.style.display = 'none';
-      const note = document.createElement('div');
-      note.className = 'card-sub';
-      note.style.padding = '12px';
-      note.textContent = 'دامنه‌ی فروشگاه وب تنظیم نشده است (SHOPVPN_SEO_SITE_URL در فایل .env).';
-      frame.parentNode.insertBefore(note, frame);
-      return;
-    }
-    const target = base + '/?preview=1';
-    if (openBtn) openBtn.onclick = () => window.open(target, '_blank', 'noopener');
-    frame.src = target;
-  }).catch(() => {});
-  $$('[data-key]', root).forEach(el => {
-    if (el.dataset.key.startsWith('web_store_') || el.dataset.key === 'store_name') {
-      el.addEventListener('input', send); el.addEventListener('change', send);
-    }
-  });
-  setTimeout(send, 200);
-}
-
-async function bindNetworkMapSettings(root) {
-  const area = $('#network-map-config', root); if (!area) return;
-  const result = $('#network-map-result', root);
-  const load = async () => { try { const data = await apiGet('/settings/network-map'); area.value = JSON.stringify(data.config || {}, null, 2); result.textContent = 'تنظیمات دریافت شد.'; } catch(e) { result.textContent = 'دریافت تنظیمات ناموفق بود: ' + (e.message || e); } };
-  $('#network-map-load', root).onclick = load;
-  $('#network-map-save', root).onclick = async () => {
-    let config; try { config = JSON.parse(area.value); } catch(e) { result.textContent = 'JSON معتبر نیست؛ ساختار را بررسی کن.'; return; }
-    const btn = $('#network-map-save', root); btn.disabled = true; result.textContent = 'در حال ذخیره…';
-    try { const data = await apiPost('/settings/network-map', {config}); area.value = JSON.stringify(data.config || config, null, 2); result.textContent = 'تنظیمات نقشه با موفقیت ذخیره شد.'; toast('تنظیمات نقشه شبکه ذخیره شد.'); } catch(e) { result.textContent = 'ذخیره ناموفق بود: ' + (e.message || e); } finally { btn.disabled = false; }
-  };
-  await load();
-}
 
 async function renderSettings() {
   const [settings, rate, mainMenuDisplay, gateways, methods, c2cCards, c2cWebhook, c2cInvoices, mobileTokens] = await Promise.all([
@@ -9363,8 +9287,8 @@ async function renderSettings() {
     apiGet('/app/tokens').catch(() => []),
   ]);
   const pay = { gateways, methods, c2cCards, c2cWebhook, c2cInvoices };
-  if (loadTheme().theme === 'brutalist') { renderSettingsBrutalist(settings, rate, mainMenuDisplay, pay, mobileTokens); bindNetworkMapSettings(content()); return; }
-  if (loadTheme().theme === 'bento') { renderSettingsBento(settings, rate, mainMenuDisplay, pay, mobileTokens); bindNetworkMapSettings(content()); return; }
+  if (loadTheme().theme === 'brutalist') { renderSettingsBrutalist(settings, rate, mainMenuDisplay, pay, mobileTokens); return; }
+  if (loadTheme().theme === 'bento') { renderSettingsBento(settings, rate, mainMenuDisplay, pay, mobileTokens); return; }
   setContent(`
     ${settingsTabsHtml()}
 
@@ -9391,8 +9315,6 @@ async function renderSettings() {
   `);
   $$('#settings-tabs-nav .tab-btn', content()).forEach(btn => btn.addEventListener('click', () => switchSettingsTab(btn.dataset.tab, content())));
   bindSettingsGroupEvents(content());
-  bindNetworkMapSettings(content());
-  bindWebStoreLivePreview(content());
   bindSubscriptionLivePreview(content());
   syncExtraSettingsTab(content());
   bindPaymentExtrasEvents(content(), pay);
@@ -9428,9 +9350,9 @@ function bindSubscriptionLivePreview(root) {
   };
   const payload = () => ({
     brand: get('dsub_brand') || get('store_name') || 'ShopVPN',
-    logo: get('dsub_logo_url') || get('web_store_logo') || '',
+    logo: get('dsub_logo_url') || '',
     notice: get('dsub_notice'),
-    support: get('dsub_support_url') || get('web_store_support_url') || '',
+    support: get('dsub_support_url') || '',
     footer: get('dsub_footer_text'),
     theme: get('dsub_theme') || 'auto',
     show: {
@@ -9444,7 +9366,7 @@ function bindSubscriptionLivePreview(root) {
   if (openBtn) openBtn.onclick = () => window.open('/api/settings/sub-page-preview?preview=1', '_blank', 'noopener');
   $$('[data-key]', root).forEach(el => {
     const key = el.dataset.key || '';
-    if (key.startsWith('dsub_') || key === 'store_name' || key === 'web_store_logo' || key === 'web_store_support_url') {
+    if (key.startsWith('dsub_') || key === 'store_name') {
       el.addEventListener('input', send); el.addEventListener('change', send);
     }
   });
@@ -9475,7 +9397,6 @@ function renderSettingsBento(settings, rate, mainMenuDisplay, pay, mobileTokens)
   `);
   $$('#settings-tabs-nav .bn-seg-btn', content()).forEach(btn => btn.addEventListener('click', () => switchSettingsTab(btn.dataset.tab, content())));
   bindSettingsGroupEvents(content());
-  bindWebStoreLivePreview(content());
   bindSubscriptionLivePreview(content());
   syncExtraSettingsTab(content());
   bindPaymentExtrasEvents(content(), pay);
@@ -9538,7 +9459,6 @@ function renderSettingsBrutalist(settings, rate, mainMenuDisplay, pay, mobileTok
   `);
   $$('#settings-tabs-nav .bru-seg-btn', content()).forEach(btn => btn.addEventListener('click', () => switchSettingsTab(btn.dataset.tab, content())));
   bindSettingsGroupEvents(content());
-  bindWebStoreLivePreview(content());
   bindSubscriptionLivePreview(content());
   syncExtraSettingsTab(content());
   bindPaymentExtrasEvents(content(), pay);
