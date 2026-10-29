@@ -23,6 +23,7 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23070A1A'/%3E%3Cpath d='M12 44C24 12 40 52 52 20' fill='none' stroke='%2335E6CB' stroke-width='6' stroke-linecap='round'/%3E%3C/svg%3E">
 <script src="/assets/boot.js?v={{ASSET_VERSION}}" defer></script>
 <link rel="stylesheet" href="/assets/app.css?v={{ASSET_VERSION}}">
+<link rel="stylesheet" href="/assets/network-map.css?v={{ASSET_VERSION}}">
 </head>
 <body>
 <a class="skip" href="#view" data-i18n="skip">رفتن به محتوا</a>
@@ -51,6 +52,13 @@
 </header>
 
 <main id="view" tabindex="-1"></main>
+
+
+<section class="network-map-wrap" id="shopvpn-network-map" aria-labelledby="network-map-title" hidden>
+  <div class="network-map-head"><div><span class="network-kicker">SHOPVPN NETWORK</span><h2 id="network-map-title">نقشه زنده شبکه</h2><p>وضعیت و تأخیر ارتباط گره‌های پیکربندی‌شده</p></div><div class="network-live"><i></i><span id="network-map-updated">در حال اتصال…</span></div></div>
+  <div class="network-map-layout"><div class="network-map-canvas"><svg id="network-map-svg" viewBox="0 0 900 430" role="img" aria-label="نقشه گره‌ها و مسیرهای شبکه"></svg><div class="network-map-legend"><span><i class="good"></i> آنلاین</span><span><i class="warn"></i> تأخیر بالا</span><span><i class="bad"></i> آفلاین</span></div></div><aside class="network-node-list"><h3>گره‌های شبکه</h3><div id="network-node-list"><p>در حال دریافت اطلاعات…</p></div></aside></div>
+  <div class="network-map-bottom"><div class="network-route-detail"><h3>مسیرهای موجود</h3><div id="network-route-list"></div></div><div class="network-map-stats"><span>گره‌های آنلاین <b id="network-online-count">—</b></span><span>میانگین پینگ <b id="network-average-ping">—</b></span><span>آخرین بررسی <b id="network-last-check">—</b></span></div></div>
+</section>
 
 <footer class="foot">
   <div class="wrap foot-in">
@@ -81,5 +89,6 @@
 <noscript><p class="wrap noscript">برای استفاده از فروشگاه، جاوااسکریپت مرورگر را فعال کنید. / Please enable JavaScript to use the store.</p></noscript>
 <script src="/assets/i18n.js?v={{ASSET_VERSION}}" defer></script>
 <script src="/assets/app.js?v={{ASSET_VERSION}}" defer></script>
+<script src="/assets/network-map.js?v={{ASSET_VERSION}}" defer></script>
 </body>
 </html>
