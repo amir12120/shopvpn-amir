@@ -7383,6 +7383,13 @@ function renderSettingsGroups(settings) {
       </div>`;
     }).join('')}
   </div>
+  <div class="settings-live-preview network-map-admin-card" data-settings-tab="content" style="${settingsActiveTab === 'content' ? '' : 'display:none'}">
+    <div class="settings-live-preview-head"><div><strong>🌐 تنظیمات نقشه زنده شبکه فروشگاه</strong><div class="card-sub">گره‌ها و مسیرها را تعریف کن؛ پینگ با بررسی واقعی TCP محاسبه می‌شود.</div></div></div>
+    <label class="field"><span>پیکربندی گره‌ها و مسیرها (JSON)</span><textarea id="network-map-config" class="input" rows="12" dir="ltr" spellcheck="false" placeholder="{\&quot;enabled\&quot;:true,\&quot;refresh_seconds\&quot;:30,\&quot;nodes\&quot;:[],\&quot;routes\&quot;:[]}"></textarea></label>
+    <div class="card-sub">هر گره باید شناسه یکتا، نام، host، port و مختصات lat/lon داشته باشد. مسیرها با شناسه گره‌ها ساخته می‌شوند. نمونه: تهران → فرانکفورت.</div>
+    <div class="row-actions"><button type="button" class="btn btn-primary" id="network-map-load">بارگذاری تنظیمات</button><button type="button" class="btn" id="network-map-save">ذخیره تنظیمات نقشه</button></div>
+    <pre id="network-map-result" class="card-sub" aria-live="polite"></pre>
+  </div>
   <div class="settings-live-preview" data-settings-tab="content" style="${settingsActiveTab === 'content' ? '' : 'display:none'}">
     <div class="settings-live-preview-head">
       <div><strong>👁️ پیش‌نمایش زنده فروشگاه وب</strong><div class="card-sub">تغییرات برندینگ را قبل از ذخیره هم می‌توانی ببینی.</div></div>
@@ -9330,6 +9337,19 @@ function bindWebStoreLivePreview(root) {
   setTimeout(send, 200);
 }
 
+async function bindNetworkMapSettings(root) {
+  const area = $('#network-map-config', root); if (!area) return;
+  const result = $('#network-map-result', root);
+  const load = async () => { try { const data = await apiGet('/settings/network-map'); area.value = JSON.stringify(data.config || {}, null, 2); result.textContent = 'تنظیمات دریافت شد.'; } catch(e) { result.textContent = 'دریافت تنظیمات ناموفق بود: ' + (e.message || e); } };
+  $('#network-map-load', root).onclick = load;
+  $('#network-map-save', root).onclick = async () => {
+    let config; try { config = JSON.parse(area.value); } catch(e) { result.textContent = 'JSON معتبر نیست؛ ساختار را بررسی کن.'; return; }
+    const btn = $('#network-map-save', root); btn.disabled = true; result.textContent = 'در حال ذخیره…';
+    try { const data = await apiPost('/settings/network-map', {config}); area.value = JSON.stringify(data.config || config, null, 2); result.textContent = 'تنظیمات نقشه با موفقیت ذخیره شد.'; toast('تنظیمات نقشه شبکه ذخیره شد.'); } catch(e) { result.textContent = 'ذخیره ناموفق بود: ' + (e.message || e); } finally { btn.disabled = false; }
+  };
+  await load();
+}
+
 async function renderSettings() {
   const [settings, rate, mainMenuDisplay, gateways, methods, c2cCards, c2cWebhook, c2cInvoices, mobileTokens] = await Promise.all([
     apiGet('/settings'),
@@ -9343,8 +9363,8 @@ async function renderSettings() {
     apiGet('/app/tokens').catch(() => []),
   ]);
   const pay = { gateways, methods, c2cCards, c2cWebhook, c2cInvoices };
-  if (loadTheme().theme === 'brutalist') return renderSettingsBrutalist(settings, rate, mainMenuDisplay, pay, mobileTokens);
-  if (loadTheme().theme === 'bento') return renderSettingsBento(settings, rate, mainMenuDisplay, pay, mobileTokens);
+  if (loadTheme().theme === 'brutalist') { renderSettingsBrutalist(settings, rate, mainMenuDisplay, pay, mobileTokens); bindNetworkMapSettings(content()); return; }
+  if (loadTheme().theme === 'bento') { renderSettingsBento(settings, rate, mainMenuDisplay, pay, mobileTokens); bindNetworkMapSettings(content()); return; }
   setContent(`
     ${settingsTabsHtml()}
 
@@ -9371,6 +9391,7 @@ async function renderSettings() {
   `);
   $$('#settings-tabs-nav .tab-btn', content()).forEach(btn => btn.addEventListener('click', () => switchSettingsTab(btn.dataset.tab, content())));
   bindSettingsGroupEvents(content());
+  bindNetworkMapSettings(content());
   bindWebStoreLivePreview(content());
   bindSubscriptionLivePreview(content());
   syncExtraSettingsTab(content());
