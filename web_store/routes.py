@@ -69,10 +69,10 @@ async def api_web_catalog(tenant: Tenant = Depends(get_tenant)):
     store_name = render_stored_setting("store_name", tenant.db.get_setting("store_name", "⚡ SHOP VPN"))
     return {
         "store_name": store_name,
-        "logo": tenant.db.get_setting("web_store_logo", ""),
-        "tagline": tenant.db.get_setting("web_store_tagline", ""),
-        "primary_color": tenant.db.get_setting("web_store_primary_color", ""),
-        "support_url": tenant.db.get_setting("web_store_support_url", ""),
+        "logo": "",
+        "tagline": "",
+        "primary_color": "",
+        "support_url": "",
         "bot_url": f"https://t.me/{username}" if username else "",
         "categories": categories,
     }
@@ -404,75 +404,4 @@ def seo_sitemap(request: Request):
     return Response(content=xml, media_type="application/xml; charset=utf-8", headers={"Cache-Control": "public, max-age=3600"})
 
 
-# ---------------------------- نقشه زنده شبکه ShopVPN ----------------------------
-import json as _json
-import time as _time
-import asyncio as _asyncio
 
-def _network_map_config(db):
-    raw = db.get_setting("network_map_config", "") or ""
-    try:
-        cfg = _json.loads(raw) if raw else {}
-    except Exception:
-        cfg = {}
-    if not isinstance(cfg, dict): cfg = {}
-    nodes = cfg.get("nodes") if isinstance(cfg.get("nodes"), list) else []
-    routes = cfg.get("routes") if isinstance(cfg.get("routes"), list) else []
-    return {"enabled": bool(cfg.get("enabled", True)), "refresh_seconds": max(30, min(60, int(cfg.get("refresh_seconds", 30) or 30))), "nodes": nodes[:40], "routes": routes[:40]}
-
-async def _probe_once(host, port):
-    started = _time.perf_counter()
-    try:
-        reader, writer = await _asyncio.wait_for(_asyncio.open_connection(host, port), timeout=3.5)
-        writer.close()
-        try: await writer.wait_closed()
-        except Exception: pass
-        return round((_time.perf_counter()-started)*1000)
-    except Exception:
-        return None
-
-async def _probe_network_node(node):
-    host = str(node.get("host", "")).strip()
-    try: port = int(node.get("port", 443))
-    except Exception: port = 443
-    if not host or not (1 <= port <= 65535):
-        return {"online": False, "ping_ms": None, "loss_pct": 100}
-    results = await _asyncio.gather(*[_probe_once(host, port) for _ in range(3)])
-    ok = sorted(r for r in results if r is not None)
-    if not ok:
-        return {"online": False, "ping_ms": None, "loss_pct": 100}
-    return {"online": True, "ping_ms": ok[len(ok)//2], "loss_pct": round((3-len(ok))/3*100)}
-
-@router.get("/api/public/world-map")
-async def api_public_world_map(tenant: Tenant = Depends(get_tenant)):
-    _web_main_only(tenant)
-    import world_map as _wm
-    return await _wm.get_world_map()
-
-@router.get("/api/public/network-map")
-async def api_public_network_map(tenant: Tenant = Depends(get_tenant)):
-    """Public node status based on real TCP reachability probes of admin-configured endpoints."""
-    _web_main_only(tenant)
-    cfg = _network_map_config(tenant.db)
-    if not cfg["enabled"]:
-        return {"enabled": False, "nodes": [], "routes": [], "updated_at": int(_time.time()), "refresh_seconds": cfg["refresh_seconds"]}
-    prepared = []
-    for item in cfg["nodes"]:
-        if not isinstance(item, dict): continue
-        try:
-            node = {"id": str(item.get("id", ""))[:48], "name": str(item.get("name", "Server"))[:80], "country": str(item.get("country", ""))[:8], "lat": max(-85, min(85, float(item.get("lat", 0) or 0))), "lon": max(-180, min(180, float(item.get("lon", 0) or 0))), "host": str(item.get("host", ""))[:253], "port": item.get("port", 443), "hub": bool(item.get("hub", False))}
-            tm = item.get("traffic_mbps")
-            if tm not in (None, ""): node["traffic_mbps"] = max(0.0, min(1000000.0, float(tm)))
-        except (TypeError, ValueError):
-            continue
-        prepared.append(node)
-    statuses = await _asyncio.gather(*[_probe_network_node(node) for node in prepared])
-    nodes = [{k:v for k,v in node.items() if k not in ("host", "port")} | status for node, status in zip(prepared, statuses)]
-    known = {n["id"] for n in nodes}
-    routes = []
-    for r in cfg["routes"]:
-        if not isinstance(r, dict): continue
-        ids = [str(x) for x in r.get("nodes", []) if str(x) in known]
-        if len(ids) >= 2:
-            routes.append({"id": str(r.get("id", "route"))[:48], "name": str(r.get("name", "مسیر شبکه"))[:80], "nodes": ids, "enabled": bool(r.get("enabled", True))})
-    return {"enabled": True, "nodes": nodes, "routes": routes, "updated_at": int(_time.time()), "refresh_seconds": cfg["refresh_seconds"]}
