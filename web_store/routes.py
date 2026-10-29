@@ -402,3 +402,62 @@ def seo_sitemap(request: Request):
     xml = ('<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" '
            'xmlns:xhtml="http://www.w3.org/1999/xhtml">' + urls + '</urlset>')
     return Response(content=xml, media_type="application/xml; charset=utf-8", headers={"Cache-Control": "public, max-age=3600"})
+
+
+# ---------------------------- نقشه زنده شبکه ShopVPN ----------------------------
+import json as _json
+import time as _time
+import asyncio as _asyncio
+
+def _network_map_config(db):
+    raw = db.get_setting("network_map_config", "") or ""
+    try:
+        cfg = _json.loads(raw) if raw else {}
+    except Exception:
+        cfg = {}
+    if not isinstance(cfg, dict): cfg = {}
+    nodes = cfg.get("nodes") if isinstance(cfg.get("nodes"), list) else []
+    routes = cfg.get("routes") if isinstance(cfg.get("routes"), list) else []
+    return {"enabled": bool(cfg.get("enabled", True)), "refresh_seconds": max(30, min(60, int(cfg.get("refresh_seconds", 30) or 30))), "nodes": nodes[:40], "routes": routes[:40]}
+
+async def _probe_network_node(node):
+    host = str(node.get("host", "")).strip()
+    try: port = int(node.get("port", 443))
+    except Exception: port = 443
+    if not host or not (1 <= port <= 65535):
+        return {"online": False, "ping_ms": None}
+    started = _time.perf_counter()
+    try:
+        reader, writer = await _asyncio.wait_for(_asyncio.open_connection(host, port), timeout=3.5)
+        writer.close()
+        try: await writer.wait_closed()
+        except Exception: pass
+        return {"online": True, "ping_ms": round((_time.perf_counter()-started)*1000)}
+    except Exception:
+        return {"online": False, "ping_ms": None}
+
+@router.get("/api/public/network-map")
+async def api_public_network_map(tenant: Tenant = Depends(get_tenant)):
+    """Public node status based on real TCP reachability probes of admin-configured endpoints."""
+    _web_main_only(tenant)
+    cfg = _network_map_config(tenant.db)
+    if not cfg["enabled"]:
+        return {"enabled": False, "nodes": [], "routes": [], "updated_at": int(_time.time()), "refresh_seconds": cfg["refresh_seconds"]}
+    prepared = []
+    for item in cfg["nodes"]:
+        if not isinstance(item, dict): continue
+        try:
+            node = {"id": str(item.get("id", ""))[:48], "name": str(item.get("name", "Server"))[:80], "country": str(item.get("country", ""))[:8], "lat": max(-85, min(85, float(item.get("lat", 0) or 0))), "lon": max(-180, min(180, float(item.get("lon", 0) or 0))), "host": str(item.get("host", ""))[:253], "port": item.get("port", 443)}
+        except (TypeError, ValueError):
+            continue
+        prepared.append(node)
+    statuses = await _asyncio.gather(*[_probe_network_node(node) for node in prepared])
+    nodes = [{k:v for k,v in node.items() if k not in ("host", "port")} | status for node, status in zip(prepared, statuses)]
+    known = {n["id"] for n in nodes}
+    routes = []
+    for r in cfg["routes"]:
+        if not isinstance(r, dict): continue
+        ids = [str(x) for x in r.get("nodes", []) if str(x) in known]
+        if len(ids) >= 2:
+            routes.append({"id": str(r.get("id", "route"))[:48], "name": str(r.get("name", "مسیر شبکه"))[:80], "nodes": ids, "enabled": bool(r.get("enabled", True))})
+    return {"enabled": True, "nodes": nodes, "routes": routes, "updated_at": int(_time.time()), "refresh_seconds": cfg["refresh_seconds"]}
