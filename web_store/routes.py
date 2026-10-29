@@ -420,21 +420,34 @@ def _network_map_config(db):
     routes = cfg.get("routes") if isinstance(cfg.get("routes"), list) else []
     return {"enabled": bool(cfg.get("enabled", True)), "refresh_seconds": max(30, min(60, int(cfg.get("refresh_seconds", 30) or 30))), "nodes": nodes[:40], "routes": routes[:40]}
 
-async def _probe_network_node(node):
-    host = str(node.get("host", "")).strip()
-    try: port = int(node.get("port", 443))
-    except Exception: port = 443
-    if not host or not (1 <= port <= 65535):
-        return {"online": False, "ping_ms": None}
+async def _probe_once(host, port):
     started = _time.perf_counter()
     try:
         reader, writer = await _asyncio.wait_for(_asyncio.open_connection(host, port), timeout=3.5)
         writer.close()
         try: await writer.wait_closed()
         except Exception: pass
-        return {"online": True, "ping_ms": round((_time.perf_counter()-started)*1000)}
+        return round((_time.perf_counter()-started)*1000)
     except Exception:
-        return {"online": False, "ping_ms": None}
+        return None
+
+async def _probe_network_node(node):
+    host = str(node.get("host", "")).strip()
+    try: port = int(node.get("port", 443))
+    except Exception: port = 443
+    if not host or not (1 <= port <= 65535):
+        return {"online": False, "ping_ms": None, "loss_pct": 100}
+    results = await _asyncio.gather(*[_probe_once(host, port) for _ in range(3)])
+    ok = sorted(r for r in results if r is not None)
+    if not ok:
+        return {"online": False, "ping_ms": None, "loss_pct": 100}
+    return {"online": True, "ping_ms": ok[len(ok)//2], "loss_pct": round((3-len(ok))/3*100)}
+
+@router.get("/api/public/world-map")
+async def api_public_world_map(tenant: Tenant = Depends(get_tenant)):
+    _web_main_only(tenant)
+    import world_map as _wm
+    return await _wm.get_world_map()
 
 @router.get("/api/public/network-map")
 async def api_public_network_map(tenant: Tenant = Depends(get_tenant)):
@@ -447,7 +460,9 @@ async def api_public_network_map(tenant: Tenant = Depends(get_tenant)):
     for item in cfg["nodes"]:
         if not isinstance(item, dict): continue
         try:
-            node = {"id": str(item.get("id", ""))[:48], "name": str(item.get("name", "Server"))[:80], "country": str(item.get("country", ""))[:8], "lat": max(-85, min(85, float(item.get("lat", 0) or 0))), "lon": max(-180, min(180, float(item.get("lon", 0) or 0))), "host": str(item.get("host", ""))[:253], "port": item.get("port", 443)}
+            node = {"id": str(item.get("id", ""))[:48], "name": str(item.get("name", "Server"))[:80], "country": str(item.get("country", ""))[:8], "lat": max(-85, min(85, float(item.get("lat", 0) or 0))), "lon": max(-180, min(180, float(item.get("lon", 0) or 0))), "host": str(item.get("host", ""))[:253], "port": item.get("port", 443), "hub": bool(item.get("hub", False))}
+            tm = item.get("traffic_mbps")
+            if tm not in (None, ""): node["traffic_mbps"] = max(0.0, min(1000000.0, float(tm)))
         except (TypeError, ValueError):
             continue
         prepared.append(node)
