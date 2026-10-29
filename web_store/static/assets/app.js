@@ -699,8 +699,7 @@
       h("h2", { id: "plansH", text: t("plans_title") }),
       h("p", { class: "sub", text: t("plans_sub") }),
       plansBox);
-    var networkMap = $("shopvpn-network-map");
-    if (networkMap) { networkMap.hidden = false; networkMap.classList.add("home-network-map"); }
+    var networkMap = window.ShopVPNNetworkMap && window.ShopVPNNetworkMap.create ? window.ShopVPNNetworkMap.create() : null;
     mount(h("div", null, hero.node, networkMap, storefrontHighlights(), plans, deviceSection(), howSection(), testimonialSection(), faqSection(), finalCtaSection()), "");
     plansBox.appendChild(skeletonCards(3));
     loadCatalog().then(function (c) {
