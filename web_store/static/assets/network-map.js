@@ -9,6 +9,9 @@
   var LS_LAND = 'sv-netmap-land-v1';
   var W = 1000;
   var B = { L: -120, R: 162, T: 76, B: -58 };
+  var B0 = { L: -120, R: 162, T: 76, B: -58 };
+  var D = window.ShopVPNNetmapData || {};
+  var LS_CTRY = 'sv-netmap-countries-v1';
   var MOBILE_MQ = '(max-width:720px)';
 
   /* ------------------------------------------------------------ flags --- */
@@ -24,6 +27,7 @@
     sg: '<rect width="24" height="12" fill="#ef3340"/><rect y="12" width="24" height="12" fill="#fff"/><circle cx="8.2" cy="6" r="3.6" fill="#fff"/><circle cx="9.8" cy="6" r="3.2" fill="#ef3340"/>',
     br: '<rect width="24" height="24" fill="#009c3b"/><path d="M12 3l10 9-10 9L2 12z" fill="#ffdf00"/><circle cx="12" cy="12" r="4.6" fill="#002776"/><path d="M7.6 11.2q4.4-1.6 8.8 1.6" fill="none" stroke="#fff" stroke-width="1"/>'
   };
+  (function () { var f = D.flags || {}; for (var k in f) { if (Object.prototype.hasOwnProperty.call(f, k)) FLAGS[k] = f[k]; } })();
   function flag(cc) {
     if (!FLAGS[cc]) return '<span class="nm-flag nm-flag-t" aria-hidden="true">' + String(cc || '?').toUpperCase().slice(0, 2) + '</span>';
     return '<span class="nm-flag"><svg viewBox="0 0 24 24" aria-hidden="true">' + FLAGS[cc] + '</svg></span>';
@@ -61,13 +65,20 @@
   }
 
   function applyData(j) {
+    var o = j && j.origin;
+    if (o && o.cc && typeof o.lat === 'number' && typeof o.lon === 'number') {
+      HUB.cc = o.cc; HUB.lat = o.lat; HUB.lon = o.lon;
+      HUB.city = (D.en && D.en[o.cc]) || o.cc.toUpperCase(); HUB.fa = (D.fa && D.fa[o.cc]) || HUB.city;
+    }
     var list = (j && j.nodes) || [], out = [HUB], by = { tehran: HUB };
     list.forEach(function (n, i) {
-      var cc = String(n.cc || '').toLowerCase(), city = n.city || cc.toUpperCase();
+      var cc = String(n.cc || '').toLowerCase(), city = n.city || (D.en && D.en[cc]) || cc.toUpperCase();
+      var faName = n.city_fa || (n.city ? (D.city && D.city[String(n.city).toLowerCase()]) : (D.fa && D.fa[cc])) || city;
       var s = {
-        id: String(n.id), cc: cc, city: city, fa: n.city_fa || city, lat: n.lat, lon: n.lon,
+        id: String(n.id), cc: cc, city: city, fa: faName, lat: n.lat, lon: n.lon,
         st: n.status === 'down' ? 'down' : 'ok', products: n.products || [], total: n.products_total || 0,
-        stock: n.products_in_stock || 0, last: n.last_check || ''
+        stock: n.products_in_stock || 0, last: n.last_check || '',
+        ms: typeof n.latency_ms === 'number' ? n.latency_ms : null, hist: n.history || []
       };
       s.a = autoAnchor(s, i);
       out.push(s); by[s.id] = s;
@@ -75,7 +86,7 @@
     SERVERS = out; BY = by;
   }
   function signature() {
-    return SERVERS.map(function (s) { return s.id + ':' + s.st + ':' + s.stock + ':' + s.total; }).join('|');
+    return HUB.cc + ':' + SERVERS.map(function (s) { return s.id + ':' + s.st + ':' + s.stock + ':' + s.total + ':' + s.ms; }).join('|');
   }
 
   /* ------------------------------------------------------------- text --- */
@@ -90,7 +101,8 @@
       routes: 'مسیرهای موجود', rec: 'پیشنهادی', gb: 'گیگ', days: 'روز', cur: 'تومان',
       set: 'تنظیمات نمایش', sPk: 'نمایش بسته‌های در حال انتقال', sAnim: 'سرعت انیمیشن بسته‌ها', sTour: 'گردش خودکار دوربین', sTourSec: 'فاصله‌ی گردش',
       speeds: ['کند', 'متوسط', 'سریع'], auto: 'بروزرسانی خودکار', save: 'ذخیره تنظیمات', saved: 'ذخیره شد',
-      note: 'وضعیت گره‌ها از بررسی دوره‌ای سرورهای فروشگاه گرفته می‌شود.'
+      ping: 'پینگ', uptime: 'آپتایم', hist: 'تاریخچه‌ی پینگ', histWait: 'تاریخچه در حال جمع‌آوری است…', buyHere: 'نمایش پلن‌های این لوکیشن', ms: 'ms', hint: 'بزرگ‌نمایی: Ctrl+اسکرول یا دوبار کلیک',
+      note: 'وضعیت و پینگ از بررسی دوره‌ای سرورهای فروشگاه گرفته می‌شود (پینگ از سمت سرور فروشگاه است، نه اینترنت شما).'
     },
     en: {
       title: 'Live Network Map', sub: 'Real store servers and the status of each location | In-stock products on every route',
@@ -102,7 +114,8 @@
       routes: 'Available routes', rec: 'Recommended', gb: 'GB', days: 'days', cur: 'Toman',
       set: 'Display settings', sPk: 'Show moving packets', sAnim: 'Packet animation speed', sTour: 'Automatic camera tour', sTourSec: 'Tour interval',
       speeds: ['Slow', 'Medium', 'Fast'], auto: 'Auto refresh', save: 'Save settings', saved: 'Saved',
-      note: 'Node status comes from periodic checks of the store servers.'
+      ping: 'Ping', uptime: 'Uptime', hist: 'Ping history', histWait: 'Collecting history…', buyHere: 'Show plans for this location', ms: 'ms', hint: 'Ctrl + scroll or double-click to zoom',
+      note: 'Status and ping come from periodic checks run by the store server (not from your own connection).'
     }
   };
 
@@ -166,12 +179,75 @@
     return landPromise;
   }
 
+  /* ------------------------------------------------- countries (borders) --- */
+  var CTRY = null, ctryPromise = null;
+  function parseCountries(arr) {
+    return arr.map(function (c) {
+      var rings = parseLand(c.d), bb = [180, 90, -180, -90];
+      rings.forEach(function (r) { r.forEach(function (q) {
+        if (q[0] < bb[0]) bb[0] = q[0]; if (q[1] < bb[1]) bb[1] = q[1];
+        if (q[0] > bb[2]) bb[2] = q[0]; if (q[1] > bb[3]) bb[3] = q[1];
+      }); });
+      return { n: c.n, rings: rings, bb: bb };
+    });
+  }
+  function ensureCountries() {
+    if (CTRY) return Promise.resolve(CTRY);
+    if (ctryPromise) return ctryPromise;
+    ctryPromise = new Promise(function (resolve) {
+      try {
+        var c = localStorage.getItem(LS_CTRY);
+        if (c) { CTRY = parseCountries(JSON.parse(c)); resolve(CTRY); return; }
+      } catch (e) {}
+      fetch('/api/web/world-countries', { credentials: 'same-origin' }).then(function (r) { return r.json(); }).then(function (j) {
+        if (j && j.ok && j.countries && j.countries.length) {
+          try { localStorage.setItem(LS_CTRY, JSON.stringify(j.countries)); } catch (e) {}
+          CTRY = parseCountries(j.countries);
+          resolve(CTRY);
+        } else resolve(null);
+      }).catch(function () { resolve(null); });
+    });
+    return ctryPromise;
+  }
+  function inRing(lon, lat, ring) {
+    var ins = false, i, j = ring.length - 1;
+    for (i = 0; i < ring.length; i++) {
+      var xi = ring[i][0], yi = ring[i][1], xj = ring[j][0], yj = ring[j][1];
+      if ((yi > lat) !== (yj > lat) && lon < (xj - xi) * (lat - yi) / (yj - yi) + xi) ins = !ins;
+      j = i;
+    }
+    return ins;
+  }
+  /* index کشوری که نقطه داخلش است؛ اگر نبود (جزایر کوچک/ساحل) نزدیک‌ترین کشور تا ۵ درجه. */
+  function countryAt(lon, lat) {
+    if (!CTRY) return -1;
+    var i, j, r, best = -1, bd = 25;
+    for (i = 0; i < CTRY.length; i++) {
+      var c = CTRY[i], b = c.bb;
+      if (lon >= b[0] && lon <= b[2] && lat >= b[1] && lat <= b[3]) {
+        for (j = 0; j < c.rings.length; j++) if (inRing(lon, lat, c.rings[j])) return i;
+      }
+    }
+    for (i = 0; i < CTRY.length; i++) {
+      var cc = CTRY[i];
+      if (lon < cc.bb[0] - 6 || lon > cc.bb[2] + 6 || lat < cc.bb[1] - 6 || lat > cc.bb[3] + 6) continue;
+      for (j = 0; j < cc.rings.length; j++) {
+        r = cc.rings[j];
+        for (var k = 0; k < r.length; k++) {
+          var d = (r[k][0] - lon) * (r[k][0] - lon) + (r[k][1] - lat) * (r[k][1] - lat);
+          if (d < bd) { bd = d; best = i; }
+        }
+      }
+    }
+    return best;
+  }
+
   /* ----------------------------------------------------------- widget --- */
   function createNetworkMap() {
     var fa = document.documentElement.lang !== 'en';
     var T = fa ? TXT.fa : TXT.en;
     var set = loadSettings();
-    var state = { sel: '', q: '', z: 1, tx: 0, ty: 0, H: 625, k: 0.8, last: new Date(), loaded: false, failed: false };
+    var state = { sel: '', q: '', z: 1, pz: 1, tx: 0, ty: 0, H: 625, k: 0.8, last: new Date(), loaded: false, failed: false };
     var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     var mq = window.matchMedia ? window.matchMedia(MOBILE_MQ) : { matches: false };
     var timer = null;
@@ -210,6 +286,7 @@
             '<div class="nm-list-scroll"><ul data-k="list"></ul></div></aside>' +
           '<div class="nm-card nm-mapcard"><div class="nm-map" data-k="map">' +
             '<div class="nm-stage" data-k="stage"><svg class="nm-svg" data-k="svg" preserveAspectRatio="none" aria-hidden="true"></svg><div class="nm-nodes" data-k="nodes"></div></div>' +
+            '<div class="nm-tip" data-k="tip" hidden></div><span class="nm-hint">' + T.hint + '</span>' +
             '<div class="nm-zoom"><button type="button" data-act="zin" aria-label="' + T.zin + '">' + icon('plus') + '</button><button type="button" data-act="zout" aria-label="' + T.zout + '">' + icon('minus') + '</button>' +
               '<button type="button" class="loc" data-act="zhome" aria-label="' + T.zhome + '">' + icon('locate') + '</button></div>' +
           '</div>' +
@@ -233,7 +310,9 @@
           '<section class="nm-card nm-details"><div class="nm-det-h"><h3>' + T.det + '</h3><span class="nm-badge" data-k="badge"></span></div>' +
             '<div class="nm-chip" data-k="chip"></div>' +
             '<div class="nm-metrics" data-k="metrics"></div>' +
-            '<div class="nm-plist-wrap"><small>' + T.plist + '</small><div class="nm-plist" data-k="plist"></div></div></section>' +
+            '<div class="nm-spark-wrap" data-k="spark"></div>' +
+            '<div class="nm-plist-wrap"><small>' + T.plist + '</small><div class="nm-plist" data-k="plist"></div></div>' +
+            '<button class="nm-buy" type="button" data-filter="1">' + T.buyHere + '</button></section>' +
         '</div>' +
         '<p class="nm-note">' + T.note + '</p>' +
       '</div>';
@@ -243,10 +322,21 @@
       map: $('map'), stage: $('stage'), svg: $('svg'), nodes: $('nodes'), list: $('list'), q: $('q'), routes: $('routes'),
       badge: $('badge'), chip: $('chip'), metrics: $('metrics'), plist: $('plist'), time: $('time'),
       prodStat: $('prodStat'), locStat: $('locStat'), offStat: $('offStat'), onStat: $('onStat'),
-      interval: $('interval'), speedLbl: $('speedLbl'), saveTxt: $('saveTxt')
+      interval: $('interval'), tip: $('tip'), spark: $('spark'), speedLbl: $('speedLbl'), saveTxt: $('saveTxt')
     };
 
-    var mxL = mX(B.L), mxR = mX(B.R), myT = mY(B.T), myB = mY(B.B);
+    var mxL, mxR, myT, myB;
+    function fitBounds() {
+      var b = { L: B0.L, R: B0.R, T: B0.T, B: B0.B };
+      SERVERS.forEach(function (s) {
+        if (typeof s.lon !== 'number' || typeof s.lat !== 'number') return;
+        b.L = Math.min(b.L, s.lon - 14); b.R = Math.max(b.R, s.lon + 22);
+        b.T = Math.min(80, Math.max(b.T, s.lat + 9)); b.B = Math.max(-80, Math.min(b.B, s.lat - 9));
+      });
+      B = b;
+      mxL = mX(B.L); mxR = mX(B.R); myT = mY(B.T); myB = mY(B.B);
+    }
+    fitBounds();
     function proj(lon, lat) {
       return [(mX(lon) - mxL) / (mxR - mxL) * W, (myT - mY(lat)) / (myT - myB) * state.H];
     }
@@ -278,8 +368,42 @@
       return out.join('');
     }
 
+    function ringsD(list) {
+      var out = [], i, j, k, ring, pts, keep, p;
+      for (i = 0; i < list.length; i++) {
+        ring = list[i]; keep = false; pts = [];
+        for (j = 0; j < ring.length; j++) {
+          if (ring[j][0] > B.L - 6 && ring[j][0] < B.R + 6 && ring[j][1] > B.B - 6 && ring[j][1] < B.T + 6) keep = true;
+          p = proj(ring[j][0], ring[j][1]);
+          pts.push((j ? 'L' : 'M') + p[0].toFixed(1) + ',' + p[1].toFixed(1));
+        }
+        if (keep && pts.length > 2) out.push(pts.join('') + 'Z');
+      }
+      return out.join('');
+    }
+    function countriesSvg(asLand) {
+      if (!CTRY) return '';
+      var mark = {}, all = [], g = '<g class="nm-ctry">';
+      CTRY.forEach(function (c) { c.rings.forEach(function (r) { all.push(r); }); });
+      g += '<path class="ctry-b' + (asLand ? ' land-fill' : '') + '" d="' + ringsD(all) + '"/>';
+      var hubI = countryAt(HUB.lon, HUB.lat);
+      if (hubI > -1) mark[hubI] = 'hub';
+      nodes().forEach(function (s) {
+        var i = countryAt(s.lon, s.lat);
+        if (i < 0) return;
+        if (mark[i] === 'hub') return;
+        var st = s.st === 'down' ? 'bad' : 'ok';
+        if (!mark[i] || (mark[i] === 'bad' && st === 'ok')) mark[i] = st;
+      });
+      Object.keys(mark).forEach(function (i) {
+        g += '<path class="ctry-on c-' + mark[i] + '" d="' + ringsD(CTRY[i].rings) + '"/>';
+      });
+      return g + '</g>';
+    }
+
     function drawMap() {
       state.H = mq.matches ? 760 : 625;
+      fitBounds();
       el.svg.setAttribute('viewBox', '0 0 ' + W + ' ' + state.H);
       var hub = proj(HUB.lon, HUB.lat);
       var h = '<defs>' +
@@ -293,11 +417,12 @@
       });
       h += '</defs><g class="nm-grid">';
       var lon, lat, p0, p1;
-      for (lon = -120; lon <= 160; lon += 20) { p0 = proj(lon, B.T); p1 = proj(lon, B.B); h += '<line x1="' + p0[0].toFixed(1) + '" y1="0" x2="' + p1[0].toFixed(1) + '" y2="' + state.H + '"/>'; }
-      for (lat = -40; lat <= 70; lat += 20) { p0 = proj(B.L, lat); h += '<line x1="0" y1="' + p0[1].toFixed(1) + '" x2="' + W + '" y2="' + p0[1].toFixed(1) + '"/>'; }
+      for (lon = Math.ceil(B.L / 20) * 20; lon <= B.R; lon += 20) { p0 = proj(lon, B.T); p1 = proj(lon, B.B); h += '<line x1="' + p0[0].toFixed(1) + '" y1="0" x2="' + p1[0].toFixed(1) + '" y2="' + state.H + '"/>'; }
+      for (lat = Math.ceil(B.B / 20) * 20; lat <= B.T; lat += 20) { p0 = proj(B.L, lat); h += '<line x1="0" y1="' + p0[1].toFixed(1) + '" x2="' + W + '" y2="' + p0[1].toFixed(1) + '"/>'; }
       h += '</g>';
       var d = landPathD();
       if (d) h += '<g class="nm-land"><path class="land-fill" d="' + d + '"/><path class="land-dots" d="' + d + '" fill="url(#nm-dots)"/></g>';
+      h += countriesSvg(!d);
       h += '<g class="nm-routes-g">';
       nodes().forEach(function (s) {
         var p = proj(s.lon, s.lat), dd = arc(hub, p);
@@ -333,6 +458,38 @@
       pkCircles.forEach(function (c) { c.setAttribute('r', r); });
     }
 
+    var ANCH = ['tr', 'br', 'tl', 'bl', 'r', 't', 'b'];
+    function overlap(a, b) { return a[0] < b[2] && a[2] > b[0] && a[1] < b[3] && a[3] > b[1]; }
+    function placeLabels() {
+      var w = el.map.clientWidth || 800, hh = el.map.clientHeight || 500, kz = w / W * state.z;
+      var sw = w * state.z, sh = hh * state.z, mob = mq.matches, lh = 26, placed = [];
+      var order = SERVERS.slice().sort(function (a, b) { return (b.hub ? 1e6 : b.id === state.sel ? 1e5 : b.stock) - (a.hub ? 1e6 : a.id === state.sel ? 1e5 : a.stock); });
+      var pins = {};
+      SERVERS.forEach(function (s) { var p = proj(s.lon, s.lat), x = p[0] * kz, y = p[1] / state.H * sh; pins[s.id] = [x, y]; placed.push([x - 9, y - 9, x + 9, y + 9]); });
+      var els = {};
+      Array.prototype.forEach.call(el.nodes.querySelectorAll('[data-node]'), function (n) { els[n.getAttribute('data-node')] = n.querySelector('.nm-label'); });
+      order.forEach(function (s) {
+        var lab = els[s.id]; if (!lab) return;
+        var x = pins[s.id][0], y = pins[s.id][1];
+        var lw = (mob ? 0 : 28) + 6 + Math.max(String(s.city).length * 7, 40);
+        var best = null, i, b, ok, j;
+        for (i = 0; i < ANCH.length && !best; i++) {
+          var a = ANCH[i];
+          b = a === 'tr' ? [x + 10, y - 9 - lh, x + 10 + lw, y - 9] : a === 'tl' ? [x - 10 - lw, y - 9 - lh, x - 10, y - 9] :
+              a === 'br' ? [x + 10, y + 9, x + 10 + lw, y + 9 + lh] : a === 'bl' ? [x - 10 - lw, y + 9, x - 10, y + 9 + lh] :
+              a === 'r' ? [x + 14, y - lh / 2, x + 14 + lw, y + lh / 2] : a === 't' ? [x - lw / 2, y - 14 - lh, x + lw / 2, y - 14] :
+              [x - lw / 2, y + 14, x + lw / 2, y + 14 + lh];
+          if (b[0] < 0 || b[1] < 0 || b[2] > sw || b[3] > sh) continue;
+          ok = true;
+          for (j = 0; j < placed.length; j++) if (overlap(b, placed[j])) { ok = false; break; }
+          if (ok) best = { a: a, b: b };
+        }
+        ANCH.concat(['']).forEach(function (a) { if (a) lab.classList.remove('a-' + a); });
+        if (best) { lab.classList.add('a-' + best.a); lab.classList.remove('lh'); placed.push(best.b); }
+        else { lab.classList.add('a-' + (s.a || 'tr')); lab.classList.add('lh'); }
+      });
+    }
+
     function drawNodes() {
       var h = '';
       SERVERS.forEach(function (s) {
@@ -347,6 +504,7 @@
         n.style.left = (p[0] / W * 100).toFixed(3) + '%';
         n.style.top = (p[1] / state.H * 100).toFixed(3) + '%';
       });
+      placeLabels();
     }
 
     function applyView() {
@@ -355,10 +513,12 @@
       state.ty = Math.min(0, Math.max(hh - hh * state.z, state.ty));
       el.stage.style.transform = 'translate(' + state.tx.toFixed(1) + 'px,' + state.ty.toFixed(1) + 'px) scale(' + state.z.toFixed(3) + ')';
       el.stage.style.setProperty('--iz', (1 / state.z).toFixed(4));
+      el.map.classList.toggle('zoomed', state.z > 1.02);
+      if (Math.abs(state.z - state.pz) > 0.12) { state.pz = state.z; clearTimeout(state.pt); state.pt = setTimeout(placeLabels, 90); }
       sizePackets();
     }
     function zoomTo(z2, cx, cy) {
-      z2 = Math.max(1, Math.min(3.2, z2));
+      z2 = Math.max(1, Math.min(6, z2));
       var r = z2 / state.z;
       state.tx = cx - (cx - state.tx) * r;
       state.ty = cy - (cy - state.ty) * r;
@@ -416,44 +576,118 @@
       tour.t = setInterval(tourNext, set.tourSec * 1000);
     }
 
-    var drag = null;
+    var drag = null, ptrs = {}, pinch = null;
+    function mapPos(e) { var r = el.map.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
     el.map.addEventListener('pointerdown', function (e) {
       holdTour();
-      if (state.z <= 1 || e.target.closest('.nm-zoom,.nm-node,.nm-legend')) return;
+      if (e.target.closest('.nm-zoom,.nm-node,.nm-legend')) return;
+      ptrs[e.pointerId] = { x: e.clientX, y: e.clientY };
+      var ids = Object.keys(ptrs);
+      if (ids.length === 2) {
+        cancelAnimationFrame(tour.raf); drag = null;
+        var p1 = ptrs[ids[0]], p2 = ptrs[ids[1]];
+        pinch = { d: Math.hypot(p1.x - p2.x, p1.y - p2.y) || 1, z: state.z };
+        return;
+      }
+      if (state.z <= 1) return;
       cancelAnimationFrame(tour.raf);
       drag = { x: e.clientX, y: e.clientY, tx: state.tx, ty: state.ty, id: e.pointerId };
       try { el.map.setPointerCapture(e.pointerId); } catch (err) {}
       el.map.classList.add('drag');
     });
     el.map.addEventListener('pointermove', function (e) {
+      if (ptrs[e.pointerId]) ptrs[e.pointerId] = { x: e.clientX, y: e.clientY };
+      if (pinch) {
+        var ids = Object.keys(ptrs);
+        if (ids.length >= 2) {
+          var p1 = ptrs[ids[0]], p2 = ptrs[ids[1]], r = el.map.getBoundingClientRect();
+          zoomTo(pinch.z * (Math.hypot(p1.x - p2.x, p1.y - p2.y) || 1) / pinch.d, (p1.x + p2.x) / 2 - r.left, (p1.y + p2.y) / 2 - r.top);
+        }
+        return;
+      }
       if (!drag || e.pointerId !== drag.id) return;
       state.tx = drag.tx + (e.clientX - drag.x);
       state.ty = drag.ty + (e.clientY - drag.y);
       applyView();
     });
-    function endDrag(e) { if (drag && (!e || e.pointerId === drag.id)) { drag = null; el.map.classList.remove('drag'); } }
+    function endDrag(e) {
+      if (e) delete ptrs[e.pointerId];
+      if (Object.keys(ptrs).length < 2) pinch = null;
+      if (drag && (!e || e.pointerId === drag.id)) { drag = null; el.map.classList.remove('drag'); }
+    }
     el.map.addEventListener('pointerup', endDrag);
     el.map.addEventListener('pointercancel', endDrag);
+    el.map.addEventListener('wheel', function (e) {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault(); holdTour();
+      var q = mapPos(e); zoomTo(state.z * Math.exp(-e.deltaY * 0.0022), q.x, q.y);
+    }, { passive: false });
+    el.map.addEventListener('dblclick', function (e) {
+      if (e.target.closest('.nm-zoom,.nm-node,.nm-legend')) return;
+      holdTour(); var q = mapPos(e); zoomTo(state.z * 1.8, q.x, q.y);
+    });
 
+    /* tooltip روی پین‌ها (دسکتاپ) */
+    function showTip(id) {
+      var s = BY[id]; if (!s) return;
+      var w = el.map.clientWidth, hh = el.map.clientHeight, p = proj(s.lon, s.lat);
+      var x = p[0] / W * w * state.z + state.tx, y = p[1] / state.H * hh * state.z + state.ty;
+      var down = s.st === 'down';
+      el.tip.innerHTML = '<div class="nm-tip-h">' + flag(s.cc) + '<b>' + esc(name(s)) + '</b></div>' +
+        (s.hub ? '' : '<div class="nm-tip-r"><span class="' + (down ? 'c-bad' : 'c-ok') + '">' + (down ? T.down : T.active) + '</span>' +
+          (s.ms != null ? '<span class="' + pingCls(s.ms) + '">' + num(s.ms) + ' ' + T.ms + '</span>' : '') +
+          '<span>' + num(s.stock) + '/' + num(s.total) + ' ' + T.products + '</span></div>');
+      el.tip.hidden = false;
+      el.tip.classList.toggle('below', y < 110);
+      el.tip.style.left = Math.max(90, Math.min(w - 90, x)).toFixed(0) + 'px';
+      el.tip.style.top = (y < 110 ? y + 18 : y - 16).toFixed(0) + 'px';
+    }
+    el.nodes.addEventListener('mouseover', function (e) { var n = e.target.closest ? e.target.closest('[data-node]') : null; if (n) showTip(n.getAttribute('data-node')); });
+    el.nodes.addEventListener('mouseout', function () { el.tip.hidden = true; });
+    el.nodes.addEventListener('focusin', function (e) { var n = e.target.closest ? e.target.closest('[data-node]') : null; if (n) showTip(n.getAttribute('data-node')); });
+    el.nodes.addEventListener('focusout', function () { el.tip.hidden = true; });
+
+    function pingCls(ms) { return ms == null ? '' : ms < 150 ? 'c-ok' : ms < 300 ? 'c-warn' : 'c-bad'; }
+    function recId() {
+      var c = nodes().filter(function (s) { return s.st !== 'down' && s.stock > 0; });
+      c.sort(function (a, b) { return ((a.ms == null ? 9999 : a.ms) - (b.ms == null ? 9999 : b.ms)) || (b.stock - a.stock); });
+      return c.length ? c[0].id : '';
+    }
+    function sparkSvg(s) {
+      var pts = s.hist || [], valid = pts.filter(function (v) { return typeof v === 'number'; });
+      if (pts.length < 3 || !valid.length) return '<small>' + T.histWait + '</small>';
+      var mx = Math.max(50, Math.max.apply(null, valid)) * 1.15, n = pts.length, d = '', gap = true, marks = '', up = 0;
+      pts.forEach(function (v, i) {
+        var x = (i / (n - 1) * 100).toFixed(1);
+        if (typeof v === 'number') { up++; d += (gap ? 'M' : 'L') + x + ',' + (28 - v / mx * 26).toFixed(1); gap = false; }
+        else { gap = true; marks += '<rect x="' + (x - 0.8) + '" y="22" width="1.6" height="7" class="nm-dn"/>'; }
+      });
+      return '<small>' + T.hist + ' · ' + T.uptime + ' ' + num(Math.round(up / n * 100)) + '%</small>' +
+        '<svg class="nm-spark" viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true"><path class="nm-ln" d="' + d + '"/>' + marks + '</svg>';
+    }
     function renderList() {
       var q = state.q.trim().toLowerCase();
       var rows = nodes().filter(function (s) { return !q || (s.city + ' ' + s.cc + ' ' + s.fa).toLowerCase().indexOf(q) > -1; });
       el.list.innerHTML = rows.length ? rows.map(function (s) {
         return '<li><button type="button" class="nm-row' + (s.id === state.sel ? ' on' : '') + '" data-sel="' + esc(s.id) + '">' + flag(s.cc) +
-          '<span class="nm-rn">' + esc(fa ? s.fa : tag(s)) + '</span><em class="c-' + (s.st === 'down' ? 'bad' : 'ok') + '">' + num(s.stock) + '/' + num(s.total) + '</em>' +
+          '<span class="nm-rn">' + esc(fa ? s.fa : tag(s)) + '</span>' + (s.ms != null ? '<small class="nm-ms ' + pingCls(s.ms) + '">' + num(s.ms) + '</small>' : '') + '<em class="c-' + (s.st === 'down' ? 'bad' : 'ok') + '">' + num(s.stock) + '/' + num(s.total) + '</em>' +
           '<i class="dot d-' + (s.st === 'down' ? 'bad' : 'ok') + '"></i></button></li>';
       }).join('') : '<li class="nm-none">' + (state.failed ? T.err : state.loaded ? T.nodata : T.empty) + '</li>';
     }
     function renderRoutes() {
-      var top = nodes().slice(0, 4);
-      el.routes.innerHTML = top.length ? top.map(function (s, i) {
+      var rid = recId(), all = nodes().slice(), top = [];
+      all.sort(function (a, b) { return (b.id === rid) - (a.id === rid); });
+      top = all.slice(0, 4);
+      if (state.sel && !top.some(function (x) { return x.id === state.sel; }) && BY[state.sel]) top[3] = BY[state.sel];
+      el.routes.innerHTML = top.length ? top.map(function (s) {
         var on = s.id === state.sel, down = s.st === 'down';
         return '<button type="button" class="nm-route-i' + (on ? ' on' : '') + '" data-sel="' + esc(s.id) + '" role="radio" aria-checked="' + on + '">' +
           '<span class="nm-rr-top">' + flag(s.cc) + '<span class="nm-rr-name">' + esc(fa ? HUB.fa : HUB.city) + '<span class="nm-arr">' + icon('arrow') + '</span>' + esc(name(s)) + '</span>' +
-          (i === 0 && !down && s.stock > 0 ? '<span class="nm-rec">' + T.rec + '</span>' : '') + '<span class="nm-radio"></span></span>' +
+          (s.id === rid && !down ? '<span class="nm-rec">' + T.rec + '</span>' : '') + '<span class="nm-radio"></span></span>' +
           '<span class="nm-rr-m"><span><b>' + num(s.total) + '</b><small>' + T.products + '</small></span>' +
           '<span><b>' + num(s.stock) + '</b><small>' + T.stock + '</small></span>' +
-          '<span><b class="' + (down ? 'c-bad' : 'c-ok') + '">' + (down ? T.down : T.active) + '</b><small>' + T.status + '</small></span></span></button>';
+          '<span><b class="' + (down ? 'c-bad' : 'c-ok') + '">' + (down ? T.down : T.active) + '</b><small>' + T.status + '</small></span>' +
+          '<span><b class="' + pingCls(s.ms) + '">' + (s.ms != null ? num(s.ms) + ' ' + T.ms : '—') + '</b><small>' + T.ping + '</small></span></span></button>';
       }).join('') : '<p class="nm-none">' + (state.failed ? T.err : T.nodata) + '</p>';
     }
 
@@ -468,19 +702,21 @@
       var s = BY[state.sel];
       if (!s || s.hub) {
         el.badge.className = 'nm-badge'; el.badge.innerHTML = '';
-        el.chip.innerHTML = ''; el.metrics.innerHTML = '';
+        el.chip.innerHTML = ''; el.metrics.innerHTML = ''; el.spark.innerHTML = '';
         el.plist.innerHTML = '<p class="nm-none">' + (state.failed ? T.err : T.nodata) + '</p>';
         return;
       }
       var down = s.st === 'down';
       el.badge.className = 'nm-badge ' + (down ? 'down' : 'ok');
       el.badge.innerHTML = '<i></i>' + (down ? T.down : T.active);
-      el.chip.innerHTML = '<span>' + flag(HUB.cc) + '<b>' + esc(fa ? HUB.fa : HUB.city) + ' (IR)</b></span><span class="nm-arr">' + icon('arrow') + '</span><span>' + flag(s.cc) + '<b>' + esc(name(s)) + (s.cc ? ' (' + s.cc.toUpperCase() + ')' : '') + '</b></span>';
+      el.chip.innerHTML = '<span>' + flag(HUB.cc) + '<b>' + esc(fa ? HUB.fa : HUB.city) + ' (' + HUB.cc.toUpperCase() + ')</b></span><span class="nm-arr">' + icon('arrow') + '</span><span>' + flag(s.cc) + '<b>' + esc(name(s)) + (s.cc ? ' (' + s.cc.toUpperCase() + ')' : '') + '</b></span>';
       var c = down ? 'c-bad' : 'c-ok';
       el.metrics.innerHTML =
         '<div><small>' + T.status + '</small><b class="' + c + '">' + (down ? T.down : T.active) + '</b></div>' +
         '<div><small>' + T.stock + '</small><b>' + num(s.stock) + '/' + num(s.total) + '</b></div>' +
+        '<div><small>' + T.ping + '</small><b class="' + pingCls(s.ms) + '">' + (s.ms != null ? num(s.ms) + ' ' + T.ms : '—') + '</b></div>' +
         '<div><small>' + T.checked + '</small><b>' + fmtTime(s.last) + '</b></div>';
+      el.spark.innerHTML = sparkSvg(s);
       el.plist.innerHTML = s.products.length ? s.products.map(productRow).join('') : '<p class="nm-none">' + T.noprod + '</p>';
     }
 
@@ -490,14 +726,26 @@
       Array.prototype.forEach.call(root.querySelectorAll('[data-node]'), function (n) { n.classList.toggle('sel', n.getAttribute('data-node') === id); });
       Array.prototype.forEach.call(root.querySelectorAll('.nm-route'), function (r) { r.classList.toggle('sel', r.getAttribute('data-rid') === id); });
       renderList(); renderRoutes(); renderDetails();
+      placeLabels();
     }
 
+    function countTo(node, to) {
+      if (to == null) { node.textContent = '—'; node._v = null; return; }
+      var from = typeof node._v === 'number' ? node._v : 0; node._v = to;
+      if (reduce || from === to) { node.textContent = num(to); return; }
+      var t0 = performance.now();
+      (function step(now) {
+        var k = Math.min(1, (now - t0) / 650), e = 1 - Math.pow(1 - k, 3);
+        node.textContent = num(Math.round(from + (to - from) * e));
+        if (k < 1 && node.isConnected) requestAnimationFrame(step);
+      })(t0);
+    }
     function setStats() {
       var ns = nodes(), stock = 0, total = 0, off = 0;
       ns.forEach(function (s) { stock += s.stock; total += s.total; if (s.st === 'down') off++; });
       el.prodStat.textContent = state.loaded ? num(stock) + ' / ' + num(total) : '—';
-      el.locStat.textContent = state.loaded ? num(ns.length) : '—';
-      el.offStat.textContent = state.loaded ? num(off) : '—';
+      countTo(el.locStat, state.loaded ? ns.length : null);
+      countTo(el.offStat, state.loaded ? off : null);
       el.onStat.textContent = state.loaded ? num(ns.length - off) + ' / ' + num(ns.length) : '—';
       el.time.textContent = hm(state.last);
     }
@@ -564,7 +812,11 @@
       if (node) { holdTour(); select(node.getAttribute('data-node')); return; }
       var sel = t.closest('[data-sel]');
       if (sel) { holdTour(); select(sel.getAttribute('data-sel')); return; }
-      if (t.closest('[data-plans]')) {
+      if (t.closest('[data-plans],[data-filter]')) {
+        var cur = BY[state.sel];
+        if (cur && !cur.hub) {
+          try { window.dispatchEvent(new CustomEvent('sv:netmap-filter', { detail: { ids: cur.products.map(function (p) { return p.id; }), label: name(cur) } })); } catch (err) {}
+        }
         var plans = document.getElementById('plans');
         if (plans) plans.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth' });
         return;
@@ -598,9 +850,15 @@
     });
 
     ensureLand().then(function (land) { if (land) drawMap(); });
+    ensureCountries().then(function (c) { if (c) drawMap(); });
+    function animState() {
+      var run = tour.visible && !document.hidden;
+      try { if (run) el.svg.unpauseAnimations(); else el.svg.pauseAnimations(); } catch (err) {}
+    }
+    document.addEventListener('visibilitychange', animState);
     if (mq.addEventListener) mq.addEventListener('change', function () { drawMap(); applyView(); });
     if (window.IntersectionObserver) {
-      new IntersectionObserver(function (en) { tour.visible = en[0].isIntersecting; }).observe(root);
+      new IntersectionObserver(function (en) { tour.visible = en[0].isIntersecting; animState(); }).observe(root);
     }
     if (window.ResizeObserver) {
       var lastW = 0;

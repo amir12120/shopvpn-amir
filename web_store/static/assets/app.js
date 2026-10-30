@@ -572,6 +572,16 @@
     controls.appendChild(count);
     controls.appendChild(sortWrap);
     var grid = h("div", { class: "plans" });
+    var locFilter = null;
+    var filterBar = h("div", { class: "catalog-count" });
+    if (window.__svNetmapFilter) window.removeEventListener("sv:netmap-filter", window.__svNetmapFilter);
+    window.__svNetmapFilter = function (ev) {
+      var d = ev && ev.detail;
+      locFilter = d && d.ids && d.ids.length ? { ids: d.ids.map(String), label: d.label || "" } : null;
+      active = "all";
+      draw();
+    };
+    window.addEventListener("sv:netmap-filter", window.__svNetmapFilter);
     function draw() {
       chips.textContent = "";
       [{ id: "all", name: t("all") }].concat(cats).forEach(function (cat) {
@@ -592,6 +602,11 @@
         var bv = Number(b.price) / Math.max(1, Number(b.volume_gb || 0));
         return (discountPercent(b) - discountPercent(a)) || (av - bv);
       });
+      if (locFilter) items = items.filter(function (p) { return locFilter.ids.indexOf(String(p.id)) > -1; });
+      filterBar.textContent = "";
+      if (locFilter) {
+        filterBar.appendChild(h("button", { class: "chip", type: "button", text: (lang === "fa" ? "فقط " : "Only ") + locFilter.label + "  ✕", onclick: function () { locFilter = null; draw(); } }));
+      }
       count.textContent = fmt(items.length) + " " + (lang === "fa" ? "پلن" : "plans");
       grid.textContent = "";
       var featuredId = items.length ? items[0].id : null;
@@ -600,6 +615,7 @@
     draw();
     if (cats.length > 1) box.appendChild(chips);
     box.appendChild(controls);
+    box.appendChild(filterBar);
     box.appendChild(grid);
   }
 
