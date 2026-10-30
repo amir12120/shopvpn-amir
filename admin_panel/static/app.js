@@ -7154,6 +7154,9 @@ const SETTINGS_GROUPS = [
     { key: 'dsub_show_qr', label: 'نمایش QR', type: 'bool' },
     { key: 'dsub_show_apps', label: 'نمایش برنامه‌ها', type: 'bool' },
     { key: 'dsub_show_faq', label: 'نمایش بخش عیب‌یابی', type: 'bool' },
+    { key: 'dsub_custom_template_enabled', label: 'استفاده از قالب اختصاصی (HTML) برای صفحه ساب', type: 'bool' },
+    { key: '_dsub_template_tools', label: 'ابزار قالب اختصاصی', type: 'sub_template_tools' },
+    { key: 'dsub_custom_template', label: 'کد HTML قالب اختصاصی (باید شامل __DATA__ باشد؛ خالی = قالب پیش‌فرض)', type: 'code' },
   ]},
 
   // ------------------------------------------------------------ پرداخت و مالی
@@ -7334,6 +7337,22 @@ function settingsFieldHtml(f, settings) {
       <span>${esc(settingsUiText(f.label))}</span>
       <button type="button" class="btn btn-sm push-test-btn">ارسال پوش تست</button>
     </label>`;
+  }
+  if (f.type === 'sub_template_tools') {
+    return `<label class="field">
+      <span>${esc(settingsUiText(f.label))}</span>
+      <span class="card-sub">قالب اختصاصی فقط وقتی اعمال می‌شود که کلید بالا روشن و کد معتبر باشد؛ در غیر این‌صورت (یا اگر خطایی پیش بیاید) خودکار قالب پیش‌فرض نمایش داده می‌شود.</span>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+        <button type="button" class="btn btn-sm sub-tpl-default-btn">⬇️ پر کردن با قالب پیش‌فرض (برای ویرایش)</button>
+        <button type="button" class="btn btn-sm sub-tpl-upload-btn">📤 آپلود فایل .html</button>
+        <input type="file" class="sub-tpl-upload-input" accept=".html,.htm,text/html" hidden>
+        <button type="button" class="btn btn-sm sub-tpl-guide-btn">📖 راهنمای متغیرها</button>
+      </div>
+    </label>`;
+  }
+  if (f.type === 'code') {
+    return `<label class="field"><span>${esc(settingsUiText(f.label))}</span>
+      <textarea class="input" rows="14" dir="ltr" spellcheck="false" style="font-family:monospace;font-size:12px;white-space:pre" data-key="${f.key}" data-type="text">${esc(val)}</textarea></label>`;
   }
   if (f.type === 'push_guide_button') {
     return `<label class="field">
@@ -7709,7 +7728,81 @@ function extractGoogleServicesJson(text) {
   };
 }
 
+function _subTemplateGuideHtml() {
+  const row = (k, d) => `<tr><td dir="ltr"><code>${esc(k)}</code></td><td>${esc(d)}</td></tr>`;
+  return `<div class="card-sub" style="line-height:2">
+    <p>قالب یک فایل HTML کامل است. سرور این چهار نشانه را جایگزین می‌کند:</p>
+    <table class="tbl"><tbody>
+      ${row('__DATA__', 'آبجکت JSON اطلاعات اشتراک؛ داخل script مثل const D=__DATA__; بگذار (فقط یک‌بار)')}
+      ${row('__TITLE__', 'عنوان صفحه (برای تگ title)')}
+      ${row('__THEME__', 'auto / light / dark')}
+      ${row('__NONCE__', 'اختیاری؛ به تگ‌های script بدون nonce خودکار اضافه می‌شود')}
+    </tbody></table>
+    <p style="margin-top:12px">فیلدهای داخل <code dir="ltr">D</code>:</p>
+    <table class="tbl"><tbody>
+      ${row('user, brand, logo', 'نام سرویس، نام برند، آدرس لوگو (https)')}
+      ${row('state', 'active / limited / expired / disabled ...')}
+      ${row('used, total', 'مصرف و حجم کل به گیگابایت (total=null یعنی نامحدود)')}
+      ${row('expire, daysLeft, planDays, created, now', 'زمان‌ها (ثانیه‌ی یونیکس) و روز باقی‌مانده')}
+      ${row('notice, support, footer, theme', 'اعلان، لینک پشتیبانی، متن پایین، تم')}
+      ${row('sub', 'لینک ساب کاربر')}
+      ${row('show.{configs,chart,qr,apps,faq}', 'کلیدهای نمایش بخش‌ها از تنظیمات')}
+      ${row('configs[] = {n,f,p,u}', 'نام، پرچم، پروتکل و لینک هر کانفیگ')}
+      ${row('apps[]', 'برنامه‌ها به تفکیک سیستم‌عامل')}
+      ${row('faq[]', 'جفت‌های [سوال، جواب]')}
+      ${row('series', 'نمودار مصرف {labels, values}')}
+      ${row('live', 'آیا اطلاعات زنده از پنل گرفته شد')}
+    </tbody></table>
+    <p style="margin-top:12px">محدودیت‌های امنیتی (CSP): فقط اسکریپت inline مجاز است؛ اسکریپت/CDN خارجی و درخواست شبکه (fetch) مسدود است. فونت از Google Fonts و تصویر از https یا data: مجاز است. QR کل لینک: <code dir="ltr">/s/&lt;token&gt;/qr.png</code> و QR کانفیگ شماره‌ی N: <code dir="ltr">?i=N</code>.</p>
+    <p>ساده‌ترین راه: «پر کردن با قالب پیش‌فرض» را بزن، ظاهرش را ویرایش کن، ذخیره کن و پیش‌نمایش زنده را ببین. می‌توانی فایل آماده را هم با «آپلود فایل .html» بگذاری؛ فایل باید تک‌فایل باشد (CSS/JS/عکس داخل خودش؛ عکس‌ها به‌صورت data:).</p>
+  </div>`;
+}
+
 function bindSettingsGroupEvents(root) {
+  $$('.sub-tpl-guide-btn', root).forEach((btn) => {
+    btn.addEventListener('click', () => openModal('📖 راهنمای قالب اختصاصی صفحه ساب', _subTemplateGuideHtml(), null, { wide: true }));
+  });
+  $$('.sub-tpl-upload-btn', root).forEach((btn) => {
+    const input = btn.parentElement.querySelector('.sub-tpl-upload-input');
+    if (!input) return;
+    btn.addEventListener('click', () => input.click());
+    input.addEventListener('change', async () => {
+      const file = input.files && input.files[0];
+      input.value = '';
+      if (!file) return;
+      const ta = $('textarea[data-key="dsub_custom_template"]', root);
+      if (!ta) return;
+      if (file.size > 400000) { toast('حجم فایل بیش از ۴۰۰ کیلوبایت است.'); return; }
+      try {
+        const text = await file.text();
+        if (!text.includes('__DATA__')) { toast('این فایل شامل __DATA__ نیست؛ قالب معتبر نیست (راهنمای متغیرها را ببین).'); return; }
+        if (ta.value.trim() && !confirm('متن فعلی قالب با محتوای فایل جایگزین شود؟')) return;
+        ta.value = text;
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+        toast('فایل در کادر قرار گرفت؛ برای ثبت «ذخیره تغییرات» را بزن.');
+      } catch (e) {
+        handleErr(e);
+      }
+    });
+  });
+  $$('.sub-tpl-default-btn', root).forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const ta = $('textarea[data-key="dsub_custom_template"]', root);
+      if (!ta) return;
+      if (ta.value.trim() && !confirm('متن فعلی قالب با قالب پیش‌فرض جایگزین شود؟')) return;
+      btn.disabled = true;
+      try {
+        const res = await fetch('/api/settings/sub-page-template/default', { credentials: 'same-origin' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        ta.value = await res.text();
+        toast('قالب پیش‌فرض در کادر قرار گرفت؛ ویرایش کن و «ذخیره تغییرات» را بزن.');
+      } catch (e) {
+        handleErr(e);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
   $$('.push-guide-btn', root).forEach((btn) => {
     btn.addEventListener('click', () => openModal('📖 راهنمای کامل فعال‌سازی پوش نوتیف', _pushNotifGuideHtml(), null, { wide: true }));
   });
@@ -7801,6 +7894,8 @@ async function collectAndSaveSettings(root, btn) {
       await apiPost('/settings', item);
     }
     toast('تنظیمات ذخیره شد.');
+    const prevFrame = $('#sub-page-preview-frame', root);
+    if (prevFrame) { try { prevFrame.contentWindow.location.reload(); } catch (e) { prevFrame.src = prevFrame.src; } }
   } catch (e) {
     handleErr(e);
   } finally {
