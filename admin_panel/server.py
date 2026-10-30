@@ -6287,6 +6287,17 @@ def api_set_setting(body: SettingBody, admin=Depends(require_permission("setting
         _err = _ds.validate_custom_template(body.value)
         if _err:
             raise HTTPException(400, _err)
+    if body.key == "netmap_locations" and (body.value or "").strip():
+        import json as _json
+        try:
+            _data = _json.loads(body.value)
+            assert isinstance(_data, list)
+            for _o in _data:
+                float(_o["lat"]); float(_o["lon"])
+                if not (_o.get("product_ids") or _o.get("match")):
+                    raise ValueError("product_ids")
+        except Exception:
+            raise HTTPException(400, "فرمت JSON نامعتبر است: لیستی از آبجکت‌ها با lat و lon و (product_ids یا match) لازم است")
     db.set_setting(body.key, body.value)
     _logged = f"<{len(body.value)} chars>" if body.key == "dsub_custom_template" else body.value
     db.log_admin_action(admin["id"], "setting_change", f"{body.key}={_logged} (پنل وب - {admin['username']})", "setting", body.key)
