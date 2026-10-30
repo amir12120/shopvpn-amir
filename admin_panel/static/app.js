@@ -7225,6 +7225,9 @@ const SETTINGS_GROUPS = [
     { key: 'custom_config_duration_days', label: 'مدت اعتبار (روز)', type: 'number' },
     { key: 'btn_custom_config', label: 'متن دکمه ساخت کانفیگ شخصی', type: 'text' },
   ]},
+  { tab: 'services', title: '🗺 نقشه زنده شبکه (فروشگاه وب)', fields: [
+    { key: 'netmap_locations', label: 'اصلاح دستی مکان سرورها (JSON). مثال: [{"product_ids":[3,4],"cc":"de","city":"Frankfurt","city_fa":"فرانکفورت","lat":50.11,"lon":8.68}] — به‌جای product_ids می‌توان "match":"بخشی از نام محصول" گذاشت. خالی = تشخیص خودکار', type: 'textarea' },
+  ]},
   { tab: 'services', title: '🧾 نمایش دکمه‌های حساب کاربری', fields: [
     { key: 'acct_show_orders', label: 'نمایش «سرویس‌ها و سفارش‌های من»', type: 'bool' },
     { key: 'acct_show_referral', label: 'نمایش «زیرمجموعه‌گیری من»', type: 'bool' },

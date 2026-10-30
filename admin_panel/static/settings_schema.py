@@ -159,6 +159,12 @@ SETTINGS_FORM_SECTIONS = [
                 ],
             },
             {
+                "title": "🗺 نقشه زنده شبکه (فروشگاه وب)",
+                "fields": [
+                    {"key": "netmap_locations", "label": "اصلاح دستی مکان سرورها (JSON: product_ids یا match + cc, city, city_fa, lat, lon)", "type": "textarea"},
+                ],
+            },
+            {
                 "title": "🧾 نمایش دکمه‌های حساب کاربری",
                 "fields": [
                     {"key": "acct_show_orders", "label": "نمایش «سرویس‌ها و سفارش‌های من»", "type": "bool"},
