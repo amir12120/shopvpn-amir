@@ -6904,43 +6904,10 @@ function openPanelEditModal(server) {
       ${PANEL_SUB_BASE_URL_TYPES.includes(server.panel_type) ? `
         <input class="input" id="pe-suburl" placeholder="لینک Subscription" value="${esc(server.xui_sub_base_url || '')}" style="direction:ltr;text-align:left">
       ` : ''}
-      <div style="font-size:12px;opacity:.75">موقعیت روی نقشه‌ی فروشگاه ${server.geo_manual ? '(تنظیم دستی)' : '(تشخیص خودکار از IP)'}</div>
-      <div class="form-row">
-        <input class="input" id="pe-gcc" placeholder="کد کشور (مثلاً de)" maxlength="2" value="${esc(server.geo_cc || '')}" style="direction:ltr;text-align:left">
-        <input class="input" id="pe-gcity" placeholder="شهر (انگلیسی)" value="${esc(server.geo_city || '')}" style="direction:ltr;text-align:left">
-        <input class="input" id="pe-gcityfa" placeholder="شهر (فارسی)" value="${esc(server.geo_city_fa || '')}">
-      </div>
-      <div class="form-row">
-        <input class="input" id="pe-glat" placeholder="عرض جغرافیایی" value="${server.geo_lat == null ? '' : esc(server.geo_lat)}" style="direction:ltr;text-align:left">
-        <input class="input" id="pe-glon" placeholder="طول جغرافیایی" value="${server.geo_lon == null ? '' : esc(server.geo_lon)}" style="direction:ltr;text-align:left">
-        <button class="btn btn-sm" id="pe-gdetect" type="button">تشخیص از IP</button>
-      </div>
       <button class="btn btn-primary" id="pe-save">ذخیره</button>
     </div>`, (body, close) => {
-    $('#pe-gdetect', body).addEventListener('click', async () => {
-      try {
-        const g = await apiPost(`/panel-servers/${server.id}/geo/detect`);
-        $('#pe-gcc', body).value = g.cc || ''; $('#pe-gcity', body).value = g.city || '';
-        $('#pe-glat', body).value = g.lat; $('#pe-glon', body).value = g.lon;
-        toast('موقعیت تشخیص داده شد؛ برای اعمال ذخیره را بزن.');
-      } catch (e) { handleErr(e); }
-    });
     $('#pe-save', body).addEventListener('click', async () => {
       const payload = { name: $('#pe-name', body).value.trim(), api_url: $('#pe-url', body).value.trim() };
-      const geoNow = {
-        geo_cc: $('#pe-gcc', body).value.trim(), geo_city: $('#pe-gcity', body).value.trim(),
-        geo_city_fa: $('#pe-gcityfa', body).value.trim(),
-        geo_lat: $('#pe-glat', body).value.trim(), geo_lon: $('#pe-glon', body).value.trim(),
-      };
-      const geoWas = {
-        geo_cc: server.geo_cc || '', geo_city: server.geo_city || '', geo_city_fa: server.geo_city_fa || '',
-        geo_lat: server.geo_lat == null ? '' : String(server.geo_lat), geo_lon: server.geo_lon == null ? '' : String(server.geo_lon),
-      };
-      if (Object.keys(geoNow).some(k => geoNow[k] !== geoWas[k])) {
-        const lat = parseFloat(geoNow.geo_lat), lon = parseFloat(geoNow.geo_lon);
-        if (isNaN(lat) || isNaN(lon)) return toast('عرض و طول جغرافیایی باید عدد باشند.', true);
-        Object.assign(payload, geoNow, { geo_lat: lat, geo_lon: lon });
-      }
       const user = $('#pe-user', body).value.trim(), pass = $('#pe-pass', body).value.trim();
       if (user) payload.api_username = user;
       if (pass) payload.api_password = pass;
