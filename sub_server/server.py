@@ -184,14 +184,17 @@ def _load_template() -> str:
     return _page_template
 
 
-def render_page(data: dict, title: str) -> Response:
-    import html as html_lib
+def render_page(data: dict, title: str, settings: Optional[Dict[str, str]] = None) -> Response:
     nonce = secrets.token_urlsafe(12)
-    html = (_load_template()
-            .replace("__NONCE__", nonce)
-            .replace("__TITLE__", html_lib.escape(title))
-            .replace("__THEME__", data["theme"] if data["theme"] in ds.THEMES else "auto")
-            .replace("__DATA__", ds.json_for_script(data)))
+    html = None
+    custom = ds.pick_template(settings or {})
+    if custom:
+        try:
+            html = ds.render_page_html(custom, data, title, nonce)
+        except Exception:
+            log.exception("custom sub page template failed; falling back to default")
+    if html is None:
+        html = ds.render_page_html(_load_template(), data, title, nonce)
     csp = ("default-src 'none'; script-src 'nonce-%s'; style-src 'unsafe-inline' https://fonts.googleapis.com; "
            "font-src https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'none'; "
            "frame-ancestors 'none'; base-uri 'none'; form-action 'none'" % nonce)
@@ -306,7 +309,7 @@ async def sub_endpoint(request: Request) -> Response:
                                   series)
         data["live"] = ok
         await _log(cc["id"], request, "page", 200, settings)
-        return render_page(data, f"{brand} · اشتراک {ds.service_name(cc)}".strip(" ·"))
+        return render_page(data, f"{brand} · اشتراک {ds.service_name(cc)}".strip(" ·"), settings)
 
     # --- اپ VPN
     try:
