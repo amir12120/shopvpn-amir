@@ -30,7 +30,7 @@ from typing import Optional, List, Dict, Any
 from i18n import tr, set_language, reset_language, normalize_language, LANGUAGE_CATALOG
 from notification_i18n import localized_payload
 from fastapi import FastAPI, Request, Response, Depends, HTTPException, UploadFile, File, Form, Query
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 
@@ -6276,15 +6276,26 @@ def api_settings(admin=Depends(require_permission("settings"))):
     return db.get_all_settings()
 
 
+def _sub_page_default_template_path() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "sub_server", "sub_page.html")
+
+
+@app.get("/api/settings/sub-page-template/default")
+def api_sub_page_default_template(admin=Depends(require_permission("settings"))):
+    """متن قالب پیش‌فرض صفحه‌ی ساب؛ نقطه‌ی شروع برای ساخت قالب اختصاصی."""
+    with open(_sub_page_default_template_path(), "r", encoding="utf-8") as fh:
+        return PlainTextResponse(fh.read())
+
+
 @app.get("/api/settings/sub-page-preview")
 def api_sub_page_preview(admin=Depends(require_permission("settings"))):
     """Render a safe, data-only mock of the subscription web page for the admin live preview."""
-    import html as html_lib
     import dedicated_sub as ds
-    template_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "sub_server", "sub_page.html")
-    with open(template_path, "r", encoding="utf-8") as fh:
-        template = fh.read()
     settings = ds.all_settings(db)
+    template = ds.pick_template(settings)
+    if template is None:
+        with open(_sub_page_default_template_path(), "r", encoding="utf-8") as fh:
+            template = fh.read()
     mock_cc = {
         "display_name": "سرویس نمونه", "username": "demo", "status": "active", "enabled": 1,
         "duration_days": 30, "created_at": datetime.utcnow().isoformat(),
@@ -6301,10 +6312,7 @@ def api_sub_page_preview(admin=Depends(require_permission("settings"))):
     ], settings, brand, "https://example.com/s/demo", series, now)
     data["live"] = True
     nonce = secrets.token_urlsafe(12)
-    rendered = (template.replace("__NONCE__", nonce)
-                .replace("__TITLE__", html_lib.escape("پیش‌نمایش صفحه لینک ساب"))
-                .replace("__THEME__", data.get("theme", "auto"))
-                .replace("__DATA__", ds.json_for_script(data)))
+    rendered = ds.render_page_html(template, data, "پیش‌نمایش صفحه لینک ساب", nonce)
     csp = ("default-src 'none'; script-src 'nonce-%s'; style-src 'unsafe-inline' https://fonts.googleapis.com; "
            "font-src https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'none'; "
            "frame-ancestors 'self'; base-uri 'none'; form-action 'none'" % nonce)
@@ -6321,8 +6329,14 @@ class SettingBody(BaseModel):
 
 @app.post("/api/settings")
 def api_set_setting(body: SettingBody, admin=Depends(require_permission("settings"))):
+    if body.key == "dsub_custom_template":
+        import dedicated_sub as _ds
+        _err = _ds.validate_custom_template(body.value)
+        if _err:
+            raise HTTPException(400, _err)
     db.set_setting(body.key, body.value)
-    db.log_admin_action(admin["id"], "setting_change", f"{body.key}={body.value} (پنل وب - {admin['username']})", "setting", body.key)
+    _logged = f"<{len(body.value)} chars>" if body.key == "dsub_custom_template" else body.value
+    db.log_admin_action(admin["id"], "setting_change", f"{body.key}={_logged} (پنل وب - {admin['username']})", "setting", body.key)
     return {"ok": True}
 
 
