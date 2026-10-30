@@ -278,6 +278,28 @@ class CoreTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+
+    def test_custom_template_helpers(self):
+        tpl = '<html><head><title>__TITLE__</title></head><body data-t="__THEME__"><script>const D=__DATA__;</script></body></html>'
+        self.assertIsNone(ds.validate_custom_template(""))
+        self.assertIsNone(ds.validate_custom_template(tpl))
+        self.assertIn("__DATA__", ds.validate_custom_template("<html></html>"))
+        self.assertIsNotNone(ds.validate_custom_template(tpl + "x" * (ds.CUSTOM_TEMPLATE_MAX + 1)))
+        on = dict(ds.DSUB_DEFAULTS, dsub_custom_template_enabled="1", dsub_custom_template=tpl)
+        self.assertEqual(ds.pick_template(on), tpl)
+        self.assertIsNone(ds.pick_template(dict(on, dsub_custom_template_enabled="0")))
+        self.assertIsNone(ds.pick_template(dict(on, dsub_custom_template="<html>no data</html>")))
+        self.assertIsNone(ds.pick_template(dict(on, dsub_custom_template="  ")))
+        out = ds.render_page_html(tpl, {"theme": "dark", "user": "__DATA__ <b>x</b>"}, "a<b>&__DATA__", "NN")
+        self.assertIn('<script nonce="NN">', out)        # nonce خودکار
+        self.assertNotIn("<b>", out)                      # عنوان و داده escape می‌شوند
+        self.assertIn("&lt;b&gt;&amp;__DATA__</title>", out)  # مقدار جایگزین‌شده دوباره اسکن نمی‌شود
+        self.assertIn('data-t="dark"', out)
+        keep = ds.render_page_html('<script nonce="mine">__DATA__</script>', {"theme": "auto"}, "t", "NN")
+        self.assertIn('nonce="mine"', keep)
+        self.assertNotIn('nonce="NN"', keep)
+
+
 class DbTests(unittest.TestCase):
     def setUp(self):
         self.db = make_db()
@@ -445,6 +467,33 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(r.headers["cache-control"], "no-store")
         # UA اپ به پنل فرستاده می‌شود (پنل خودش فرمت مناسب را انتخاب می‌کند)
         self.assertEqual(self.calls[-1][1], "v2rayNG/1.8.29")
+
+    def test_custom_template_used_and_falls_back(self):
+        tpl = ('<!doctype html><html><head><title>__TITLE__</title></head><body>CUSTOM_PAGE'
+               '<script>const D=__DATA__;document.title=D.user;</script></body></html>')
+        # خاموش → قالب پیش‌فرض
+        self.db.set_setting("dsub_custom_template", tpl)
+        r = self.client.get(f"/s/{self.token}", headers=CHROME)
+        self.assertNotIn("CUSTOM_PAGE", r.text)
+        # روشن → قالب اختصاصی، با nonce خودکار و بدون درز آدرس پنل
+        self.db.set_setting("dsub_custom_template_enabled", "1")
+        r = self.client.get(f"/s/{self.token}", headers=CHROME)
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("CUSTOM_PAGE", r.text)
+        nonce = r.headers["content-security-policy"].split("'nonce-")[1].split("'")[0]
+        self.assertIn(f'<script nonce="{nonce}">', r.text)
+        self.assertNotIn("panel.example.com", r.text)
+        self.assertNotIn("SECRET", r.text)
+        self.assertIn(f"https://sub.example.com/s/{self.token}", r.text)
+        # قالب نامعتبر (بدون __DATA__) → برگشت به پیش‌فرض
+        self.db.set_setting("dsub_custom_template", "<html>CUSTOM_PAGE</html>")
+        r = self.client.get(f"/s/{self.token}", headers=CHROME)
+        self.assertNotIn("CUSTOM_PAGE", r.text)
+        self.assertIn("const D=", r.text)
+        # قالب اختصاصی روی پاسخ اپ VPN اثری ندارد
+        self.db.set_setting("dsub_custom_template", tpl)
+        r = self.client.get(f"/s/{self.token}", headers={"user-agent": "v2rayNG/1.8.29"})
+        self.assertEqual(base64.b64decode(r.content).decode().splitlines(), [VLESS, VMESS])
 
     def test_caching_and_ua_separation(self):
         for _ in range(3):

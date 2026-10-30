@@ -60,6 +60,8 @@ DSUB_DEFAULTS: Dict[str, str] = {
     "dsub_apps_hidden": "",             # «ios:Streisand,android:v2rayNG»
     "dsub_apps_rec": "",                # برنامه‌ی پیشنهادی هر سیستم‌عامل: «ios:Hiddify,android:v2rayNG»
     "dsub_custom_apps": "",             # هر خط: platform|name|توضیح|پیشوند-افزودن|لینک-دانلود
+    "dsub_custom_template_enabled": "0",  # استفاده از قالب HTML اختصاصی به‌جای قالب پیش‌فرض صفحه
+    "dsub_custom_template": "",         # کد کامل HTML قالب اختصاصی (باید شامل __DATA__ باشد)
 }
 
 PLATFORMS = ("ios", "android", "windows", "mac", "linux")
@@ -823,6 +825,48 @@ def build_page_data(cc, info: dict, uris: List[str], settings: Dict[str, str], b
         "faq": [list(x) for x in resolve_faq(settings)],
         "series": series,
     }
+
+
+# ---------------------------------------------------------------------------
+# قالب اختصاصی صفحه‌ی ساب
+# ---------------------------------------------------------------------------
+CUSTOM_TEMPLATE_MAX = 400_000  # بایت
+_TPL_TOKEN_RE = re.compile(r"__(NONCE|TITLE|THEME|DATA)__")
+_SCRIPT_NO_NONCE_RE = re.compile(r"<script\b(?![^>]*\bnonce\s*=)", re.I)
+
+
+def validate_custom_template(text: str) -> Optional[str]:
+    """None یعنی معتبر (یا خالی)؛ در غیر این‌صورت پیام خطا به فارسی."""
+    text = text or ""
+    if not text.strip():
+        return None
+    if len(text.encode("utf-8")) > CUSTOM_TEMPLATE_MAX:
+        return "حجم قالب بیش از حد مجاز است (حداکثر ۴۰۰ کیلوبایت)."
+    if "__DATA__" not in text:
+        return "قالب باید شامل __DATA__ باشد؛ مثلاً const D=__DATA__; داخل تگ script."
+    return None
+
+
+def pick_template(settings: Dict[str, str]) -> Optional[str]:
+    """اگر قالب اختصاصی روشن و معتبر بود متنش را می‌دهد، وگرنه None (= قالب پیش‌فرض)."""
+    if (settings.get("dsub_custom_template_enabled") or "").strip() != "1":
+        return None
+    text = settings.get("dsub_custom_template") or ""
+    if not text.strip() or validate_custom_template(text):
+        return None
+    return text
+
+
+def render_page_html(template: str, data: dict, title: str, nonce: str) -> str:
+    """جایگذاری __NONCE__ / __TITLE__ / __THEME__ / __DATA__ در یک گذر (مقادیر جایگزین‌شده دوباره اسکن نمی‌شوند).
+
+    به هر تگ <script> که nonce ندارد خودکار nonce اضافه می‌شود تا سازنده‌ی قالب لازم نباشد حواسش به CSP باشد.
+    """
+    import html as html_lib
+    theme = data.get("theme") if data.get("theme") in THEMES else "auto"
+    values = {"NONCE": nonce, "TITLE": html_lib.escape(title), "THEME": theme, "DATA": json_for_script(data)}
+    template = _SCRIPT_NO_NONCE_RE.sub('<script nonce="__NONCE__"', template)
+    return _TPL_TOKEN_RE.sub(lambda m: values[m.group(1)], template)
 
 
 def json_for_script(data) -> str:
