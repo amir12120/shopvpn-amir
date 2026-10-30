@@ -5,6 +5,8 @@ import logging
 import time
 from typing import Optional
 
+import aiohttp
+
 import geo_scan
 
 logger = logging.getLogger(__name__)
@@ -16,6 +18,9 @@ _TTL_FAIL = 1800
 _TCP_TTL = 120
 
 _host_cache: dict = {}
+_sub_cache: dict = {}
+_SUB_TTL = 600
+_SUB_URLS_PER_PRODUCT = 2
 _tcp_cache: dict = {}
 
 
@@ -64,6 +69,23 @@ def _name_fallback(name: str) -> Optional[dict]:
     return {"cc": cc.lower(), "city": label, "lat": lat, "lon": lon, "ip": "", "port": 0}
 
 
+async def _fetch_sub_entries(url: str) -> list:
+    now = time.time()
+    cached = _sub_cache.get(url)
+    if cached and now - cached[0] < _SUB_TTL:
+        return cached[1]
+    entries = []
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12)) as session:
+            async with session.get(url, headers={"User-Agent": "v2rayNG/1.8.29"}) as resp:
+                text = await resp.text(errors="ignore")
+        entries = geo_scan.parse_subscription_text(text)[:SAMPLE_PER_PRODUCT]
+    except Exception:
+        logger.warning("config_geo: subscription fetch failed", exc_info=True)
+    _sub_cache[url] = (now, entries)
+    return entries
+
+
 async def locate_products(db, products: list) -> dict:
     """Return {product_id: {(lat1, lon1): {cc, city, lat, lon, targets}}} based on stored configs."""
     links_by_product = {}
@@ -77,7 +99,11 @@ async def locate_products(db, products: list) -> dict:
             items = geo_scan.parse_subscription_text(link)
             if items:
                 found.append(items[0])
-                hosts.add(items[0]["host"])
+        if not found:
+            sub_urls = await asyncio.to_thread(db.get_sub_urls_for_geo, pid, _SUB_URLS_PER_PRODUCT)
+            for url in sub_urls:
+                found.extend(await _fetch_sub_entries(url))
+        hosts.update(e["host"] for e in found)
         entries_by_product[pid] = found
     await _resolve_hosts(hosts)
 
