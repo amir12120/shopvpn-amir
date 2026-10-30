@@ -7109,6 +7109,9 @@ const SETTINGS_GROUPS = [
   // نکته: متن/رنگ/ترتیب/فعال‌سازی دکمه‌های منوی اصلی ربات، و همچنین رنگ
   // دکمه‌های مسیر خرید (انتخاب دسته/محصول/ادامه/کد تخفیف/بازگشت) دیگر اینجا
   // نیست؛ برای یکپارچه‌سازی، همه‌شان به تب «دکمه‌های ربات» منتقل شدند.
+  { tab: 'content', title: '🗺 نقشه زنده شبکه — مکان سرورها (دستی)', fields: [
+    { key: 'netmap_locations', label: 'مکان سرورها', type: 'netmap_simple' },
+  ]},
   { tab: 'content', title: '🔗 برندینگ و پیش‌نمایش صفحه لینک ساب', fields: [
     { key: 'dsub_brand', label: 'نام برند صفحه لینک ساب', type: 'text' },
     { key: 'dsub_logo_url', label: 'لوگوی صفحه لینک ساب', type: 'text' },
@@ -7225,9 +7228,6 @@ const SETTINGS_GROUPS = [
     { key: 'custom_config_duration_days', label: 'مدت اعتبار (روز)', type: 'number' },
     { key: 'btn_custom_config', label: 'متن دکمه ساخت کانفیگ شخصی', type: 'text' },
   ]},
-  { tab: 'services', title: '🗺 نقشه زنده شبکه (فروشگاه وب)', fields: [
-    { key: 'netmap_locations', label: 'اصلاح دستی مکان سرورها (JSON). مثال: [{"product_ids":[3,4],"cc":"de","city":"Frankfurt","city_fa":"فرانکفورت","lat":50.11,"lon":8.68}] — به‌جای product_ids می‌توان "match":"بخشی از نام محصول" گذاشت. خالی = تشخیص خودکار', type: 'textarea' },
-  ]},
   { tab: 'services', title: '🧾 نمایش دکمه‌های حساب کاربری', fields: [
     { key: 'acct_show_orders', label: 'نمایش «سرویس‌ها و سفارش‌های من»', type: 'bool' },
     { key: 'acct_show_referral', label: 'نمایش «زیرمجموعه‌گیری من»', type: 'bool' },
@@ -7292,6 +7292,109 @@ function settingsUiText(value) {
     : String(value ?? '');
 }
 
+/* ---------------------------------------------- ویرایشگر ساده‌ی مکان سرورها - */
+const NETMAP_CITIES = [
+  ['de','Frankfurt','فرانکفورت (آلمان)',50.11,8.68],['nl','Amsterdam','آمستردام (هلند)',52.37,4.90],
+  ['gb','London','لندن (انگلیس)',51.51,-0.13],['fr','Paris','پاریس (فرانسه)',48.86,2.35],
+  ['fi','Helsinki','هلسینکی (فنلاند)',60.17,24.94],['se','Stockholm','استکهلم (سوئد)',59.33,18.07],
+  ['no','Oslo','اسلو (نروژ)',59.91,10.75],['dk','Copenhagen','کپنهاگ (دانمارک)',55.68,12.57],
+  ['ch','Zurich','زوریخ (سوئیس)',47.38,8.54],['at','Vienna','وین (اتریش)',48.21,16.37],
+  ['it','Milan','میلان (ایتالیا)',45.46,9.19],['es','Madrid','مادرید (اسپانیا)',40.42,-3.70],
+  ['pt','Lisbon','لیسبون (پرتغال)',38.72,-9.14],['ie','Dublin','دوبلین (ایرلند)',53.35,-6.26],
+  ['pl','Warsaw','ورشو (لهستان)',52.23,21.01],['cz','Prague','پراگ (چک)',50.08,14.44],
+  ['ro','Bucharest','بخارست (رومانی)',44.43,26.10],['bg','Sofia','صوفیه (بلغارستان)',42.70,23.32],
+  ['lt','Vilnius','ویلنیوس (لیتوانی)',54.69,25.28],['lv','Riga','ریگا (لتونی)',56.95,24.11],
+  ['ee','Tallinn','تالین (استونی)',59.44,24.75],['ua','Kyiv','کیف (اوکراین)',50.45,30.52],
+  ['ru','Moscow','مسکو (روسیه)',55.76,37.62],['tr','Istanbul','استانبول (ترکیه)',41.01,28.98],
+  ['am','Yerevan','ایروان (ارمنستان)',40.18,44.51],['kz','Almaty','آلماتی (قزاقستان)',43.24,76.89],
+  ['ae','Dubai','دبی (امارات)',25.20,55.27],['ir','Tehran','تهران (ایران)',35.69,51.39],
+  ['in','Mumbai','بمبئی (هند)',19.08,72.88],['sg','Singapore','سنگاپور',1.35,103.82],
+  ['hk','Hong Kong','هنگ‌کنگ',22.32,114.17],['jp','Tokyo','توکیو (ژاپن)',35.68,139.69],
+  ['kr','Seoul','سئول (کره جنوبی)',37.57,126.98],['au','Sydney','سیدنی (استرالیا)',-33.87,151.21],
+  ['us','New York','نیویورک (آمریکا)',40.71,-74.01],['us','Los Angeles','لس‌آنجلس (آمریکا)',34.05,-118.24],
+  ['us','Dallas','دالاس (آمریکا)',32.78,-96.80],['us','Miami','میامی (آمریکا)',25.76,-80.19],
+  ['us','Chicago','شیکاگو (آمریکا)',41.88,-87.63],['ca','Toronto','تورنتو (کانادا)',43.65,-79.38],
+  ['br','Sao Paulo','سائوپائولو (برزیل)',-23.55,-46.63],
+];
+let nmProductsCache = null;
+async function nmLoadProducts() {
+  if (nmProductsCache) return nmProductsCache;
+  try { nmProductsCache = (await apiGet('/products')) || []; } catch (_) { nmProductsCache = []; }
+  return nmProductsCache;
+}
+function nmCityIndex(o) {
+  const lat = Number(o.lat), lon = Number(o.lon);
+  return NETMAP_CITIES.findIndex(c => c[0] === String(o.cc || '').toLowerCase() && Math.abs(c[3] - lat) < 0.05 && Math.abs(c[4] - lon) < 0.05);
+}
+function nmParse(raw) {
+  const rows = [], legacy = [];
+  let data = [];
+  try { data = raw && raw.trim() ? JSON.parse(raw) : []; } catch (_) { data = []; }
+  (Array.isArray(data) ? data : []).forEach(o => {
+    const ids = (o.product_ids || []).map(Number).filter(Boolean);
+    const ci = nmCityIndex(o);
+    if (ids.length >= 1 && !o.match && ci >= 0) ids.forEach(id => rows.push({ pid: id, ci }));
+    else legacy.push(o);
+  });
+  return { rows, legacy };
+}
+function nmRender(ed) {
+  const prods = nmProductsCache || [];
+  const box = ed.querySelector('.nm-rows');
+  box.innerHTML = ed.__rows.map((r, i) => `
+    <div class="nm-row" data-i="${i}" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+      <select class="input nm-prod" style="flex:1;min-width:150px">
+        <option value="">— محصول —</option>
+        ${prods.map(p => `<option value="${p.id}" ${Number(p.id) === Number(r.pid) ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+        ${r.pid && !prods.some(p => Number(p.id) === Number(r.pid)) ? `<option value="${r.pid}" selected>محصول شماره ${r.pid}</option>` : ''}
+      </select>
+      <select class="input nm-city" style="flex:1;min-width:150px">
+        <option value="">— شهر —</option>
+        ${NETMAP_CITIES.map((c, ci) => `<option value="${ci}" ${ci === r.ci ? 'selected' : ''}>${esc(c[2])}</option>`).join('')}
+      </select>
+      <button type="button" class="btn btn-sm nm-del" title="حذف">🗑</button>
+    </div>`).join('') + (ed.__legacy.length ? `<div class="card-sub">${ed.__legacy.length} مورد از تنظیمات قدیمی هم نگه داشته شده است.</div>` : '');
+}
+function nmSync(ed) {
+  const out = ed.__legacy.slice();
+  const byCity = {};
+  ed.__rows.forEach(r => {
+    if (!r.pid || r.ci === '' || r.ci == null || !NETMAP_CITIES[r.ci]) return;
+    (byCity[r.ci] = byCity[r.ci] || []).push(Number(r.pid));
+  });
+  Object.keys(byCity).forEach(ci => {
+    const c = NETMAP_CITIES[ci];
+    out.push({ product_ids: byCity[ci], cc: c[0], city: c[1], city_fa: c[2].replace(/\s*\(.*\)$/, ''), lat: c[3], lon: c[4] });
+  });
+  ed.querySelector('input[type=hidden]').value = out.length ? JSON.stringify(out) : '';
+}
+async function nmInit(ed) {
+  if (ed.dataset.ready) return;
+  ed.dataset.ready = '1';
+  const { rows, legacy } = nmParse(ed.dataset.nmRaw || '');
+  ed.__rows = rows; ed.__legacy = legacy;
+  nmRender(ed);
+  await nmLoadProducts();
+  nmRender(ed);
+}
+document.addEventListener('click', e => {
+  const ed = e.target.closest && e.target.closest('.netmap-ed'); if (!ed) return;
+  if (e.target.closest('.nm-add')) { ed.__rows.push({ pid: '', ci: '' }); nmRender(ed); }
+  const del = e.target.closest('.nm-del');
+  if (del) { ed.__rows.splice(Number(del.closest('.nm-row').dataset.i), 1); nmRender(ed); nmSync(ed); }
+});
+document.addEventListener('change', e => {
+  const ed = e.target.closest && e.target.closest('.netmap-ed'); if (!ed) return;
+  const row = e.target.closest('.nm-row'); if (!row) return;
+  const r = ed.__rows[Number(row.dataset.i)];
+  if (e.target.classList.contains('nm-prod')) r.pid = e.target.value;
+  if (e.target.classList.contains('nm-city')) r.ci = e.target.value === '' ? '' : Number(e.target.value);
+  nmSync(ed);
+});
+new MutationObserver(() => document.querySelectorAll('.netmap-ed:not([data-ready])').forEach(nmInit))
+  .observe(document.body, { childList: true, subtree: true });
+
+
 function settingsFieldHtml(f, settings) {
   const val = settings[f.key] ?? '';
   if (f.type === 'bool') {
@@ -7339,6 +7442,14 @@ function settingsFieldHtml(f, settings) {
         <button type="button" class="btn btn-sm firebase-json-extract-btn" style="margin-top:8px">استخراج و پرکردن خودکار</button>
       </div>
     </label>`;
+  }
+  if (f.type === 'netmap_simple') {
+    return `<div class="field netmap-ed" data-nm-raw="${esc(val)}">
+      <span class="card-sub">اگر مکان یک سرور روی «نقشه زنده شبکه» اشتباه است، این‌جا محصول را انتخاب کن و شهر درستش را بزن. اگر خالی بماند، مکان‌ها خودکار تشخیص داده می‌شوند.</span>
+      <div class="nm-rows" style="display:flex;flex-direction:column;gap:8px;margin-top:10px"></div>
+      <button type="button" class="btn btn-sm nm-add" style="margin-top:10px">➕ افزودن مکان</button>
+      <input type="hidden" data-key="${f.key}" data-type="text" value="${esc(val)}">
+    </div>`;
   }
   if (f.type === 'textarea') {
     return `<label class="field"><span>${esc(settingsUiText(f.label))}</span>
