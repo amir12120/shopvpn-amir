@@ -238,3 +238,103 @@ async def get_world_map(force_refresh: bool = False) -> dict:
         return result
 #‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 # 		   		 		  	 	 		 		   		  	 	 		 			  		 				 			  	 
+
+
+# ============================================================ countries ====
+# مرز کشورها برای «نقشه زنده شبکه»ی فروشگاه: کشورهای دارای سرور رنگی می‌شوند و
+# پین سرور به نزدیک‌ترین/شامل‌شونده‌ترین کشور می‌چسبد (جزایر کوچک مثل سنگاپور
+# هم حذف نمی‌شوند). خروجی: [{"n": "Germany", "d": "M..Z"}, ...] در همان فضای
+# 1000x500 معادل-مستطیلی که land_path دارد.
+_COUNTRY_MIRRORS = [
+    "https://cdn.jsdelivr.net/npm/world-atlas@2/countries-50m.json",
+    "https://unpkg.com/world-atlas@2/countries-50m.json",
+    "https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json",
+    "https://unpkg.com/world-atlas@2/countries-110m.json",
+]
+_COUNTRY_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_world_countries_cache_v1.json")
+_COUNTRY_EPS = 0.3          # ساده‌سازی کشورهای بزرگ (واحد SVG)
+_TINY_SPAN = 3.0            # رینگی که هر دو بعدش کوچک‌تر است، بدون ساده‌سازی می‌ماند
+_countries_mem = None
+
+
+def _ring_path(projected: list) -> str:
+    seg = []
+    for i, (x, y) in enumerate(projected):
+        seg.append(("M%.2f,%.2f" if i == 0 else "L%.2f,%.2f") % (x, y))
+    seg.append("Z")
+    return "".join(seg)
+
+
+def _topology_to_countries(topo: dict) -> list:
+    objs = topo.get("objects", {})
+    obj = objs.get("countries") or next(iter(objs.values()))
+    transform = topo["transform"]
+    arcs_decoded = [_decode_arc(arc, transform) for arc in topo["arcs"]]
+    out = []
+    for geom in obj.get("geometries", []):
+        name = (geom.get("properties") or {}).get("name") or ""
+        parts = []
+        for arc_indices in _rings_of_geometry(geom):
+            ring = _build_ring(arc_indices, arcs_decoded)
+            if len(ring) < 3:
+                continue
+            pts = [_project(lon, lat) for lon, lat in ring]
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            tiny = (max(xs) - min(xs)) < _TINY_SPAN and (max(ys) - min(ys)) < _TINY_SPAN
+            if not tiny:
+                pts = _rdp_simplify(pts, _COUNTRY_EPS)
+            if len(pts) >= 3:
+                parts.append(_ring_path(pts))
+        if parts:
+            out.append({"n": name, "d": "".join(parts)})
+    return out
+
+
+async def _fetch_country_topology() -> dict:
+    last_err = None
+    async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
+        for url in _COUNTRY_MIRRORS:
+            try:
+                async with session.get(url) as resp:
+                    if resp.status != 200:
+                        last_err = f"HTTP {resp.status} از {url}"
+                        continue
+                    return await resp.json(content_type=None)
+            except Exception as e:  # noqa: BLE001
+                last_err = str(e)
+    raise RuntimeError(last_err or "هیچ‌کدام از mirrorها جواب ندادند")
+
+
+async def get_countries(force_refresh: bool = False) -> dict:
+    """{"ok": True, "countries": [{"n","d"}...]} یا {"ok": False, "error": "..."}"""
+    global _countries_mem
+    if _countries_mem and not force_refresh:
+        return _countries_mem
+    async with _get_lock():
+        if _countries_mem and not force_refresh:
+            return _countries_mem
+        if not force_refresh:
+            try:
+                with open(_COUNTRY_CACHE_FILE, "r", encoding="utf-8") as f:
+                    disk = json.load(f)
+                if disk.get("ok") and disk.get("countries"):
+                    _countries_mem = disk
+                    return _countries_mem
+            except Exception:
+                pass
+        try:
+            topo = await _fetch_country_topology()
+            countries = await asyncio.to_thread(_topology_to_countries, topo)
+            if not countries:
+                raise RuntimeError("لیست کشورها خالی تولید شد")
+            result = {"ok": True, "countries": countries, "at": int(time.time())}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": f"دریافت مرز کشورها ناموفق بود: {e}"}
+        _countries_mem = result
+        try:
+            with open(_COUNTRY_CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(result, f)
+        except Exception:
+            pass
+        return result

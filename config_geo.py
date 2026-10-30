@@ -127,19 +127,29 @@ async def locate_products(db, products: list) -> dict:
     return result
 
 
-async def _tcp_status(ip: str, port: int) -> str:
+async def _tcp_probe(ip: str, port: int) -> tuple:
+    """(status, latency_ms|None). status: online/offline/unknown؛ زمان = مدت برقراری TCP از سمت سرور فروشگاه."""
     now = time.time()
     cached = _tcp_cache.get((ip, port))
     if cached and now - cached[0] < _TCP_TTL:
-        return cached[1]
+        return cached[1], cached[2]
+    t0 = time.perf_counter()
     status = await geo_scan._tcp_check(ip, port, asyncio.Semaphore(1), timeout=4.0)
-    _tcp_cache[(ip, port)] = (now, status)
-    return status
+    ms = round((time.perf_counter() - t0) * 1000) if status == "online" else None
+    _tcp_cache[(ip, port)] = (now, status, ms)
+    return status, ms
+
+
+async def location_probe(targets: list) -> dict:
+    """{"status": "up"|"down", "latency_ms": int|None}؛ 'down' فقط وقتی همه‌ی endpointها در دسترس نباشند."""
+    if not targets:
+        return {"status": "up", "latency_ms": None}
+    res = await asyncio.gather(*(_tcp_probe(ip, port) for ip, port in targets))
+    down = all(st == "offline" for st, _ in res)
+    ms = [m for st, m in res if st == "online" and m is not None]
+    return {"status": "down" if down else "up", "latency_ms": min(ms) if ms else None}
 
 
 async def location_status(targets: list) -> str:
-    """'down' only when every probed config endpoint is unreachable."""
-    if not targets:
-        return "up"
-    states = await asyncio.gather(*(_tcp_status(ip, port) for ip, port in targets))
-    return "down" if all(s == "offline" for s in states) else "up"
+    """سازگاری با فراخوان‌های قبلی."""
+    return (await location_probe(targets))["status"]
