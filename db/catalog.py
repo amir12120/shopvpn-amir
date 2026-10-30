@@ -544,8 +544,9 @@ class CatalogMixin:
     def get_sub_urls_for_geo(self, product_id: int, limit: int = 2) -> list:
         with self._get_conn() as conn:
             rows = conn.execute(
-                "SELECT subscription_url FROM custom_configs WHERE product_id=? "
-                "AND subscription_url IS NOT NULL AND subscription_url<>'' ORDER BY id DESC LIMIT ?",
+                "SELECT cc.subscription_url FROM custom_configs cc JOIN orders o ON o.id=cc.order_id "
+                "WHERE o.product_id=? AND cc.subscription_url IS NOT NULL AND cc.subscription_url<>'' "
+                "ORDER BY cc.id DESC LIMIT ?",
                 (product_id, int(limit)),
             ).fetchall()
         return [r["subscription_url"] for r in rows]
