@@ -5778,11 +5778,6 @@ class PanelServerUpdateBody(BaseModel):
     api_password: Optional[str] = None
     xui_inbound_ids: Optional[List[int]] = None
     xui_sub_base_url: Optional[str] = None
-    geo_cc: Optional[str] = None
-    geo_city: Optional[str] = None
-    geo_city_fa: Optional[str] = None
-    geo_lat: Optional[float] = None
-    geo_lon: Optional[float] = None
 
 
 class PanelServerTemplateBody(BaseModel):
@@ -5818,20 +5813,7 @@ def _panel_server_public(s, health=None) -> dict:
         "health_last_change": h["last_change"] if h else None,
         "health_error": (h["last_error"] or None) if h else None,
         "sort_order": int(s["sort_order"] or 0),
-        "geo_cc": s["geo_cc"] or "", "geo_city": s["geo_city"] or "", "geo_city_fa": s["geo_city_fa"] or "",
-        "geo_lat": s["geo_lat"], "geo_lon": s["geo_lon"], "geo_manual": bool(s["geo_manual"]),
     }
-
-
-def _panel_geo_in_background(server_id: int) -> None:
-    import panel_geo
-
-    async def _run():
-        server = await asyncio.to_thread(db.get_panel_server, server_id)
-        if server:
-            await panel_geo.ensure(db, server)
-
-    asyncio.get_running_loop().create_task(_run())
 
 
 # ------------------------------------------------------------ SSH / shared quota
@@ -6040,14 +6022,12 @@ async def api_add_panel_server(body: PanelServerBody, admin=Depends(require_perm
             db.delete_panel_server(server_id)
             raise HTTPException(400, tr("این پنل هیچ inbound ای ندارد. اول از داخل پنل یک inbound بساز."))
         db.log_admin_action(admin["id"], "panel_add", f"سرور «{body.name}» (3X-UI، #{server_id}) از پنل وب")
-        _panel_geo_in_background(server_id)
         return {"id": server_id, "inbounds": inbounds, "needs_inbound_select": True}
 
     if body.panel_type in SUB_BASE_URL_PANEL_TYPES:
         # مثل Hiddify: inbound لازم نیست؛ باید بعداً با /xui-config تکمیل شود.
         server_id = db.add_panel_server(body.name.strip(), body.panel_type, body.api_url.strip(), username, body.api_password, body.default_group)
         db.log_admin_action(admin["id"], "panel_add", f"سرور «{body.name}» (#{server_id}) از پنل وب")
-        _panel_geo_in_background(server_id)
         return {"id": server_id, "needs_sub_base_url": True}
 
     # خانواده‌ی PasarGuard/Marzban/Marzneshin: با «کاربر نمونه» قالب گرفته می‌شود
@@ -6066,7 +6046,6 @@ async def api_add_panel_server(body: PanelServerBody, admin=Depends(require_perm
         proxy_settings=json.dumps(template["proxy_settings"]), template_username=body.template_username.strip(),
     )
     db.log_admin_action(admin["id"], "panel_add", f"سرور «{body.name}» (#{server_id}) از پنل وب")
-    _panel_geo_in_background(server_id)
     return {"id": server_id}
 
 
@@ -6157,26 +6136,12 @@ async def api_update_panel_server(server_id: int, body: PanelServerUpdateBody, a
     if not server:
         raise HTTPException(404, tr("یافت نشد."))
     fields = {k: v for k, v in body.dict().items() if v is not None}
-    geo_keys = ("geo_cc", "geo_city", "geo_city_fa", "geo_lat", "geo_lon")
-    if any(k in fields for k in geo_keys):
-        if "geo_cc" in fields:
-            fields["geo_cc"] = fields["geo_cc"].strip().lower()[:2]
-        for k in ("geo_city", "geo_city_fa"):
-            if k in fields:
-                fields[k] = fields[k].strip()[:60]
-        lat, lon = fields.get("geo_lat"), fields.get("geo_lon")
-        if (lat is not None and not -90 <= lat <= 90) or (lon is not None and not -180 <= lon <= 180):
-            raise HTTPException(400, tr("مختصات نامعتبر است."))
-        fields["geo_manual"] = 1
     if server["panel_type"] in SINGLE_INBOUND_PANEL_TYPES and len(fields.get("xui_inbound_ids") or []) > 1:
         raise HTTPException(400, tr("برای این نوع پنل فقط یک inbound قابل انتخاب است."))
     if "xui_inbound_ids" in fields:
         fields["xui_inbound_ids"] = json.dumps(fields["xui_inbound_ids"])
     if fields:
         db.update_panel_server(server_id, **fields)
-    if fields.get("api_url") and fields["api_url"].rstrip("/") != server["api_url"]:
-        import panel_geo
-        await panel_geo.redetect(db, server_id, fields["api_url"])
     db.log_admin_action(admin["id"], "panel_update", str(server_id), "panel", server_id)
     return {"ok": True}
 
@@ -6193,18 +6158,6 @@ def api_delete_panel_server(server_id: int, force: bool = False, admin=Depends(r
         "panel", server_id,
     )
     return {"ok": True, "removed_custom_configs": removed}
-
-
-@app.post("/api/panel-servers/{server_id}/geo/detect")
-async def api_detect_panel_geo(server_id: int, admin=Depends(require_permission("panels")), _fa=Depends(require_full_access_tenant)):
-    import panel_geo
-    server = await asyncio.to_thread(db.get_panel_server, server_id)
-    if not server:
-        raise HTTPException(404, tr("یافت نشد."))
-    geo = await panel_geo.detect(server["api_url"])
-    if not geo:
-        raise HTTPException(400, tr("موقعیت این پنل از روی آدرسش تشخیص داده نشد."))
-    return geo
 
 
 @app.post("/api/panel-servers/{server_id}/test")
