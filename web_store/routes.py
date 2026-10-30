@@ -387,45 +387,46 @@ _NETMAP_TTL = 20
 _netmap_cache: dict = {"at": 0.0, "data": None}
 
 
-def _network_map_build(db: Database, servers) -> dict:
-    health = db.list_panel_health()
-    by_panel: dict = {}
+def _network_map_products(db: Database) -> list:
+    items = []
     for c in db.get_categories(active_only=True):
         for p in db.get_products(c["id"], active_only=True):
-            sid = p["provision_server_id"]
-            if not sid:
-                continue
-            in_stock = bool(p["is_auto_provision"]) or db.count_available_configs(p["id"]) > 0
-            by_panel.setdefault(int(sid), []).append({
+            items.append({
                 "id": p["id"],
                 "name": p["name"],
                 "price": p["price"],
-                "in_stock": in_stock,
+                "in_stock": bool(p["is_auto_provision"]) or db.count_available_configs(p["id"]) > 0,
                 "duration_days": p["duration_days"],
                 "volume_gb": p["auto_provision_volume_gb"],
             })
+    return items
+
+
+async def _network_map_build(db: Database) -> dict:
+    import config_geo
+    from datetime import datetime, timezone
+    products = await asyncio.to_thread(_network_map_products, db)
+    located = await config_geo.locate_products(db, products)
     groups: dict = {}
-    for s in servers:
-        if s["geo_lat"] is None or s["geo_lon"] is None:
-            continue
-        products = by_panel.get(int(s["id"]), [])
-        if not products and not s["used_for_custom_config"]:
-            continue
-        key = (round(s["geo_lat"], 1), round(s["geo_lon"], 1))
-        g = groups.setdefault(key, {
-            "id": "p%d" % s["id"], "cc": (s["geo_cc"] or "").lower(), "city": s["geo_city"] or "",
-            "city_fa": s["geo_city_fa"] or "", "lat": s["geo_lat"], "lon": s["geo_lon"],
-            "states": [], "last_check": "", "products": [],
-        })
-        h = health.get(s["id"])
-        g["states"].append(h["status"] if h else "up")
-        if h and h["last_check"] and h["last_check"] > g["last_check"]:
-            g["last_check"] = h["last_check"]
-        g["products"].extend(products)
+    for p in products:
+        for key, loc in located.get(p["id"], {}).items():
+            g = groups.setdefault(key, {
+                "id": "l%d_%d" % (round(loc["lat"] * 10), round(loc["lon"] * 10)),
+                "cc": loc["cc"], "city": loc["city"], "city_fa": "", "lat": loc["lat"], "lon": loc["lon"],
+                "targets": [], "products": [],
+            })
+            for t in loc["targets"]:
+                if t not in g["targets"] and len(g["targets"]) < config_geo.TARGETS_PER_LOCATION:
+                    g["targets"].append(t)
+            g["products"].append({k: v for k, v in p.items()})
     nodes = []
-    for g in groups.values():
-        states = g.pop("states")
-        g["status"] = "down" if all(x == "down" for x in states) else "up"
+    checked = datetime.now(timezone.utc).isoformat()
+    ordered = list(groups.values())
+    statuses = await asyncio.gather(*(config_geo.location_status(g["targets"]) for g in ordered))
+    for g, status in zip(ordered, statuses):
+        g.pop("targets")
+        g["status"] = status
+        g["last_check"] = checked
         g["products_total"] = len(g["products"])
         g["products_in_stock"] = sum(1 for x in g["products"] if x["in_stock"])
         nodes.append(g)
@@ -435,21 +436,14 @@ def _network_map_build(db: Database, servers) -> dict:
 
 @router.get("/api/web/network-map")
 async def web_network_map(tenant: Tenant = Depends(get_tenant)):
-    """Real panel locations, health and per-location products for the home page map."""
+    """Store locations derived from the config links of each product, with per-location products."""
     _web_main_only(tenant)
     import time
     from datetime import datetime, timezone
-    import panel_geo
     now = time.monotonic()
     if _netmap_cache["data"] is not None and now - _netmap_cache["at"] < _NETMAP_TTL:
         return _netmap_cache["data"]
-    servers = await asyncio.to_thread(tenant.db.get_panel_servers, True)
-    missing = [s for s in servers if s["geo_lat"] is None and not s["geo_manual"]][:3]
-    if missing:
-        done = await asyncio.gather(*(panel_geo.ensure(tenant.db, s) for s in missing))
-        if any(done):
-            servers = await asyncio.to_thread(tenant.db.get_panel_servers, True)
-    data = await asyncio.to_thread(_network_map_build, tenant.db, servers)
+    data = await _network_map_build(tenant.db)
     data["updated_at"] = datetime.now(timezone.utc).isoformat()
     _netmap_cache["at"], _netmap_cache["data"] = now, data
     return data
