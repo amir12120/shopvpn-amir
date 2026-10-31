@@ -3355,6 +3355,7 @@ class SshAccountIn(BaseModel):
 
 class SshAccountActionIn(BaseModel):
     action: str
+    force: bool = False
 
 
 def _ssh_call(fn, *args, **kwargs):
@@ -3400,10 +3401,10 @@ def api_admin_ssh_install_job(job_id: str, auth=Depends(require_full_access_admi
 
 
 @app.delete("/api/admin/ssh/nodes/{node_id}")
-def api_admin_ssh_delete_node(node_id: int, auth=Depends(require_full_access_admin)):
+def api_admin_ssh_delete_node(node_id: int, force: bool = False, auth=Depends(require_full_access_admin)):
     import ssh_service
     admin_id, db, _ = auth
-    _ssh_call(ssh_service.delete_node, db, node_id)
+    _ssh_call(ssh_service.delete_node, db, node_id, force=force)
     db.log_admin_action(admin_id, "ssh_node_delete", f"SSH node #{node_id}", "ssh")
     return {"ok": True}
 
@@ -3491,7 +3492,7 @@ async def api_admin_ssh_create_account(body: SshAccountIn, auth=Depends(require_
 async def api_admin_ssh_account_action(account_id: str, body: SshAccountActionIn, auth=Depends(require_full_access_admin)):
     import ssh_service
     admin_id, db, _ = auth
-    status = await _ssh_acall(ssh_service.account_action, db, account_id, body.action)
+    status = await _ssh_acall(ssh_service.account_action, db, account_id, body.action, force=bool(body.force))
     db.log_admin_action(admin_id, f"ssh_account_{body.action.strip().lower()}", f"SSH account {account_id}", "ssh")
     return {"ok": True, "account_id": account_id, "status": status}
 
