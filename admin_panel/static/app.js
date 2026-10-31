@@ -3476,7 +3476,8 @@ function productProvisionFieldsHtml(panelServers, sshNodes = [], prefill = null)
     <div id="prod-direct-fields" class="form-grid" style="display:${isDirect ? '' : 'none'}">
       <label class="field"><span>نوع مقصد</span><select class="input" id="prod-target-type"><option value="vpn" ${target === 'vpn' ? 'selected' : ''}>پنل VPN</option>${sshNodes.length || (prefill && prefill.provision_ssh_node_id) ? `<option value="ssh" ${target === 'ssh' ? 'selected' : ''}>نود SSH (Linux Agent)</option><option value="both" ${target === 'both' ? 'selected' : ''}>ترکیبی VPN + SSH (حجم و زمان مشترک)</option>` : ''}</select></label>
       <div id="prod-vpn-fields" style="display:${target === 'ssh' ? 'none' : ''}"><label class="field"><span>پنل VPN</span><select class="input" id="prod-server">${panelServers.map(s => `<option value="${s.id}" ${prefill && Number(prefill.provision_server_id) === Number(s.id) ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label></div>
-      <div id="prod-ssh-fields" style="display:${(target === 'ssh' || target === 'both') ? '' : 'none'}"><label class="field"><span>نود SSH</span><select class="input" id="prod-ssh-node">${sshNodes.map(n => `<option value="${n.id}" ${prefill && Number(prefill.provision_ssh_node_id) === Number(n.id) ? 'selected' : ''}>${esc(n.name)} · ${esc(n.host || '')}</option>`).join('')}</select><span class="card-sub">فقط Linux Agent فعال با حسابداری معتبر پشتیبانی می‌شود.</span></label></div>
+      <div id="prod-ssh-fields" style="display:${(target === 'ssh' || target === 'both') ? '' : 'none'}"><label class="field"><span>نود SSH</span><select class="input" id="prod-ssh-node">${sshNodes.map(n => `<option value="${n.id}" data-protocols="${esc((n.protocols || ['ssh']).join(','))}" ${prefill && Number(prefill.provision_ssh_node_id) === Number(n.id) ? 'selected' : ''}>${esc(n.name)} · ${esc(n.host || '')}</option>`).join('')}</select><span class="card-sub">فقط Linux Agent فعال با حسابداری معتبر پشتیبانی می‌شود.</span></label>
+      <label class="field"><span>پروتکل حساب</span><select class="input" id="prod-ssh-protocol" data-prefill="${esc((prefill && prefill.provision_ssh_protocol) || 'ssh')}"><option value="ssh">SSH</option></select><span class="card-sub">OpenVPN فقط در محصول «ترکیبی» ممکن است و فایل آن داخل لینک ساب اختصاصی تحویل می‌شود (ساب اختصاصی باید فعال باشد).</span></label></div>
       <label class="field field-row"><span>♾ مدت اعتبار نامحدود</span><input type="checkbox" id="prod-duration-unlimited" ${durUnlimited ? 'checked' : ''}></label>
       <label class="field"><span>حجم (GB) — ۰ = نامحدود</span><input class="input" id="prod-volume" type="number" min="0" step="1" placeholder="حجم (گیگابایت)" value="${prefill && prefill.auto_provision_volume_gb != null ? prefill.auto_provision_volume_gb : ''}" ${volUnlimited ? 'disabled' : ''}></label>
       <label class="field field-row"><span>♾ حجم نامحدود</span><input type="checkbox" id="prod-volume-unlimited" ${volUnlimited ? 'checked' : ''}></label>
@@ -3489,10 +3490,24 @@ function wireProductProvisionToggle(b) {
     if (df) df.style.display = $('input[name="prod-source"]:checked', b).value === 'direct' ? '' : 'none';
   }));
   const targetType = $('#prod-target-type', b);
+  const syncSshProtocol = () => {
+    const sel = $('#prod-ssh-protocol', b), nodeSel = $('#prod-ssh-node', b);
+    if (!sel || !nodeSel) return;
+    const available = (nodeSel.selectedOptions[0]?.dataset.protocols || 'ssh').split(',').filter(Boolean);
+    const list = (targetType && targetType.value === 'both') ? available : ['ssh'];
+    const keep = sel.value && sel.dataset.touched ? sel.value : (sel.dataset.prefill || 'ssh');
+    sel.innerHTML = list.map(p => `<option value="${esc(p)}" ${p === keep ? 'selected' : ''}>${esc(SSH_PROTO_LABELS[p] || p)}</option>`).join('');
+  };
+  if ($('#prod-ssh-protocol', b)) {
+    $('#prod-ssh-protocol', b).addEventListener('change', e => { e.target.dataset.touched = '1'; });
+    if ($('#prod-ssh-node', b)) $('#prod-ssh-node', b).addEventListener('change', syncSshProtocol);
+    syncSshProtocol();
+  }
   if (targetType) targetType.addEventListener('change', () => {
     const t = targetType.value;
     if ($('#prod-vpn-fields', b)) $('#prod-vpn-fields', b).style.display = t === 'ssh' ? 'none' : '';
     if ($('#prod-ssh-fields', b)) $('#prod-ssh-fields', b).style.display = (t === 'ssh' || t === 'both') ? '' : 'none';
+    syncSshProtocol();
   });
   const durUnlimitedCb = $('#prod-duration-unlimited', b);
   if (durUnlimitedCb) {
@@ -3527,12 +3542,12 @@ function readProductProvisionFields(b) {
     const provision_ssh_node_id = Number($('#prod-ssh-node', b)?.value || 0);
     if (!provision_server_id) { toast('یک پنل VPN فعال انتخاب کنید.', true); return { ok: false }; }
     if (!provision_ssh_node_id) { toast('یک نود SSH فعال انتخاب کنید.', true); return { ok: false }; }
-    return { ok: true, source: 'direct', provision_server_id, provision_ssh_node_id, auto_provision_volume_gb, duration_days };
+    return { ok: true, source: 'direct', provision_server_id, provision_ssh_node_id, provision_ssh_protocol: $('#prod-ssh-protocol', b)?.value || 'ssh', auto_provision_volume_gb, duration_days };
   }
   if (target === 'ssh') {
     const provision_ssh_node_id = Number($('#prod-ssh-node', b)?.value || 0);
     if (!provision_ssh_node_id) { toast('یک نود SSH فعال انتخاب کنید.', true); return { ok: false }; }
-    return { ok: true, source: 'direct', provision_server_id: null, provision_ssh_node_id, auto_provision_volume_gb, duration_days };
+    return { ok: true, source: 'direct', provision_server_id: null, provision_ssh_node_id, provision_ssh_protocol: 'ssh', auto_provision_volume_gb, duration_days };
   }
   const provision_server_id = Number($('#prod-server', b)?.value || 0);
   if (!provision_server_id) { toast('یک پنل VPN فعال انتخاب کنید.', true); return { ok: false }; }
@@ -3646,6 +3661,7 @@ function openProductEditModal(product, categories, panelServers, sshNodes) {
       if (prov.source === 'direct') {
         payload.provision_server_id = prov.provision_server_id;
         payload.provision_ssh_node_id = prov.provision_ssh_node_id;
+        payload.provision_ssh_protocol = prov.provision_ssh_protocol;
         payload.auto_provision_volume_gb = prov.auto_provision_volume_gb;
       }
       try {
@@ -3752,7 +3768,7 @@ async function renderCatalog() {
         await apiPost('/products', {
           category_id: Number($('#prod-cat', b).value), name, price: disc.price, compare_price: disc.compare_price, discount_days: disc.discount_days, discount_max_uses: disc.discount_max_uses,
           description: $('#prod-desc', b).value, duration_days: prov.duration_days,
-          provision_server_id: prov.provision_server_id, provision_ssh_node_id: prov.provision_ssh_node_id,
+          provision_server_id: prov.provision_server_id, provision_ssh_node_id: prov.provision_ssh_node_id, provision_ssh_protocol: prov.provision_ssh_protocol,
           auto_provision_volume_gb: prov.auto_provision_volume_gb, payment_methods,
         });
         toast('محصول اضافه شد.'); close(); renderCatalog();
@@ -3887,7 +3903,7 @@ function renderCatalogBento(categories, products, panelServers, sshNodes, paymen
         await apiPost('/products', {
           category_id: Number($('#prod-cat', b).value), name, price: disc.price, compare_price: disc.compare_price, discount_days: disc.discount_days, discount_max_uses: disc.discount_max_uses,
           description: $('#prod-desc', b).value, duration_days: prov.duration_days,
-          provision_server_id: prov.provision_server_id, provision_ssh_node_id: prov.provision_ssh_node_id,
+          provision_server_id: prov.provision_server_id, provision_ssh_node_id: prov.provision_ssh_node_id, provision_ssh_protocol: prov.provision_ssh_protocol,
           auto_provision_volume_gb: prov.auto_provision_volume_gb, payment_methods,
         });
         toast('محصول اضافه شد.'); close(); renderCatalog();
@@ -4021,7 +4037,7 @@ function renderCatalogBrutalist(categories, products, panelServers, sshNodes, pa
         await apiPost('/products', {
           category_id: Number($('#prod-cat', b).value), name, price: disc.price, compare_price: disc.compare_price, discount_days: disc.discount_days, discount_max_uses: disc.discount_max_uses,
           description: $('#prod-desc', b).value, duration_days: prov.duration_days,
-          provision_server_id: prov.provision_server_id, provision_ssh_node_id: prov.provision_ssh_node_id,
+          provision_server_id: prov.provision_server_id, provision_ssh_node_id: prov.provision_ssh_node_id, provision_ssh_protocol: prov.provision_ssh_protocol,
           auto_provision_volume_gb: prov.auto_provision_volume_gb, payment_methods,
         });
         toast('محصول اضافه شد.'); close(); renderCatalog();
@@ -6691,6 +6707,39 @@ function wirePanelReorder(servers) {
 }
 
 let sshTab = 'nodes';
+const SSH_PROTO_LABELS = { ssh: 'SSH', openvpn: 'OpenVPN' };
+function sshProtoFieldsHtml(installed = []) {
+  const box = (key, checked) => `<label style="display:flex;gap:6px;align-items:center"><input type="checkbox" data-ssh-proto="${key}" ${installed.includes(key) ? 'checked disabled' : (checked ? 'checked' : '')}> ${SSH_PROTO_LABELS[key]}${installed.includes(key) ? ' <span class="card-sub">(نصب شده)</span>' : ''}</label>`;
+  return `<div class="field"><span>پروتکل‌ها (تیک بزنید)</span>${box('ssh', !installed.length)}${box('openvpn', false)}</div>
+    <div data-ssh-ovpn-opts style="display:none" class="form-grid">
+      <label class="field"><span>پورت OpenVPN</span><input class="input" data-ssh-ovpn-port type="number" min="1" max="65535" value="1194" dir="ltr"></label>
+      <label class="field"><span>انتقال OpenVPN</span><select class="input" data-ssh-ovpn-proto><option value="udp">UDP (سریع‌تر)</option><option value="tcp">TCP (عبور بهتر از فیلتر)</option></select></label>
+    </div>`;
+}
+function sshBindProtoFields(el) {
+  const sync = () => { const on = el.querySelector('[data-ssh-proto="openvpn"]:not(:disabled)')?.checked; const o = el.querySelector('[data-ssh-ovpn-opts]'); if (o) o.style.display = on ? '' : 'none'; };
+  el.querySelectorAll('[data-ssh-proto]').forEach(c => c.addEventListener('change', sync));
+  sync();
+}
+function sshReadProtoFields(el) {
+  const protocols = [...el.querySelectorAll('[data-ssh-proto]:not(:disabled)')].filter(c => c.checked).map(c => c.dataset.sshProto);
+  return { protocols, ovpn_port: Number(el.querySelector('[data-ssh-ovpn-port]')?.value) || 1194, ovpn_proto: el.querySelector('[data-ssh-ovpn-proto]')?.value || 'udp' };
+}
+async function sshRunInstallJob(el, btn, logEl, startRequest, onDone) {
+  btn.disabled = true; logEl.style.display = ''; logEl.textContent = 'شروع نصب...';
+  try {
+    const r = await startRequest();
+    el.querySelectorAll('input[type=password]').forEach(i => { i.value = ''; });
+    for (let i = 0; i < 400; i++) {
+      await new Promise(res => setTimeout(res, 2000));
+      const j = await apiGet(`/ssh/nodes/install-jobs/${r.job_id}`);
+      logEl.textContent = (j.log || []).join('\n');
+      if (j.status === 'done') { toast(j.warning ? ('نصب شد؛ ' + j.warning) : 'نصب با موفقیت انجام شد.', !!j.warning); onDone(); return; }
+      if (j.status === 'error') { logEl.textContent += '\n❌ ' + (j.error || 'خطا'); toast(j.error || 'نصب ناموفق بود.', true); btn.disabled = false; return; }
+    }
+    toast('نصب طولانی شد؛ بعداً وضعیت نودها را بررسی کنید.', true); btn.disabled = false;
+  } catch (err) { handleErr(err); btn.disabled = false; }
+}
 async function renderSSHManagement() {
   const d = await apiGet('/ssh/overview');
   const nodes = d.nodes || [], pools = d.pools || [], accounts = d.accounts || [];
@@ -6707,24 +6756,26 @@ async function renderSSHManagement() {
     '<button class="btn btn-sm" id="ssh-reconcile">پایش و اعمال سهمیه</button><button class="btn btn-sm" id="ssh-attach-open">اتصال VPN به استخر</button><button class="btn btn-primary btn-sm" id="ssh-add-pool">+ ساخت استخر</button>'}</div>`;
 
   const nodesHtml = `<div class="card"><div class="table-wrap"><table>
-    <thead><tr><th>نام</th><th>آدرس</th><th>وضعیت</th><th>عملیات</th></tr></thead>
+    <thead><tr><th>نام</th><th>آدرس</th><th>پروتکل‌ها</th><th>وضعیت</th><th>عملیات</th></tr></thead>
     <tbody>${nodes.map(n=>`<tr>
       <td>${esc(n.name)}</td>
       <td class="mono" style="direction:ltr;text-align:right">${esc(n.host)}:${Number(n.port)}</td>
+      <td>${(n.protocols||['ssh']).map(p=>`<span class="chip">${esc(SSH_PROTO_LABELS[p]||p)}${p==='openvpn'&&n.ovpn_port?` · ${Number(n.ovpn_port)}/${esc(n.ovpn_proto||'udp')}`:''}</span>`).join(' ')}</td>
       <td>${esc(statusFa(n.status))}${n.last_error ? `<div style="font-size:11px;color:#FB7185;margin-top:4px">${esc(n.last_error)}</div>` : ''}</td>
-      <td style="white-space:nowrap"><button class="btn btn-sm" data-ssh-test-node="${Number(n.id)}">تست اتصال</button> <button class="btn btn-sm" data-ssh-rename-node="${Number(n.id)}" data-ssh-node-name="${esc(n.name)}">تغییر نام</button> <button class="btn btn-danger btn-sm" data-ssh-del-node="${Number(n.id)}">حذف</button></td>
-    </tr>`).join('') || '<tr><td colspan="4" class="empty-state">هنوز نودی ثبت نشده است.</td></tr>'}</tbody></table></div></div>`;
+      <td style="white-space:nowrap"><button class="btn btn-sm" data-ssh-test-node="${Number(n.id)}">تست اتصال</button> ${(n.protocols||['ssh']).length<2&&n.node_type==='linux'?`<button class="btn btn-sm" data-ssh-add-proto="${Number(n.id)}">+ پروتکل</button> `:''}<button class="btn btn-sm" data-ssh-rename-node="${Number(n.id)}" data-ssh-node-name="${esc(n.name)}">تغییر نام</button> <button class="btn btn-danger btn-sm" data-ssh-del-node="${Number(n.id)}">حذف</button></td>
+    </tr>`).join('') || '<tr><td colspan="5" class="empty-state">هنوز نودی ثبت نشده است.</td></tr>'}</tbody></table></div></div>`;
 
   const accountsHtml = `<div class="card"><div class="table-wrap"><table>
-    <thead><tr><th>نام کاربری</th><th>سرور</th><th>کاربر</th><th>استخر</th><th>وضعیت</th><th>عملیات</th></tr></thead>
+    <thead><tr><th>نام کاربری</th><th>پروتکل</th><th>سرور</th><th>کاربر</th><th>استخر</th><th>وضعیت</th><th>عملیات</th></tr></thead>
     <tbody>${accounts.map(a=>`<tr>
       <td><b>${esc(a.username)}</b></td>
+      <td>${esc(SSH_PROTO_LABELS[a.protocol]||a.protocol||'SSH')}</td>
       <td class="mono" style="direction:ltr;text-align:right">${esc(a.host)}:${Number(a.port)}</td>
       <td>${Number(a.user_id)}</td>
       <td>${a.quota_pool_id ? '#'+Number(a.quota_pool_id) : '—'}</td>
       <td>${esc(statusFa(a.status))}</td>
       <td style="white-space:nowrap"><button class="btn btn-sm" data-ssh-account-action="enable" data-ssh-account-id="${esc(a.account_id)}">فعال</button> <button class="btn btn-sm" data-ssh-account-action="disable" data-ssh-account-id="${esc(a.account_id)}">غیرفعال</button> <button class="btn btn-danger btn-sm" data-ssh-account-action="delete" data-ssh-account-id="${esc(a.account_id)}">حذف</button></td>
-    </tr>`).join('') || '<tr><td colspan="6" class="empty-state">هنوز حساب SSH ثبت نشده است.</td></tr>'}</tbody></table></div></div>`;
+    </tr>`).join('') || '<tr><td colspan="7" class="empty-state">هنوز حسابی ثبت نشده است.</td></tr>'}</tbody></table></div></div>`;
 
   const poolsHtml = `<div class="card"><div class="table-wrap"><table>
     <thead><tr><th>شناسه</th><th>عنوان</th><th>کاربر</th><th>مصرف</th><th>وضعیت</th><th>اعضا</th></tr></thead>
@@ -6739,33 +6790,47 @@ async function renderSSHManagement() {
   $$('[data-ssh-tab]',content()).forEach(b=>b.addEventListener('click',()=>{sshTab=b.dataset.sshTab;renderSSHManagement();}));
 
   // ---- افزودن نود (نصب خودکار) ----
-  $('#ssh-add-node')?.addEventListener('click',()=>openModal('افزودن نود SSH',`
+  $('#ssh-add-node')?.addEventListener('click',()=>openModal('افزودن نود',`
     <div class="form-grid">
-      <label class="field"><span>نام نود</span><input class="input" id="ssh-auto-name" placeholder="Germany-SSH-1" maxlength="80"></label>
+      <label class="field"><span>نام نود</span><input class="input" id="ssh-auto-name" placeholder="Germany-1" maxlength="80"></label>
       <label class="field"><span>آی‌پی سرور</span><input class="input" id="ssh-auto-host" placeholder="203.0.113.10" dir="ltr"></label>
       <label class="field"><span>پورت SSH</span><input class="input" id="ssh-auto-port" type="number" min="1" max="65535" value="22"></label>
       <label class="field"><span>رمز root</span><input class="input" id="ssh-auto-pass" type="password" autocomplete="off" dir="ltr"></label>
+      ${sshProtoFieldsHtml([])}
       <button class="btn btn-primary" id="ssh-auto-install">نصب و راه‌اندازی خودکار</button>
     </div>
     <pre id="ssh-auto-log" class="mono" style="display:none;white-space:pre-wrap;margin-top:8px"></pre>
-    <p class="card-sub">سرور باید Ubuntu/Debian تازه باشد. نصب Agent، گواهی TLS، توکن، فایروال و تست حسابداری حجم خودکار انجام می‌شود. رمز root فقط برای همین نصب استفاده می‌شود و ذخیره نمی‌شود.</p>`,(el,close)=>{
-    el.querySelector('#ssh-auto-install').addEventListener('click', async e => {
+    <p class="card-sub">سرور باید Ubuntu/Debian تازه باشد. می‌توانید فقط SSH، فقط OpenVPN یا هر دو را با هم نصب کنید. نصب Agent، گواهی TLS، توکن، فایروال و تست حسابداری حجم خودکار انجام می‌شود. رمز root فقط برای همین نصب استفاده می‌شود و ذخیره نمی‌شود.</p>`,(el,close)=>{
+    sshBindProtoFields(el);
+    el.querySelector('#ssh-auto-install').addEventListener('click', e => {
       const btn=e.currentTarget, logEl=el.querySelector('#ssh-auto-log');
       const name=el.querySelector('#ssh-auto-name').value.trim(), host=el.querySelector('#ssh-auto-host').value.trim(), password=el.querySelector('#ssh-auto-pass').value;
+      const pf=sshReadProtoFields(el);
       if(!name||!host||!password){toast('نام، آی‌پی و رمز root را وارد کنید.',true);return;}
-      btn.disabled=true; logEl.style.display=''; logEl.textContent='شروع نصب...';
-      try {
-        const r=await apiPost('/ssh/nodes/auto-install',{name,host,ssh_port:Number(el.querySelector('#ssh-auto-port').value)||22,username:'root',password});
-        el.querySelector('#ssh-auto-pass').value='';
-        for(let i=0;i<400;i++){
-          await new Promise(res=>setTimeout(res,2000));
-          const j=await apiGet(`/ssh/nodes/install-jobs/${r.job_id}`);
-          logEl.textContent=(j.log||[]).join('\n');
-          if(j.status==='done'){toast(j.warning?('نود نصب شد؛ '+j.warning):'نود با موفقیت نصب و فعال شد.',!!j.warning);close();await renderSSHManagement();return;}
-          if(j.status==='error'){logEl.textContent+='\n❌ '+(j.error||'خطا');toast(j.error||'نصب ناموفق بود.',true);btn.disabled=false;return;}
-        }
-        toast('نصب طولانی شد؛ بعداً وضعیت نودها را بررسی کنید.',true);btn.disabled=false;
-      } catch(err){handleErr(err);btn.disabled=false;}
+      if(!pf.protocols.length){toast('حداقل یک پروتکل را تیک بزنید.',true);return;}
+      sshRunInstallJob(el,btn,logEl,()=>apiPost('/ssh/nodes/auto-install',{name,host,ssh_port:Number(el.querySelector('#ssh-auto-port').value)||22,username:'root',password,...pf}),async()=>{close();await renderSSHManagement();});
+    });
+  }));
+
+  // ---- افزودن پروتکل به نود موجود ----
+  $$('[data-ssh-add-proto]',content()).forEach(btn=>btn.addEventListener('click',()=>{
+    const node=nodes.find(n=>Number(n.id)===Number(btn.dataset.sshAddProto)); if(!node) return;
+    openModal(`افزودن پروتکل به «${esc(node.name)}»`,`
+      <div class="form-grid">
+        <label class="field"><span>رمز root سرور ${esc(node.host)}</span><input class="input" id="ssh-up-pass" type="password" autocomplete="off" dir="ltr"></label>
+        ${sshProtoFieldsHtml(node.protocols||['ssh'])}
+        <button class="btn btn-primary" id="ssh-up-install">نصب روی این نود</button>
+      </div>
+      <pre id="ssh-up-log" class="mono" style="display:none;white-space:pre-wrap;margin-top:8px"></pre>
+      <p class="card-sub">حساب‌ها و تنظیمات فعلی نود دست نمی‌خورند؛ فقط پروتکل تیک‌خورده نصب می‌شود. رمز root ذخیره نمی‌شود.</p>`,(el,close)=>{
+      sshBindProtoFields(el);
+      el.querySelector('#ssh-up-install').addEventListener('click', e => {
+        const b=e.currentTarget, logEl=el.querySelector('#ssh-up-log'), password=el.querySelector('#ssh-up-pass').value;
+        const pf=sshReadProtoFields(el);
+        if(!password){toast('رمز root را وارد کنید.',true);return;}
+        if(!pf.protocols.length){toast('پروتکلی برای نصب تیک نخورده است.',true);return;}
+        sshRunInstallJob(el,b,logEl,()=>apiPost(`/ssh/nodes/${Number(node.id)}/add-protocols`,{password,...pf}),async()=>{close();await renderSSHManagement();});
+      });
     });
   }));
 
@@ -6802,18 +6867,28 @@ async function renderSSHManagement() {
   // ---- ساخت حساب ----
   $('#ssh-add-account')?.addEventListener('click',()=>openModal('ساخت حساب SSH',`
     <div class="form-grid">
-      <label class="field"><span>نود فعال</span><select class="input" id="ssh-account-node"><option value="">انتخاب نود</option>${nodes.map(n=>`<option value="${Number(n.id)}">${esc(n.name)} · #${Number(n.id)}</option>`).join('')}</select></label>
+      <label class="field"><span>نود فعال</span><select class="input" id="ssh-account-node"><option value="">انتخاب نود</option>${nodes.map(n=>`<option value="${Number(n.id)}" data-protocols="${esc((n.protocols||['ssh']).join(','))}">${esc(n.name)} · #${Number(n.id)}</option>`).join('')}</select></label>
+      <label class="field"><span>پروتکل حساب</span><select class="input" id="ssh-account-protocol"><option value="ssh">SSH</option></select></label>
       <label class="field"><span>شناسه کاربر</span><input class="input" id="ssh-account-user" type="number" min="1"></label>
-      <label class="field"><span>نام کاربری SSH</span><input class="input" id="ssh-account-username" maxlength="32" placeholder="user123"></label>
+      <label class="field"><span>نام کاربری</span><input class="input" id="ssh-account-username" maxlength="32" placeholder="user123"></label>
       <label class="field"><span>سقف مستقل (GB) — بدون استخر</span><input class="input" id="ssh-account-limit" type="number" min="0" step="0.1" value="0"></label>
       <label class="field"><span>مدت (روز)</span><input class="input" id="ssh-account-days" type="number" min="0" value="30"></label>
       <label class="field"><span>استخر مشترک (اختیاری)</span><select class="input" id="ssh-account-pool"><option value="">بدون استخر</option>${pools.filter(p=>p.status==='active').map(p=>`<option value="${Number(p.id)}">#${Number(p.id)} · کاربر ${Number(p.user_id)} · ${esc(p.label||'')}</option>`).join('')}</select></label>
       <button class="btn btn-primary" id="ssh-account-create">ساخت حساب</button>
     </div>`,(el,close)=>{
+    const nodeSel=el.querySelector('#ssh-account-node'), protoSel=el.querySelector('#ssh-account-protocol');
+    nodeSel.addEventListener('change',()=>{
+      const list=(nodeSel.selectedOptions[0]?.dataset.protocols||'ssh').split(',').filter(Boolean);
+      protoSel.innerHTML=list.map(p=>`<option value="${esc(p)}">${esc(SSH_PROTO_LABELS[p]||p)}</option>`).join('');
+    });
     el.querySelector('#ssh-account-create').addEventListener('click', async e => {
       const btn=e.currentTarget; btn.disabled=true;
-      try { const poolVal=el.querySelector('#ssh-account-pool').value; const r=await apiPost('/ssh/accounts',{node_id:Number(el.querySelector('#ssh-account-node').value),user_id:Number(el.querySelector('#ssh-account-user').value),username:el.querySelector('#ssh-account-username').value.trim(),limit_gb:Number(el.querySelector('#ssh-account-limit').value),days:Number(el.querySelector('#ssh-account-days').value),quota_pool_id:poolVal?Number(poolVal):null});
+      try { const poolVal=el.querySelector('#ssh-account-pool').value; const r=await apiPost('/ssh/accounts',{node_id:Number(el.querySelector('#ssh-account-node').value),user_id:Number(el.querySelector('#ssh-account-user').value),username:el.querySelector('#ssh-account-username').value.trim(),limit_gb:Number(el.querySelector('#ssh-account-limit').value),days:Number(el.querySelector('#ssh-account-days').value),quota_pool_id:poolVal?Number(poolVal):null,protocol:protoSel.value});
         close();
+        if(r.protocol==='openvpn'){
+          openModal('حساب OpenVPN ساخته شد',`<p>نام کاربری: <b>${esc(r.username)}</b></p><p>سرور: <code>${esc(r.host)}:${Number(r.port)}</code></p><p class="card-sub">پروفایل .ovpn فقط همین بار نمایش داده می‌شود؛ آن را دانلود و به کاربر تحویل بده.</p><button class="btn btn-primary" id="ssh-download-ovpn">دانلود فایل .ovpn</button>`,(el2)=>{el2.querySelector('#ssh-download-ovpn')?.addEventListener('click',()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([r.profile||''],{type:'application/x-openvpn-profile'}));a.download=`${r.username}.ovpn`;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000);});});
+          await renderSSHManagement(); return;
+        }
         openModal('حساب SSH ساخته شد',`<p>نام کاربری: <b>${esc(r.username)}</b></p><p>سرور: <code>${esc(r.host)}:${Number(r.port)}</code></p><p>رمز عبور (فقط همین بار نمایش داده می‌شود):</p><input class="input" id="ssh-created-password" readonly value="${esc(r.password||'')}"><p class="card-sub">${esc(r.warning||'رمز را امن به کاربر تحویل بده؛ در دیتابیس ذخیره نشده است.')}</p><button class="btn btn-primary" id="ssh-copy-created-password">کپی رمز</button>`,(el2)=>{el2.querySelector('#ssh-copy-created-password')?.addEventListener('click',async()=>{try{await navigator.clipboard.writeText(r.password||'');toast('رمز کپی شد.');}catch(_){el2.querySelector('#ssh-created-password')?.select();toast('رمز را دستی کپی کن.');}});});
         await renderSSHManagement();
       } catch(err){handleErr(err);btn.disabled=false;}
