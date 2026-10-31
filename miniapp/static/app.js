@@ -183,7 +183,8 @@ async function api(path, options = {}) {
       throw new Error(err.detail.message || "ابتدا قوانین و مقررات را تأیید کنید.");
     }
     const msg = typeof err.detail === "string" ? err.detail : (err.detail && err.detail.message) || "خطای ناشناخته";
-    throw new Error(msg);
+    const apiErr = new Error(msg); apiErr.status = res.status;
+    throw apiErr;
   }
   return res.json();
 }
@@ -4510,14 +4511,25 @@ async function renderAdminSshSection() {
     body.querySelectorAll("[data-ssh-del-node]").forEach((b) => (b.onclick = async () => {
       if (!confirm("این نود حذف شود؟")) return;
       try { await api(`/api/admin/ssh/nodes/${b.dataset.sshDelNode}`, { method: "DELETE" }); rerender(); }
-      catch (e) { notify(e.message); }
+      catch (e) {
+        if (!/حساب SSH فعال/.test(e.message || "")) { notify(e.message); return; }
+        if (!confirm(e.message + "\n\nاگر سرور این نود حذف شده یا از دسترس خارج است، می‌توانید نود و همه‌ی حساب‌هایش را فقط از پنل پاک کنید (روی سرور هیچ تغییری داده نمی‌شود). ادامه می‌دهید؟")) return;
+        try { await api(`/api/admin/ssh/nodes/${b.dataset.sshDelNode}?force=true`, { method: "DELETE" }); rerender(); }
+        catch (e2) { notify(e2.message); }
+      }
     }));
     body.querySelectorAll("[data-ssh-acc]").forEach((b) => (b.onclick = async () => {
       const action = b.dataset.sshAcc;
       if (action === "delete" && !confirm("حساب SSH حذف شود؟")) return;
       b.disabled = true;
       try { await api(`/api/admin/ssh/accounts/${encodeURIComponent(b.dataset.id)}/action`, { method: "POST", body: JSON.stringify({ action }) }); rerender(); }
-      catch (e) { notify(e.message); b.disabled = false; }
+      catch (e) {
+        if (action === "delete" && e.status === 502 && confirm(e.message + "\n\nحذف اجباری فقط از پنل انجام شود؟")) {
+          try { await api(`/api/admin/ssh/accounts/${encodeURIComponent(b.dataset.id)}/action`, { method: "POST", body: JSON.stringify({ action, force: true }) }); rerender(); return; }
+          catch (e2) { notify(e2.message); }
+        } else { notify(e.message); }
+        b.disabled = false;
+      }
     }));
   } catch (e) {
     body.innerHTML = errorState(escHtml(e.message || "خطا در بارگذاری SSH"));
