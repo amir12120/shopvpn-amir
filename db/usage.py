@@ -176,7 +176,7 @@ class UsageMixin:
     def ssh_accounts_for_config(self, custom_config_id: int, protocol: str = "ssh") -> list:
         with self._get_conn() as conn:
             rows = conn.execute(
-                "SELECT a.account_id,a.username,a.host,a.port,a.credential_enc,n.name AS node_name FROM ssh_accounts a "
+                "SELECT a.account_id,a.username,a.host,a.port,a.credential_enc,n.name AS node_name,n.config_json AS node_config_json FROM ssh_accounts a "
                 "JOIN ssh_nodes n ON n.id=a.node_id WHERE a.custom_config_id=? AND a.status='active' AND a.protocol=? ORDER BY a.id",
                 (int(custom_config_id), str(protocol))
             ).fetchall()
@@ -374,6 +374,28 @@ class UsageMixin:
         with self._get_conn() as conn:
             sql = "SELECT * FROM ssh_nodes" + (" WHERE status='active'" if active_only else "") + " ORDER BY id DESC"
             return [dict(r) for r in conn.execute(sql).fetchall()]
+
+    def get_ssh_node(self, node_id: int):
+        with self._get_conn() as conn:
+            row = conn.execute("SELECT * FROM ssh_nodes WHERE id=?", (int(node_id),)).fetchone()
+            return dict(row) if row else None
+
+    def replace_ssh_node_config_keys(self, node_id: int, updates: dict, remove: tuple = ()) -> bool:
+        """مثل merge_ssh_node_config ولی کلیدهای remove هم از config_json پاک می‌شوند."""
+        with self._get_conn() as conn:
+            row = conn.execute("SELECT config_json FROM ssh_nodes WHERE id=?", (int(node_id),)).fetchone()
+            if not row:
+                return False
+            try:
+                config = json.loads(row["config_json"] or "{}")
+            except (TypeError, ValueError):
+                config = {}
+            for key in remove:
+                config.pop(key, None)
+            config.update(updates or {})
+            cur = conn.execute("UPDATE ssh_nodes SET config_json=?,updated_at=? WHERE id=?",
+                               (json.dumps(config, ensure_ascii=False), datetime.now(timezone.utc).isoformat(), int(node_id)))
+            return bool(cur.rowcount)
 
     def update_ssh_node_name(self, node_id: int, name: str) -> bool:
         name = str(name or "").strip()
