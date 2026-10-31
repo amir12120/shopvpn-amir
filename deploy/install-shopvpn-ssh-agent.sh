@@ -2,8 +2,8 @@
 set -Eeuo pipefail
 
 # Install the ShopVPN node agent on a Debian/Ubuntu Linux node.
-# Usage (from the project root, as root): bash deploy/install-shopvpn-ssh-agent.sh [ssh|openvpn|ssh,openvpn]
-# Optional environment: OVPN_PORT (default 1194), OVPN_PROTO (udp|tcp, default udp), SHOPVPN_ENABLE_NFT=1
+# Usage (from the project root, as root): bash deploy/install-shopvpn-ssh-agent.sh [ssh|openvpn|wireguard|comma-separated mix]
+# Optional environment: OVPN_PORT (default 1194), OVPN_PROTO (udp|tcp, default udp), WG_PORT (default 51820), SHOPVPN_ENABLE_NFT=1
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Run as root: sudo bash deploy/install-shopvpn-ssh-agent.sh" >&2
@@ -12,21 +12,24 @@ fi
 
 WANT_SSH=0
 WANT_OVPN=0
+WANT_WG=0
 IFS=',' read -r -a REQUESTED <<< "${1:-${SHOPVPN_INSTALL_PROTOCOLS:-ssh}}"
 for item in "${REQUESTED[@]}"; do
   case "${item}" in
     ssh) WANT_SSH=1 ;;
     openvpn) WANT_OVPN=1 ;;
+    wireguard) WANT_WG=1 ;;
     *) echo "Unknown protocol: ${item}" >&2; exit 1 ;;
   esac
 done
-if [[ "${WANT_SSH}" -eq 0 && "${WANT_OVPN}" -eq 0 ]]; then
-  echo "Select at least one protocol: ssh, openvpn" >&2
+if [[ "${WANT_SSH}" -eq 0 && "${WANT_OVPN}" -eq 0 && "${WANT_WG}" -eq 0 ]]; then
+  echo "Select at least one protocol: ssh, openvpn, wireguard" >&2
   exit 1
 fi
 PROTOCOLS=""
 [[ "${WANT_SSH}" -eq 1 ]] && PROTOCOLS="ssh"
 [[ "${WANT_OVPN}" -eq 1 ]] && PROTOCOLS="${PROTOCOLS:+${PROTOCOLS},}openvpn"
+[[ "${WANT_WG}" -eq 1 ]] && PROTOCOLS="${PROTOCOLS:+${PROTOCOLS},}wireguard"
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AGENT_SOURCE="${PROJECT_ROOT}/ssh_node_agent.py"
@@ -34,11 +37,13 @@ SERVICE_SOURCE="${PROJECT_ROOT}/deploy/shopvpn-ssh-agent.service"
 SSHD_TEMPLATE_SOURCE="${PROJECT_ROOT}/deploy/shopvpn-sshd@.service"
 OVPN_DISCONNECT_SOURCE="${PROJECT_ROOT}/deploy/shopvpn-ovpn-disconnect.sh"
 OVPN_NAT_SOURCE="${PROJECT_ROOT}/deploy/shopvpn-ovpn-nat.service"
+WG_NAT_SOURCE="${PROJECT_ROOT}/deploy/shopvpn-wg-nat.service"
 ENV_FILE=/etc/shopvpn-ssh-agent.env
 
 required=("${AGENT_SOURCE}" "${SERVICE_SOURCE}")
 [[ "${WANT_SSH}" -eq 1 ]] && required+=("${SSHD_TEMPLATE_SOURCE}")
 [[ "${WANT_OVPN}" -eq 1 ]] && required+=("${OVPN_DISCONNECT_SOURCE}" "${OVPN_NAT_SOURCE}")
+[[ "${WANT_WG}" -eq 1 ]] && required+=("${WG_NAT_SOURCE}")
 for file in "${required[@]}"; do
   if [[ ! -f "${file}" ]]; then
     echo "Run this script from the extracted ShopVPN project; missing ${file}" >&2
@@ -54,6 +59,7 @@ fi
 packages=(python3 python3-aiohttp nftables openssl)
 [[ "${WANT_SSH}" -eq 1 ]] && packages+=(openssh-server)
 [[ "${WANT_OVPN}" -eq 1 ]] && packages+=(openvpn easy-rsa)
+[[ "${WANT_WG}" -eq 1 ]] && packages+=(wireguard wireguard-tools)
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y "${packages[@]}"
@@ -230,6 +236,51 @@ EOF
   fi
 fi
 
+if [[ "${WANT_WG}" -eq 1 ]]; then
+  WG_IFACE=wg-shopvpn
+  WG_CONF="/etc/wireguard/${WG_IFACE}.conf"
+
+  install -d -o root -g root -m 0700 /etc/wireguard
+  install -o root -g root -m 0644 "${WG_NAT_SOURCE}" /etc/systemd/system/shopvpn-wg-nat.service
+
+  if [[ ! -f "${WG_CONF}" ]]; then
+    WG_PORT="${WG_PORT:-51820}"
+    if ! [[ "${WG_PORT}" =~ ^[0-9]+$ ]] || (( WG_PORT < 1 || WG_PORT > 65535 )); then
+      echo "Invalid WG_PORT" >&2; exit 1
+    fi
+
+    WG_PRIVATE="$(wg genkey)"
+    (
+      umask 077
+      cat > "${WG_CONF}" <<WGEOF
+[Interface]
+Address = 10.88.0.1/16
+ListenPort = ${WG_PORT}
+PrivateKey = ${WG_PRIVATE}
+WGEOF
+    )
+    chmod 0600 "${WG_CONF}"
+
+    set_env SHOPVPN_WG_PORT "${WG_PORT}"
+    set_env SHOPVPN_WG_IFACE "${WG_IFACE}"
+
+    cat > /etc/shopvpn/wg-nat.nft <<'NATEOF'
+table ip shopvpn_wg_nat
+delete table ip shopvpn_wg_nat
+table ip shopvpn_wg_nat {
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+    ip saddr 10.88.0.0/16 masquerade
+  }
+}
+NATEOF
+    echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-shopvpn-wg.conf
+    sysctl -q -p /etc/sysctl.d/99-shopvpn-wg.conf || true
+  else
+    echo "Existing WireGuard server config preserved."
+  fi
+fi
+
 install -o root -g root -m 0644 "${SERVICE_SOURCE}" /etc/systemd/system/shopvpn-ssh-agent.service
 systemctl daemon-reload
 if [[ "${WANT_SSH}" -eq 1 ]]; then
@@ -244,6 +295,11 @@ if [[ "${WANT_OVPN}" -eq 1 ]]; then
   systemctl enable openvpn-server@shopvpn
   systemctl restart openvpn-server@shopvpn
 fi
+if [[ "${WANT_WG}" -eq 1 ]]; then
+  systemctl enable --now shopvpn-wg-nat
+  systemctl enable "wg-quick@wg-shopvpn"
+  systemctl restart "wg-quick@wg-shopvpn"
+fi
 systemctl enable --now shopvpn-ssh-agent
 
 systemctl --no-pager --full status shopvpn-ssh-agent || true
@@ -256,4 +312,7 @@ if [[ "${WANT_SSH}" -eq 1 ]]; then
 fi
 if [[ "${WANT_OVPN}" -eq 1 ]]; then
   echo "OpenVPN listens on the port/protocol configured in ${ENV_FILE}; open it in your firewall/security group."
+fi
+if [[ "${WANT_WG}" -eq 1 ]]; then
+  echo "WireGuard listens on the UDP port configured in ${ENV_FILE} (SHOPVPN_WG_PORT); open it in your firewall/security group."
 fi

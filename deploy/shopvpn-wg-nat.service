@@ -1,0 +1,13 @@
+[Unit]
+Description=ShopVPN WireGuard NAT rules
+After=network-online.target nftables.service
+Before=wg-quick@wg-shopvpn.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/shopvpn/wg-nat.nft
+ExecStop=/usr/sbin/nft delete table ip shopvpn_wg_nat
+
+[Install]
+WantedBy=multi-user.target
