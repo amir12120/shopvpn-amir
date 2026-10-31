@@ -3936,7 +3936,9 @@ def api_add_product(body: ProductBody, admin=Depends(require_permission("catalog
         ssh_node = next((n for n in db.list_ssh_nodes(active_only=True) if int(n["id"]) == int(body.provision_ssh_node_id)), None)
         if not ssh_node or ssh_node.get("node_type") != "linux":
             raise HTTPException(400, "فقط نود Linux Agent فعال برای محصول SSH پشتیبانی می‌شود.")
-    ssh_protocol = _checked_ssh_protocol(body.provision_ssh_protocol, body.provision_server_id, ssh_node)
+    ssh_protocol = _checked_ssh_protocol(
+        body.provision_ssh_protocol, body.provision_server_id, ssh_node,
+        multi=bool(body.extra_panel_ids or body.extra_ssh_node_ids))
     direct_target = bool(body.provision_server_id or body.provision_ssh_node_id)
     extra_panels, extra_nodes = _checked_extra_targets(
         body.provision_server_id, body.provision_ssh_node_id, body.extra_panel_ids, body.extra_ssh_node_ids,
@@ -3995,32 +3997,58 @@ def _checked_extra_targets(server_id, node_id, extra_panels, extra_nodes, protoc
         if not server or not server["is_active"]:
             raise HTTPException(400, tr("پنل VPN فعال پیدا نشد."))
     active_nodes = {int(n["id"]): n for n in db.list_ssh_nodes(active_only=True)}
-    wanted = str(protocol or "ssh").strip().lower()
-    for nid in ([int(node_id)] if node_id else []) + nodes:
+    wanted_list = _split_ssh_protocols(protocol)
+    all_nodes = ([int(node_id)] if node_id else []) + nodes
+    all_panel_count = (1 if server_id else 0) + len(panels)
+    if len(wanted_list) > 1 and all_panel_count == 1 and len(all_nodes) == 1:
+        raise HTTPException(400, tr("در ترکیب یک پنل با یک نود فقط یک پروتکل قابل انتخاب است؛ برای چند پروتکل، مقصدهای بیشتری اضافه کنید."))
+    node_objs = []
+    for nid in all_nodes:
         node = active_nodes.get(int(nid))
         if not node or node.get("node_type") != "linux":
             raise HTTPException(400, "فقط نود Linux Agent فعال برای محصول SSH پشتیبانی می‌شود.")
-        if wanted not in ssh_service.node_protocols(node):
-            raise HTTPException(400, f"پروتکل {wanted} روی نود «{node.get('name')}» نصب نشده است.")
-    if wanted in ("openvpn", "wireguard") and not (server_id or panels):
+        node_objs.append(node)
+        # هر نود باید حداقل یکی از پروتکل‌های انتخابی را داشته باشد (فقط همان‌ها روی آن ساخته می‌شود).
+        if not any(p in ssh_service.node_protocols(node) for p in wanted_list):
+            raise HTTPException(400, f"هیچ‌یک از پروتکل‌های انتخابی روی نود «{node.get('name')}» نصب نشده است.")
+    for p in wanted_list:
+        if node_objs and not any(p in ssh_service.node_protocols(n) for n in node_objs):
+            raise HTTPException(400, f"پروتکل {p} روی هیچ‌یک از نودهای انتخابی نصب نشده است.")
+    if any(p in ("openvpn", "wireguard") for p in wanted_list) and not (server_id or panels):
         raise HTTPException(400, "فایل OpenVPN/WireGuard حداقل یک پنل VPN در محصول لازم دارد.")
     return panels, nodes
 
 
-def _checked_ssh_protocol(requested, server_id, node) -> str:
-    """پروتکل حساب سمت SSH محصول؛ OpenVPN/WireGuard فقط در محصول ترکیبی (فایل داخل ساب اختصاصی) و روی نودی که نصب شده است."""
+def _split_ssh_protocols(value) -> list:
+    """رشته‌ی کاما‌جدا یا لیست پروتکل‌ها را به لیست مرتب و یکتا تبدیل می‌کند."""
+    items = value if isinstance(value, (list, tuple, set)) else str(value or "ssh").split(",")
+    picked = {str(x).strip().lower() for x in items if str(x).strip()}
+    return [p for p in ("ssh", "openvpn", "wireguard") if p in picked] or ["ssh"]
+
+
+def _checked_ssh_protocol(requested, server_id, node, multi: bool = False) -> str:
+    """پروتکل(های) حساب سمت SSH محصول؛ OpenVPN/WireGuard فقط در محصول ترکیبی (فایل داخل ساب اختصاصی) و روی نودی که نصب شده است.
+    انتخاب چند پروتکل فقط در محصول «چند پنل / چند نود» (multi=True) مجاز است. خروجی رشته‌ی کاما‌جدا است.
+    در حالت multi، پوشش پروتکل‌ها روی نودها در _checked_extra_targets بررسی می‌شود."""
     import ssh_service
-    wanted = str(requested or "ssh").strip().lower()
-    if wanted not in ("ssh", "openvpn", "wireguard"):
+    raw = requested if isinstance(requested, (list, tuple, set)) else str(requested or "ssh").split(",")
+    names = {str(x).strip().lower() for x in raw if str(x).strip()}
+    if not names <= {"ssh", "openvpn", "wireguard"}:
         raise HTTPException(400, "پروتکل نامعتبر است.")
+    wanted_list = _split_ssh_protocols(names)
+    if len(wanted_list) > 1 and not multi:
+        raise HTTPException(400, tr("انتخاب چند پروتکل فقط در محصول «چند پنل / چند نود» ممکن است."))
     if not node:
         return "ssh"
-    if wanted not in ssh_service.node_protocols(node):
-        raise HTTPException(400, f"پروتکل {wanted} روی این نود نصب نشده است.")
-    if wanted in ("openvpn", "wireguard") and not server_id:
+    if not multi:
+        for wanted in wanted_list:
+            if wanted not in ssh_service.node_protocols(node):
+                raise HTTPException(400, f"پروتکل {wanted} روی این نود نصب نشده است.")
+    if any(p in ("openvpn", "wireguard") for p in wanted_list) and not server_id:
+        wanted = next(p for p in wanted_list if p in ("openvpn", "wireguard"))
         label = "WireGuard" if wanted == "wireguard" else "OpenVPN"
         raise HTTPException(400, f"{label} فقط در محصول ترکیبی VPN + SSH ممکن است؛ فایل آن داخل لینک ساب اختصاصی تحویل می‌شود.")
-    return wanted
+    return ",".join(wanted_list)
 
 
 class ProductEditBody(BaseModel):
@@ -4141,7 +4169,13 @@ def api_edit_product(product_id: int, body: ProductEditBody, admin=Depends(requi
             requested_protocol = None
         if requested_protocol is not None:
             ssh_node = next((n for n in db.list_ssh_nodes(active_only=True) if int(n["id"]) == int(effective_ssh_node_id)), None)
-            ssh_protocol = _checked_ssh_protocol(requested_protocol, effective_server_id, ssh_node)
+            _pre_extra = db.get_product_extra_targets(product_id)
+            _multi_now = bool(
+                (body.extra_panel_ids if body.extra_panel_ids is not None else
+                 ([] if (provision_server_id is not ... or provision_ssh_node_id is not ...) else _pre_extra["panels"]))
+                or (body.extra_ssh_node_ids if body.extra_ssh_node_ids is not None else
+                    ([] if (provision_server_id is not ... or provision_ssh_node_id is not ...) else _pre_extra["ssh"])))
+            ssh_protocol = _checked_ssh_protocol(requested_protocol, effective_server_id, ssh_node, multi=_multi_now)
     elif provision_ssh_node_id is not ...:
         ssh_protocol = "ssh"
 
@@ -4170,6 +4204,7 @@ def api_edit_product(product_id: int, body: ProductEditBody, admin=Depends(requi
             extras_changed
             or int(effective_server_id or 0) != int(old_product["provision_server_id"] or 0)
             or int(effective_ssh_node_id or 0) != int(old_product["provision_ssh_node_id"] or 0)
+            or (ssh_protocol is not ... and ssh_protocol != (old_product["provision_ssh_protocol"] or "ssh"))
         )
         if targets_changed:
             final_extra_panels, final_extra_nodes = _checked_extra_targets(
