@@ -6746,6 +6746,79 @@ async function sshRunInstallJob(el, btn, logEl, startRequest, onDone) {
     toast('نصب طولانی شد؛ بعداً وضعیت نودها را بررسی کنید.', true); btn.disabled = false;
   } catch (err) { handleErr(err); btn.disabled = false; }
 }
+function sshHostsModal(node, reload) {
+  const protos = node.protocols || ['ssh'];
+  const hosts = (node.hosts || []).map(h => ({ ...h }));
+  const hasSsh = protos.includes('ssh');
+  const protoSelect = (val) => `<select class="input" data-h="protocol">${protos.map(p => `<option value="${p}"${p === val ? ' selected' : ''}>${esc(SSH_PROTO_LABELS[p] || p)}</option>`).join('')}</select>`;
+  const hostRow = (h, i) => `<div class="card" style="padding:10px;margin-bottom:8px" data-host-row="${i}">
+    <div class="form-grid">
+      <label class="field"><span>پروتکل</span>${protoSelect(h.protocol)}</label>
+      <label class="field"><span>عنوان (اختیاری؛ به نام کانفیگ اضافه می‌شود)</span><input class="input" data-h="remark" maxlength="60" value="${esc(h.remark || '')}"></label>
+      <label class="field"><span>آدرس (دامنه یا IP؛ مثلاً سرور تانل)</span><input class="input" data-h="address" dir="ltr" value="${esc(h.address || '')}" placeholder="tunnel.example.com"></label>
+      <label class="field"><span>پورت (خالی = پورت خود نود)</span><input class="input" data-h="port" type="number" min="1" max="65535" dir="ltr" value="${h.port ? Number(h.port) : ''}" ${h.protocol === 'ssh' ? 'disabled placeholder="هر حساب پورت اختصاصی دارد"' : ''}></label>
+      <label class="field" style="flex-direction:row;gap:8px;align-items:center"><input type="checkbox" data-h="enabled" ${h.enabled !== false ? 'checked' : ''}><span>فعال</span></label>
+      <button class="btn btn-danger btn-sm" data-host-del="${i}">حذف هاست</button>
+    </div></div>`;
+  const body = `
+    <p class="card-sub">آدرس واقعی نود (<span class="mono" dir="ltr">${esc(node.host)}</span>) تغییر نمی‌کند؛ هاست‌ها فقط آدرسِ نمایش‌داده‌شده در لینک/فایل کاربر را عوض می‌کنند و روی حساب‌های قدیمی هم اعمال می‌شوند. اگر برای یک پروتکل چند هاست فعال بگذارید، برای هر کدام یک لینک/فایل ساخته می‌شود. بدون هاست فعال، همان آدرس نود استفاده می‌شود.</p>
+    <div id="ssh-hosts-list"></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+      <button class="btn btn-sm" id="ssh-host-add">+ هاست جدید</button>
+      <button class="btn btn-primary btn-sm" id="ssh-hosts-save">ذخیره هاست‌ها</button>
+    </div>
+    ${hasSsh ? `<div class="card" style="padding:10px">
+      <b>بازه‌ی پورت حساب‌های SSH</b>
+      <p class="card-sub">هر حساب SSH یک پورت اختصاصی روی نود می‌گیرد (حسابداری حجم بر اساس پورت است). از این بازه برای حساب‌های جدید انتخاب می‌شود. برای پورت ثابت، شروع و پایان را یکی بگذارید (فقط یک حساب جا می‌شود). حساب‌های قبلی تغییر نمی‌کنند. Agent نود باید نسخه‌ی جدید باشد.</p>
+      <div class="form-grid">
+        <label class="field"><span>از پورت</span><input class="input" id="ssh-range-min" type="number" min="1024" max="65535" dir="ltr" value="${Number(node.ssh_port_min)}"></label>
+        <label class="field"><span>تا پورت</span><input class="input" id="ssh-range-max" type="number" min="1024" max="65535" dir="ltr" value="${Number(node.ssh_port_max)}"></label>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-primary btn-sm" id="ssh-range-save">ذخیره بازه</button>
+        <button class="btn btn-sm" id="ssh-range-reset">بازگشت به پیش‌فرض (20000-39999)</button>
+      </div>
+      <p class="card-sub" id="ssh-range-note">اگر ufw روی نود فعال باشد، Agent بازه‌ی جدید را خودش باز می‌کند؛ در غیر این صورت فایروال/Security Group را دستی باز کنید.</p>
+    </div>` : ''}`;
+  openModal(`هاست‌های نود «${esc(node.name)}»`, body, (el, close) => {
+    const listEl = el.querySelector('#ssh-hosts-list');
+    const readRows = () => $$('[data-host-row]', el).map((row, i) => {
+      const g = k => row.querySelector(`[data-h="${k}"]`);
+      const protocol = g('protocol').value;
+      const portRaw = g('port').value.trim();
+      return { id: hosts[i]?.id || null, protocol, remark: g('remark').value.trim(), address: g('address').value.trim(),
+               port: protocol === 'ssh' || !portRaw ? null : Number(portRaw), enabled: g('enabled').checked };
+    });
+    const draw = () => {
+      listEl.innerHTML = hosts.length ? hosts.map(hostRow).join('') : '<div class="empty-state">هاستی تعریف نشده؛ آدرس خود نود استفاده می‌شود.</div>';
+      $$('[data-host-del]', listEl).forEach(b => b.addEventListener('click', () => { sync(); hosts.splice(Number(b.dataset.hostDel), 1); draw(); }));
+      $$('[data-h="protocol"]', listEl).forEach(sel => sel.addEventListener('change', () => { sync(); draw(); }));
+    };
+    const sync = () => { readRows().forEach((r, i) => { hosts[i] = r; }); };
+    draw();
+    el.querySelector('#ssh-host-add').addEventListener('click', () => {
+      sync();
+      hosts.push({ id: null, protocol: protos[0], remark: '', address: '', port: null, enabled: true });
+      draw();
+    });
+    el.querySelector('#ssh-hosts-save').addEventListener('click', async e => {
+      const btn = e.currentTarget; const payload = readRows();
+      btn.disabled = true;
+      try { await apiPut(`/ssh/nodes/${Number(node.id)}/hosts`, { hosts: payload }); toast('هاست‌ها ذخیره شد.'); close(); await reload(); }
+      catch (err) { handleErr(err); btn.disabled = false; }
+    });
+    const saveRange = async (min, max, btn) => {
+      btn.disabled = true;
+      try {
+        const r = await apiPut(`/ssh/nodes/${Number(node.id)}/ssh-port-range`, { port_min: min, port_max: max });
+        toast(`بازه‌ی پورت SSH ذخیره شد (${r.ssh_port_min}-${r.ssh_port_max}، ظرفیت ${r.capacity} حساب).`);
+        close(); await reload();
+      } catch (err) { handleErr(err); btn.disabled = false; }
+    };
+    el.querySelector('#ssh-range-save')?.addEventListener('click', e => saveRange(Number(el.querySelector('#ssh-range-min').value), Number(el.querySelector('#ssh-range-max').value), e.currentTarget));
+    el.querySelector('#ssh-range-reset')?.addEventListener('click', e => saveRange(null, null, e.currentTarget));
+  }, { wide: true });
+}
 async function renderSSHManagement() {
   const d = await apiGet('/ssh/overview');
   const nodes = d.nodes || [], pools = d.pools || [], accounts = d.accounts || [];
@@ -6765,10 +6838,10 @@ async function renderSSHManagement() {
     <thead><tr><th>نام</th><th>آدرس</th><th>پروتکل‌ها</th><th>وضعیت</th><th>عملیات</th></tr></thead>
     <tbody>${nodes.map(n=>`<tr>
       <td>${esc(n.name)}</td>
-      <td class="mono" style="direction:ltr;text-align:right">${esc(n.host)}:${Number(n.port)}</td>
-      <td>${(n.protocols||['ssh']).map(p=>`<span class="chip">${esc(SSH_PROTO_LABELS[p]||p)}${p==='openvpn'&&n.ovpn_port?` · ${Number(n.ovpn_port)}/${esc(n.ovpn_proto||'udp')}`:''}${p==='wireguard'&&n.wg_port?` · ${Number(n.wg_port)}/udp`:''}</span>`).join(' ')}</td>
+      <td class="mono" style="direction:ltr;text-align:right">${esc(n.host)}:${Number(n.port)}${(n.hosts||[]).filter(h=>h.enabled!==false).map(h=>`<div style="font-size:11px;opacity:.8">↪ ${esc(SSH_PROTO_LABELS[h.protocol]||h.protocol)}: ${esc(h.address)}${h.port?':'+Number(h.port):''}</div>`).join('')}</td>
+      <td>${(n.protocols||['ssh']).map(p=>`<span class="chip">${esc(SSH_PROTO_LABELS[p]||p)}${p==='openvpn'&&n.ovpn_port?` · ${Number(n.ovpn_port)}/${esc(n.ovpn_proto||'udp')}`:''}${p==='wireguard'&&n.wg_port?` · ${Number(n.wg_port)}/udp`:''}${p==='ssh'&&n.ssh_port_custom?` · ${Number(n.ssh_port_min)}-${Number(n.ssh_port_max)}`:''}</span>`).join(' ')}</td>
       <td>${esc(statusFa(n.status))}${n.last_error ? `<div style="font-size:11px;color:#FB7185;margin-top:4px">${esc(n.last_error)}</div>` : ''}</td>
-      <td style="white-space:nowrap"><button class="btn btn-sm" data-ssh-test-node="${Number(n.id)}">تست اتصال</button> ${(n.protocols||['ssh']).length<3&&n.node_type==='linux'?`<button class="btn btn-sm" data-ssh-add-proto="${Number(n.id)}">+ پروتکل</button> `:''}<button class="btn btn-sm" data-ssh-rename-node="${Number(n.id)}" data-ssh-node-name="${esc(n.name)}">تغییر نام</button> <button class="btn btn-danger btn-sm" data-ssh-del-node="${Number(n.id)}">حذف</button></td>
+      <td style="white-space:nowrap"><button class="btn btn-sm" data-ssh-test-node="${Number(n.id)}">تست اتصال</button> ${(n.protocols||['ssh']).length<3&&n.node_type==='linux'?`<button class="btn btn-sm" data-ssh-add-proto="${Number(n.id)}">+ پروتکل</button> `:''}<button class="btn btn-sm" data-ssh-hosts-node="${Number(n.id)}">هاست‌ها</button> <button class="btn btn-sm" data-ssh-rename-node="${Number(n.id)}" data-ssh-node-name="${esc(n.name)}">تغییر نام</button> <button class="btn btn-danger btn-sm" data-ssh-del-node="${Number(n.id)}">حذف</button></td>
     </tr>`).join('') || '<tr><td colspan="5" class="empty-state">هنوز نودی ثبت نشده است.</td></tr>'}</tbody></table></div></div>`;
 
   const accountsHtml = `<div class="card"><div class="table-wrap"><table>
@@ -6776,7 +6849,7 @@ async function renderSSHManagement() {
     <tbody>${accounts.map(a=>`<tr>
       <td><b>${esc(a.username)}</b></td>
       <td>${esc(SSH_PROTO_LABELS[a.protocol]||a.protocol||'SSH')}</td>
-      <td class="mono" style="direction:ltr;text-align:right">${esc(a.host)}:${Number(a.port)}</td>
+      <td class="mono" style="direction:ltr;text-align:right">${esc(a.host)}:${Number(a.port)}${(a.endpoints||[]).filter(e=>e.host_id).map(e=>`<div style="font-size:11px;opacity:.8">↪ ${esc(e.address)}:${Number(e.port)}${e.remark?' · '+esc(e.remark):''}</div>`).join('')}</td>
       <td>${Number(a.user_id)}</td>
       <td>${a.quota_pool_id ? '#'+Number(a.quota_pool_id) : '—'}</td>
       <td>${esc(statusFa(a.status))}</td>
@@ -6907,6 +6980,7 @@ async function renderSSHManagement() {
 
   // ---- عملیات روی نود/حساب/پایش ----
   $$('[data-ssh-rename-node]',content()).forEach(btn=>btn.addEventListener('click',async()=>{const name=(prompt('نام جدید نود (همین نام روی کانفیگ SSH کاربر دیده می‌شود):',btn.dataset.sshNodeName||'')||'').trim();if(!name||name===btn.dataset.sshNodeName)return;btn.disabled=true;try{await apiPost(`/ssh/nodes/${Number(btn.dataset.sshRenameNode)}/rename`,{name});toast('نام نود تغییر کرد.');await renderSSHManagement();}catch(err){handleErr(err);btn.disabled=false;}}));
+  $$('[data-ssh-hosts-node]',content()).forEach(btn=>btn.addEventListener('click',()=>{const node=nodes.find(n=>Number(n.id)===Number(btn.dataset.sshHostsNode));if(node)sshHostsModal(node,renderSSHManagement);}));
   $$('[data-ssh-del-node]',content()).forEach(btn=>btn.addEventListener('click',async()=>{if(!confirm('این نود حذف شود؟'))return;btn.disabled=true;try{await apiDelete(`/ssh/nodes/${Number(btn.dataset.sshDelNode)}`);toast('نود حذف شد.');await renderSSHManagement();}catch(err){handleErr(err);btn.disabled=false;}}));
   $$('[data-ssh-test-node]',content()).forEach(btn=>btn.addEventListener('click',async()=>{btn.disabled=true;try{const r=await apiPost(`/ssh/nodes/${Number(btn.dataset.sshTestNode)}/test`,{});toast(r.ok?'اتصال Agent موفق بود.':'پاسخ Agent معتبر نیست.');await renderSSHManagement();}catch(err){handleErr(err);btn.disabled=false;}}));
   $$('[data-ssh-account-action]',content()).forEach(btn=>btn.addEventListener('click',async()=>{const action=btn.dataset.sshAccountAction;if(action==='delete'&&!confirm('حساب SSH حذف شود؟'))return;btn.disabled=true;try{await apiPost(`/ssh/accounts/${encodeURIComponent(btn.dataset.sshAccountId)}/action`,{action});toast('عملیات انجام شد.');await renderSSHManagement();}catch(err){handleErr(err);btn.disabled=false;}}));
