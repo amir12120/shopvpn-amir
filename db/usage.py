@@ -110,7 +110,7 @@ class UsageMixin:
         if int(user_id) <= 0 or not str(account_id or "").strip() or not str(username or "").strip():
             raise ValueError("اطلاعات حساب SSH ناقص است")
         protocol = str(protocol or "ssh").strip().lower()
-        if protocol not in {"ssh", "openvpn"}:
+        if protocol not in {"ssh", "openvpn", "wireguard"}:
             raise ValueError("پروتکل حساب نامعتبر است")
         if expires_at:
             expires_at = _normalize_timestamp(expires_at)

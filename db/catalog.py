@@ -279,7 +279,7 @@ class CatalogMixin:
                 (category_id, name, price, description, duration_days,
                  1 if is_auto_provision else 0, auto_provision_volume_gb, provision_server_id, provision_ssh_node_id, pm_value,
                  base_users, extra_user_price, max_users, compare_price,
-                 "openvpn" if provision_ssh_node_id and str(provision_ssh_protocol).lower() == "openvpn" else "ssh"),
+                 str(provision_ssh_protocol).lower() if provision_ssh_node_id and str(provision_ssh_protocol).lower() in ("openvpn", "wireguard") else "ssh"),
             )
             return cur.lastrowid
 
@@ -419,7 +419,7 @@ class CatalogMixin:
         if provision_ssh_node_id is not ...:
             fields.append("provision_ssh_node_id=?"); values.append(provision_ssh_node_id)
         if provision_ssh_protocol is not ...:
-            fields.append("provision_ssh_protocol=?"); values.append("openvpn" if str(provision_ssh_protocol).lower() == "openvpn" else "ssh")
+            fields.append("provision_ssh_protocol=?"); values.append(str(provision_ssh_protocol).lower() if str(provision_ssh_protocol).lower() in ("openvpn", "wireguard") else "ssh")
         if payment_methods is not ...:
             fields.append("payment_methods=?")
             values.append(json.dumps(payment_methods, ensure_ascii=False) if payment_methods else None)
