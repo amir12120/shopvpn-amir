@@ -445,6 +445,8 @@ class CatalogMixin:
         values.append(product_id)
         with self._get_conn() as conn:
             conn.execute(f"UPDATE products SET {', '.join(fields)} WHERE id=?", values)
+            if provision_server_id is not ... or provision_ssh_node_id is not ...:
+                conn.execute("DELETE FROM product_extra_targets WHERE product_id=?", (product_id,))
 
 
     def set_product_user_limit(self, product_id: int, extra_user_price: int, max_users: int,

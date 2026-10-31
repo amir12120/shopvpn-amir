@@ -1,0 +1,91 @@
+# -*- coding: utf-8 -*-
+"""مقصدهای چندگانه‌ی محصول (چند پنل VPN و چند نود SSH) و لینک پنل‌های اضافه‌ی هر سرویس."""
+
+
+class MultiTargetMixin:
+    def get_product_extra_targets(self, product_id: int) -> dict:
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT kind,target_id FROM product_extra_targets WHERE product_id=? ORDER BY position,id",
+                (int(product_id),),
+            ).fetchall()
+        return {
+            "panels": [int(r["target_id"]) for r in rows if r["kind"] == "panel"],
+            "ssh": [int(r["target_id"]) for r in rows if r["kind"] == "ssh"],
+        }
+
+    def set_product_extra_targets(self, product_id: int, panel_ids=(), ssh_node_ids=()) -> None:
+        pid = int(product_id)
+        with self._get_conn() as conn:
+            conn.execute("DELETE FROM product_extra_targets WHERE product_id=?", (pid,))
+            position = 0
+            for kind, ids in (("panel", panel_ids), ("ssh", ssh_node_ids)):
+                seen = set()
+                for raw in ids or ():
+                    target = int(raw)
+                    if target <= 0 or target in seen:
+                        continue
+                    seen.add(target)
+                    conn.execute(
+                        "INSERT INTO product_extra_targets (product_id,kind,target_id,position) VALUES (?,?,?,?)",
+                        (pid, kind, target, position),
+                    )
+                    position += 1
+
+    def clear_product_extra_targets(self, product_id: int) -> None:
+        with self._get_conn() as conn:
+            conn.execute("DELETE FROM product_extra_targets WHERE product_id=?", (int(product_id),))
+
+    def product_target_counts(self, product) -> dict:
+        """تعداد پنل و نود واقعی یک محصول: هدف اصلی + هدف‌های اضافه."""
+        def _val(key):
+            try:
+                return product[key]
+            except (KeyError, IndexError, TypeError):
+                return None
+        extra = self.get_product_extra_targets(int(_val("id") or 0)) if _val("id") else {"panels": [], "ssh": []}
+        panels = ([int(_val("provision_server_id"))] if _val("provision_server_id") else []) + extra["panels"]
+        nodes = ([int(_val("provision_ssh_node_id"))] if _val("provision_ssh_node_id") else []) + extra["ssh"]
+        return {"panels": list(dict.fromkeys(panels)), "ssh": list(dict.fromkeys(nodes))}
+
+    def add_config_panel_link(self, custom_config_id: int, panel_server_id: int, username: str,
+                              subscription_url: str) -> int:
+        with self._get_conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO config_panel_links (custom_config_id,panel_server_id,username,subscription_url) "
+                "VALUES (?,?,?,?)",
+                (int(custom_config_id), int(panel_server_id), str(username), str(subscription_url or "")),
+            )
+            return int(cur.lastrowid)
+
+    def panel_links_for_config(self, custom_config_id: int, active_only: bool = True) -> list:
+        sql = ("SELECT l.id,l.custom_config_id,l.panel_server_id,l.username,l.subscription_url,l.status,"
+               "s.name AS panel_name FROM config_panel_links l LEFT JOIN panel_servers s ON s.id=l.panel_server_id "
+               "WHERE l.custom_config_id=?")
+        if active_only:
+            sql += " AND l.status='active'"
+        with self._get_conn() as conn:
+            rows = conn.execute(sql + " ORDER BY l.id", (int(custom_config_id),)).fetchall()
+        return [dict(r) for r in rows]
+
+    def panel_links_for_pool(self, pool_id: int) -> list:
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT l.id,l.custom_config_id,l.panel_server_id,l.username FROM quota_pool_members m "
+                "JOIN config_panel_links l ON m.service_id='panel_link:'||l.id "
+                "WHERE m.pool_id=? AND m.service_kind='vpn' AND l.status='active' ORDER BY l.id",
+                (int(pool_id),),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_config_panel_links(self, custom_config_id: int) -> list:
+        """رکورد لینک‌ها و عضویتشان در استخر سهمیه را حذف می‌کند؛ لیست لینک‌های حذف‌شده را برمی‌گرداند."""
+        links = self.panel_links_for_config(custom_config_id, active_only=False)
+        with self._get_conn() as conn:
+            for link in links:
+                sid = f"panel_link:{int(link['id'])}"
+                conn.execute("DELETE FROM usage_snapshots WHERE service_kind='vpn' AND service_id=?", (sid,))
+                conn.execute("DELETE FROM quota_enforcement_state WHERE service_kind='vpn' AND service_id=?", (sid,))
+                conn.execute("DELETE FROM quota_pool_members WHERE service_kind='vpn' AND service_id=?", (sid,))
+                conn.execute("DELETE FROM config_panel_links WHERE id=?", (int(link["id"]),))
+        return links

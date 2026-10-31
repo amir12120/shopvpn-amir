@@ -1233,6 +1233,27 @@ class DatabaseBase:
                 );
                 CREATE INDEX IF NOT EXISTS idx_ssh_accounts_user ON ssh_accounts(user_id,status);
 
+                CREATE TABLE IF NOT EXISTS product_extra_targets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    product_id INTEGER NOT NULL,
+                    kind TEXT NOT NULL CHECK(kind IN ('panel','ssh')),
+                    target_id INTEGER NOT NULL,
+                    position INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(product_id,kind,target_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_product_extra_targets_product ON product_extra_targets(product_id);
+
+                CREATE TABLE IF NOT EXISTS config_panel_links (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    custom_config_id INTEGER NOT NULL,
+                    panel_server_id INTEGER NOT NULL,
+                    username TEXT NOT NULL,
+                    subscription_url TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_config_panel_links_cc ON config_panel_links(custom_config_id);
+
                 CREATE TABLE IF NOT EXISTS custom_config_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     custom_config_id INTEGER NOT NULL,
