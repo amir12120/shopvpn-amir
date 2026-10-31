@@ -638,6 +638,16 @@ class SSHNodeAutoInstallBody(BaseModel):
     username: str = "root"
     password: Optional[str] = None
     private_key: Optional[str] = None
+    protocols: List[str] = ["ssh"]
+    ovpn_port: int = 1194
+    ovpn_proto: str = "udp"
+
+
+class SSHNodeAddProtocolsBody(BaseModel):
+    password: str
+    protocols: List[str]
+    ovpn_port: int = 1194
+    ovpn_proto: str = "udp"
 
 
 class SSHNodeCreateBody(BaseModel):
@@ -668,6 +678,7 @@ class SSHAccountCreateBody(BaseModel):
     days: int = 30
     expires_at: Optional[str] = None
     quota_pool_id: Optional[int] = None
+    protocol: str = "ssh"
 
 
 class SSHAttachVPNBody(BaseModel):
@@ -3830,6 +3841,7 @@ class ProductBody(BaseModel):
     auto_provision_volume_gb: Optional[int] = None
     provision_server_id: Optional[int] = None
     provision_ssh_node_id: Optional[int] = None
+    provision_ssh_protocol: Optional[str] = None
     payment_methods: Optional[List[str]] = None
     compare_price: Optional[int] = None  # قیمت قبل از تخفیف (نمایشی)
     discount_days: Optional[int] = None  # مدت اعتبار تخفیف (روز)؛ 0 = بدون محدودیت زمانی
@@ -3852,8 +3864,10 @@ def api_panel_servers_lite(admin=Depends(require_permission("catalog"))):
 @app.get("/api/ssh/nodes-lite")
 def api_ssh_nodes_lite(admin=Depends(require_permission("catalog")), _fa=Depends(require_full_access_tenant)):
     """Only active Linux Agent nodes can currently be attached to paid SSH products."""
-    return [{"id": int(n["id"]), "name": n["name"], "host": n["host"]}
-            for n in db.list_ssh_nodes(active_only=True) if n.get("node_type") == "linux"]
+    import ssh_service
+    return [{"id": int(n["id"]), "name": n["name"], "host": n["host"], "protocols": ssh_service.node_protocols(n)}
+            for n in db.list_ssh_nodes(active_only=True)
+            if n.get("node_type") == "linux" and "ssh" in ssh_service.node_protocols(n)]
 
 
 class ProductReorderBody(BaseModel):
@@ -3885,6 +3899,7 @@ def api_add_product(body: ProductBody, admin=Depends(require_permission("catalog
         ssh_node = next((n for n in db.list_ssh_nodes(active_only=True) if int(n["id"]) == int(body.provision_ssh_node_id)), None)
         if not ssh_node or ssh_node.get("node_type") != "linux":
             raise HTTPException(400, "فقط نود Linux Agent فعال برای محصول SSH پشتیبانی می‌شود.")
+    ssh_protocol = _checked_ssh_protocol(body.provision_ssh_protocol, body.provision_server_id, ssh_node)
     direct_target = bool(body.provision_server_id or body.provision_ssh_node_id)
     if body.duration_days == 0 and not direct_target:
         raise HTTPException(400, tr("مدت نامحدود فقط برای محصولات با اتصال مستقیم ممکن است."))
@@ -3905,7 +3920,7 @@ def api_add_product(body: ProductBody, admin=Depends(require_permission("catalog
         body.is_auto_provision or direct_target, body.auto_provision_volume_gb,
         body.provision_server_id, payment_methods=body.payment_methods,
         compare_price=max(int(body.compare_price or 0), 0),
-        provision_ssh_node_id=body.provision_ssh_node_id,
+        provision_ssh_node_id=body.provision_ssh_node_id, provision_ssh_protocol=ssh_protocol,
     )
     if int(body.compare_price or 0) > 0 and (body.discount_days is not None or body.discount_max_uses is not None):
         db.edit_product(pid, compare_price=int(body.compare_price),
@@ -3914,6 +3929,21 @@ def api_add_product(body: ProductBody, admin=Depends(require_permission("catalog
     pm_log = "همه" if not body.payment_methods else "، ".join(body.payment_methods)
     db.log_admin_action(admin["id"], "product_add", f"{body.name} | پرداخت: {pm_log} (پنل وب - {admin['username']})", "product", pid)
     return {"id": pid}
+
+
+def _checked_ssh_protocol(requested, server_id, node) -> str:
+    """پروتکل حساب سمت SSH محصول؛ OpenVPN فقط در محصول ترکیبی (فایل داخل ساب اختصاصی) و روی نودی که نصب شده است."""
+    import ssh_service
+    wanted = str(requested or "ssh").strip().lower()
+    if wanted not in ("ssh", "openvpn"):
+        raise HTTPException(400, "پروتکل نامعتبر است.")
+    if not node:
+        return "ssh"
+    if wanted not in ssh_service.node_protocols(node):
+        raise HTTPException(400, f"پروتکل {wanted} روی این نود نصب نشده است.")
+    if wanted == "openvpn" and not server_id:
+        raise HTTPException(400, "OpenVPN فقط در محصول ترکیبی VPN + SSH ممکن است؛ فایل آن داخل لینک ساب اختصاصی تحویل می‌شود.")
+    return wanted
 
 
 class ProductEditBody(BaseModel):
@@ -3927,6 +3957,7 @@ class ProductEditBody(BaseModel):
     source: Optional[str] = None
     provision_server_id: Optional[int] = None
     provision_ssh_node_id: Optional[int] = None
+    provision_ssh_protocol: Optional[str] = None
     auto_provision_volume_gb: Optional[int] = None
     compare_price: Optional[int] = None  # 0 یعنی حذف تخفیف
     discount_days: Optional[int] = None
@@ -4021,6 +4052,20 @@ def api_edit_product(product_id: int, body: ProductEditBody, admin=Depends(requi
         provision_ssh_node_id if provision_ssh_node_id is not ... else old_product["provision_ssh_node_id"]
     )
 
+    ssh_protocol = ...
+    if effective_ssh_node_id:
+        if body.provision_ssh_protocol is not None:
+            requested_protocol = body.provision_ssh_protocol
+        elif provision_ssh_node_id is not ... or provision_server_id is not ...:
+            requested_protocol = old_product["provision_ssh_protocol"] or "ssh"
+        else:
+            requested_protocol = None
+        if requested_protocol is not None:
+            ssh_node = next((n for n in db.list_ssh_nodes(active_only=True) if int(n["id"]) == int(effective_ssh_node_id)), None)
+            ssh_protocol = _checked_ssh_protocol(requested_protocol, effective_server_id, ssh_node)
+    elif provision_ssh_node_id is not ...:
+        ssh_protocol = "ssh"
+
     if body.duration_days is not None:
         if body.duration_days < 0:
             raise HTTPException(status_code=400, detail=tr("مدت اعتبار نامعتبر است."))
@@ -4030,7 +4075,7 @@ def api_edit_product(product_id: int, body: ProductEditBody, admin=Depends(requi
     db.edit_product(
         product_id, body.name, body.price, body.description, body.duration_days,
         is_auto_provision=is_auto_provision, provision_server_id=provision_server_id,
-        provision_ssh_node_id=provision_ssh_node_id,
+        provision_ssh_node_id=provision_ssh_node_id, provision_ssh_protocol=ssh_protocol,
         auto_provision_volume_gb=auto_provision_volume_gb, category_id=body.category_id,
         compare_price=(max(int(body.compare_price), 0) if body.compare_price is not None else ...),
         discount_days=(max(int(body.discount_days), 0) if body.discount_days is not None else ...),
@@ -5835,6 +5880,10 @@ def api_ssh_overview(admin=Depends(require_permission("panels")), _fa=Depends(re
         except (TypeError, ValueError):
             cfg = {}
         item["agent_url"] = cfg.get("agent_url", "")
+        import ssh_service
+        item["protocols"] = ssh_service.node_protocols(node)
+        item["ovpn_port"] = cfg.get("ovpn_port")
+        item["ovpn_proto"] = cfg.get("ovpn_proto")
         item.pop("config_json", None)
         nodes.append(item)
     return {"nodes": nodes, "pools": pool_items,
@@ -5852,9 +5901,29 @@ async def api_ssh_auto_install(body: SSHNodeAutoInstallBody, admin=Depends(requi
     if not (body.password or body.private_key):
         raise HTTPException(400, "رمز root یا کلید خصوصی را وارد کنید.")
     import ssh_auto_install
-    job_id = ssh_auto_install.start_install(db, name=name, host=host, ssh_port=body.ssh_port,
-        username=(body.username or "root").strip(), password=body.password, private_key=body.private_key)
-    db.log_admin_action(admin["id"], "ssh_node_auto_install", f"SSH node auto-install started: {name} ({host})", "ssh")
+    import ssh_service
+    try:
+        protocols = ssh_service.normalize_protocols(body.protocols)
+        ovpn_port, ovpn_proto = ssh_service._validate_ovpn(body.ovpn_port, body.ovpn_proto) if "openvpn" in protocols else (1194, "udp")
+        job_id = ssh_auto_install.start_install(db, name=name, host=host, ssh_port=body.ssh_port,
+            username=(body.username or "root").strip(), password=body.password, private_key=body.private_key,
+            protocols=protocols, ovpn_port=ovpn_port, ovpn_proto=ovpn_proto)
+    except (ssh_service.SSHServiceError, ssh_auto_install.InstallError) as exc:
+        raise HTTPException(getattr(exc, "status", 400), str(exc))
+    db.log_admin_action(admin["id"], "ssh_node_auto_install", f"SSH node auto-install started: {name} ({host}) [{','.join(protocols)}]", "ssh")
+    return {"ok": True, "job_id": job_id}
+
+
+@app.post("/api/ssh/nodes/{node_id}/add-protocols")
+async def api_ssh_node_add_protocols(node_id: int, body: SSHNodeAddProtocolsBody, admin=Depends(require_permission("panels")), _fa=Depends(require_full_access_tenant)):
+    """نصب پروتکل‌های جدید (مثلاً OpenVPN) روی نود موجود؛ رمز root فقط برای همین نصب استفاده می‌شود."""
+    import ssh_service
+    try:
+        job_id = ssh_service.start_node_upgrade(db, node_id=node_id, password=body.password, protocols=body.protocols,
+                                                ovpn_port=body.ovpn_port, ovpn_proto=body.ovpn_proto)
+    except ssh_service.SSHServiceError as exc:
+        raise HTTPException(exc.status, str(exc))
+    db.log_admin_action(admin["id"], "ssh_node_add_protocols", f"SSH node #{node_id}: +{','.join(body.protocols)}", "ssh")
     return {"ok": True, "job_id": job_id}
 
 
@@ -5899,8 +5968,12 @@ async def api_ssh_test_node(node_id: int, admin=Depends(require_permission("pane
     if not node:
         raise HTTPException(404, "نود پیدا نشد.")
     try:
-        ok = await get_ssh_provider(node, secret_resolver=_env_secret_resolver).test_connection()
+        provider = get_ssh_provider(node, secret_resolver=_env_secret_resolver)
+        ok = await provider.test_connection()
         db.update_ssh_node_status(node_id, "active" if ok else "error", None if ok else "Agent response invalid")
+        if ok:
+            import ssh_service
+            await ssh_service.sync_node_protocols(db, node_id, provider)
     except Exception as exc:
         db.update_ssh_node_status(node_id, "error", str(exc)[:500])
         raise HTTPException(400, str(exc)[:300])
@@ -5937,7 +6010,8 @@ async def api_ssh_create_account(body: SSHAccountCreateBody, admin=Depends(requi
     import ssh_service
     try:
         r = await ssh_service.create_account(db, node_id=body.node_id, user_id=body.user_id, username=body.username,
-            limit_gb=body.limit_gb, days=body.days, expires_at=body.expires_at, quota_pool_id=body.quota_pool_id)
+            limit_gb=body.limit_gb, days=body.days, expires_at=body.expires_at, quota_pool_id=body.quota_pool_id,
+            protocol=body.protocol)
     except ssh_service.SSHServiceError as exc:
         raise HTTPException(exc.status, str(exc))
     db.log_admin_action(admin["id"], "ssh_account_create", f"SSH account #{r['id']} for user {body.user_id}", "ssh")
