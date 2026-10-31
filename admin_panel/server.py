@@ -707,6 +707,7 @@ class SSHAttachVPNBody(BaseModel):
 
 class SSHAccountActionBody(BaseModel):
     action: str
+    force: bool = False
 
 
 class LoginBody(BaseModel):
@@ -6021,14 +6022,13 @@ def api_ssh_install_job(job_id: str, admin=Depends(require_permission("panels"))
 
 
 @app.delete("/api/ssh/nodes/{node_id}")
-def api_ssh_delete_node(node_id: int, admin=Depends(require_permission("panels")), _fa=Depends(require_full_access_tenant)):
+def api_ssh_delete_node(node_id: int, force: bool = False, admin=Depends(require_permission("panels")), _fa=Depends(require_full_access_tenant)):
+    import ssh_service
     try:
-        removed = db.delete_ssh_node(node_id)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    if not removed:
-        raise HTTPException(404, "نود پیدا نشد.")
-    db.log_admin_action(admin["id"], "ssh_node_delete", f"SSH node #{node_id}", "ssh")
+        ssh_service.delete_node(db, node_id, force=force)
+    except ssh_service.SSHServiceError as exc:
+        raise HTTPException(exc.status, str(exc))
+    db.log_admin_action(admin["id"], "ssh_node_delete", f"SSH node #{node_id}" + (" (force)" if force else ""), "ssh")
     return {"ok": True}
 
 
@@ -6137,10 +6137,10 @@ async def api_ssh_create_account(body: SSHAccountCreateBody, admin=Depends(requi
 async def api_ssh_account_action(account_id: str, body: SSHAccountActionBody, admin=Depends(require_permission("panels")), _fa=Depends(require_full_access_tenant)):
     import ssh_service
     try:
-        status = await ssh_service.account_action(db, account_id, body.action)
+        status = await ssh_service.account_action(db, account_id, body.action, force=bool(body.force))
     except ssh_service.SSHServiceError as exc:
         raise HTTPException(exc.status, str(exc))
-    db.log_admin_action(admin["id"], f"ssh_account_{body.action.strip().lower()}", f"SSH account {account_id}", "ssh")
+    db.log_admin_action(admin["id"], f"ssh_account_{body.action.strip().lower()}", f"SSH account {account_id}" + (" (force, node unreachable)" if body.force else ""), "ssh")
     return {"ok": True, "account_id": account_id, "status": status}
 
 
