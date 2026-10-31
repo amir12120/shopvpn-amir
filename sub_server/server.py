@@ -322,6 +322,12 @@ async def sub_endpoint(request: Request) -> Response:
         if pool_info:
             info = pool_info
         uris = ds.extract_uris(up.body) if ok else []
+        if not uris:
+            # تشخیص: چرا هیچ کانفیگی از پنل استخراج نشد؟ (وضعیت، نوع پاسخ و ابتدای بدنه)
+            log.warning("sub-diag: no uris cc=%s url=%s status=%s ok=%s fresh=%s stale=%s ctype=%s len=%s head=%r",
+                        cc["id"], str(cc["subscription_url"])[:80], up.status, ok, up.fresh, up.stale,
+                        (up.headers or {}).get("content-type"), len(up.body or b""),
+                        (up.body or b"")[:160])
         ovpn_files = await asyncio.to_thread(ds.ovpn_files_for_config, db, cc["id"], cc)
         wg_files = await asyncio.to_thread(ds.wg_files_for_config, db, cc["id"], cc)
         if ok:
