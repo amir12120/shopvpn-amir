@@ -3488,11 +3488,14 @@ function productProvisionFieldsHtml(panelServers, sshNodes = [], prefill = null)
         ${panelServers.map(s2 => `<label class="field field-row"><span>${esc(s2.name)}</span><input type="checkbox" class="prod-multi-panel" value="${s2.id}" ${selPanels.includes(Number(s2.id)) ? 'checked' : ''}></label>`).join('') || '<div class="card-sub">پنلی نیست</div>'}
         <div class="card-sub">نودهای SSH (هر تعداد)</div>
         ${sshNodes.map(n2 => `<label class="field field-row"><span>${esc(n2.name)} · ${esc(n2.host || '')}</span><input type="checkbox" class="prod-multi-node" value="${n2.id}" data-protocols="${esc((n2.protocols || ['ssh']).join(','))}" ${selNodes.includes(Number(n2.id)) ? 'checked' : ''}></label>`).join('') || '<div class="card-sub">نودی نیست</div>'}
+        <div class="card-sub">پروتکل‌های حساب SSH (هر تعداد)</div>
+        <div id="prod-multi-protocols" data-prefill="${esc((prefill && prefill.provision_ssh_protocol) || 'ssh')}" style="display:flex;flex-wrap:wrap;gap:12px"></div>
+        <span class="card-sub">روی هر نود فقط پروتکل‌های تیک‌خورده‌ای که همان نود نصب دارد ساخته می‌شود. OpenVPN و WireGuard فقط وقتی انتخاب‌پذیرند که حداقل یک پنل VPN هم تیک خورده باشد.</span>
         <span class="card-sub">حجم و زمان بین همه‌ی مقصدها مشترک است و خروجی همه در یک لینک ساب اختصاصی ادغام می‌شود.</span>
       </div>
       <div id="prod-vpn-fields" style="display:${(target === 'ssh' || target === 'multi') ? 'none' : ''}"><label class="field"><span>پنل VPN</span><select class="input" id="prod-server">${panelServers.map(s => `<option value="${s.id}" ${prefill && Number(prefill.provision_server_id) === Number(s.id) ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label></div>
       <div id="prod-ssh-fields" style="display:${(target === 'ssh' || target === 'both' || target === 'multi') ? '' : 'none'}"><label class="field" id="prod-ssh-node-field" style="display:${target === 'multi' ? 'none' : ''}"><span>نود SSH</span><select class="input" id="prod-ssh-node">${sshNodes.map(n => `<option value="${n.id}" data-protocols="${esc((n.protocols || ['ssh']).join(','))}" ${prefill && Number(prefill.provision_ssh_node_id) === Number(n.id) ? 'selected' : ''}>${esc(n.name)} · ${esc(n.host || '')}</option>`).join('')}</select><span class="card-sub">فقط Linux Agent فعال با حسابداری معتبر پشتیبانی می‌شود.</span></label>
-      <label class="field"><span>پروتکل حساب</span><select class="input" id="prod-ssh-protocol" data-prefill="${esc((prefill && prefill.provision_ssh_protocol) || 'ssh')}"><option value="ssh">SSH</option></select><span class="card-sub">OpenVPN و WireGuard فقط در محصول «ترکیبی» ممکن‌اند و فایل آن‌ها داخل لینک ساب اختصاصی تحویل می‌شود (ساب اختصاصی باید فعال باشد).</span></label></div>
+      <label class="field" id="prod-ssh-proto-field" style="display:${target === 'multi' ? 'none' : ''}"><span>پروتکل حساب</span><select class="input" id="prod-ssh-protocol" data-prefill="${esc((prefill && prefill.provision_ssh_protocol) || 'ssh')}"><option value="ssh">SSH</option></select><span class="card-sub">OpenVPN و WireGuard فقط در محصول «ترکیبی» ممکن‌اند و فایل آن‌ها داخل لینک ساب اختصاصی تحویل می‌شود (ساب اختصاصی باید فعال باشد).</span></label></div>
       <label class="field field-row"><span>♾ مدت اعتبار نامحدود</span><input type="checkbox" id="prod-duration-unlimited" ${durUnlimited ? 'checked' : ''}></label>
       <label class="field"><span>حجم (GB) — ۰ = نامحدود</span><input class="input" id="prod-volume" type="number" min="0" step="1" placeholder="حجم (گیگابایت)" value="${prefill && prefill.auto_provision_volume_gb != null ? prefill.auto_provision_volume_gb : ''}" ${volUnlimited ? 'disabled' : ''}></label>
       <label class="field field-row"><span>♾ حجم نامحدود</span><input type="checkbox" id="prod-volume-unlimited" ${volUnlimited ? 'checked' : ''}></label>
@@ -3505,17 +3508,30 @@ function wireProductProvisionToggle(b) {
     if (df) df.style.display = $('input[name="prod-source"]:checked', b).value === 'direct' ? '' : 'none';
   }));
   const targetType = $('#prod-target-type', b);
+  const syncMultiProtocols = () => {
+    const box = $('#prod-multi-protocols', b);
+    if (!box) return;
+    const nodes = $$('.prod-multi-node:checked', b).map(c => (c.dataset.protocols || 'ssh').split(',').filter(Boolean));
+    // اجتماع پروتکل‌های نودهای انتخابی (هر نود فقط پروتکل‌های خودش را می‌سازد)
+    let available = ['ssh', 'openvpn', 'wireguard'].filter(p => nodes.some(n => n.includes(p)));
+    if (!nodes.length) available = ['ssh'];
+    if (!$$('.prod-multi-panel:checked', b).length) available = available.filter(x => x === 'ssh');
+    if (!available.length) available = ['ssh'];
+    const current = box.dataset.touched
+      ? $$('input[data-multi-proto]:checked', box).map(c => c.dataset.multiProto)
+      : (box.dataset.prefill || 'ssh').split(',').map(s => s.trim()).filter(Boolean);
+    let checked = available.filter(p => current.includes(p));
+    if (!checked.length) checked = [available[0]];
+    box.innerHTML = available.map(p => `<label style="display:flex;gap:6px;align-items:center"><input type="checkbox" data-multi-proto="${esc(p)}" ${checked.includes(p) ? 'checked' : ''}> ${esc(SSH_PROTO_LABELS[p] || p)}</label>`).join('');
+    $$('input[data-multi-proto]', box).forEach(c => c.addEventListener('change', () => { box.dataset.touched = '1'; }));
+  };
   const syncSshProtocol = () => {
+    syncMultiProtocols();
     const sel = $('#prod-ssh-protocol', b), nodeSel = $('#prod-ssh-node', b);
     if (!sel || !nodeSel) return;
     let available = (nodeSel.selectedOptions[0]?.dataset.protocols || 'ssh').split(',').filter(Boolean);
     const isMultiType = targetType && targetType.value === 'multi';
-    if (isMultiType) {
-      const picked = $$('.prod-multi-node:checked', b).map(c => (c.dataset.protocols || 'ssh').split(',').filter(Boolean));
-      available = picked.length ? picked.reduce((a, c) => a.filter(x => c.includes(x))) : ['ssh'];
-      if (!$$('.prod-multi-panel:checked', b).length) available = available.filter(x => x === 'ssh');
-    }
-    const list = (targetType && (targetType.value === 'both' || isMultiType)) ? available : ['ssh'];
+    const list = (targetType && targetType.value === 'both') ? available : ['ssh'];
     const keep = sel.value && sel.dataset.touched ? sel.value : (sel.dataset.prefill || 'ssh');
     sel.innerHTML = list.map(p => `<option value="${esc(p)}" ${p === keep ? 'selected' : ''}>${esc(SSH_PROTO_LABELS[p] || p)}</option>`).join('');
   };
@@ -3530,6 +3546,7 @@ function wireProductProvisionToggle(b) {
     if ($('#prod-vpn-fields', b)) $('#prod-vpn-fields', b).style.display = (t === 'ssh' || t === 'multi') ? 'none' : '';
     if ($('#prod-ssh-fields', b)) $('#prod-ssh-fields', b).style.display = (t === 'ssh' || t === 'both' || t === 'multi') ? '' : 'none';
     if ($('#prod-ssh-node-field', b)) $('#prod-ssh-node-field', b).style.display = t === 'multi' ? 'none' : '';
+    if ($('#prod-ssh-proto-field', b)) $('#prod-ssh-proto-field', b).style.display = t === 'multi' ? 'none' : '';
     if ($('#prod-multi-fields', b)) $('#prod-multi-fields', b).style.display = t === 'multi' ? '' : 'none';
     syncSshProtocol();
   });
@@ -3568,7 +3585,8 @@ function readProductProvisionFields(b) {
     if (panels.length + nodes.length < 2) { toast('حداقل دو مقصد (پنل یا نود) انتخاب کنید.', true); return { ok: false }; }
     return { ok: true, source: 'direct', provision_server_id: panels[0] || null, provision_ssh_node_id: nodes[0] || null,
       extra_panel_ids: panels.slice(1), extra_ssh_node_ids: nodes.slice(1),
-      provision_ssh_protocol: nodes.length ? ($('#prod-ssh-protocol', b)?.value || 'ssh') : 'ssh', auto_provision_volume_gb, duration_days };
+      provision_ssh_protocol: nodes.length ? ($$('#prod-multi-protocols input[data-multi-proto]:checked', b).map(c => c.dataset.multiProto).join(',') || 'ssh') : 'ssh',
+      auto_provision_volume_gb, duration_days };
   }
   if (target === 'both') {
     const provision_server_id = Number($('#prod-server', b)?.value || 0);
