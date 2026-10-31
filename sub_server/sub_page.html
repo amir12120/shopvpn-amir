@@ -170,6 +170,11 @@ header,#notes{grid-column:1/-1}
   <ul class="cfg" id="cfg"></ul>
 </section>
 
+<section class="sec" id="ovsec" hidden>
+  <h3>OpenVPN</h3>
+  <ul class="cfg" id="ovl"></ul>
+</section>
+
 <section class="sec" id="faqsec" hidden>
   <h3>اگر وصل نشد</h3>
   <div id="faq"></div>
@@ -322,6 +327,12 @@ if(D.show.configs&&D.configs.length){
     if(b.dataset.c!==undefined)copy(D.configs[b.dataset.c].u,'کپی شد',b);
     if(b.dataset.q!==undefined){const c=D.configs[b.dataset.q];showQR(D.sub+'/qr.png?i='+b.dataset.q,c.n)}
   };
+}
+
+/* OpenVPN */
+if(D.show.ovpn&&D.ovpn&&D.ovpn.length){
+  $('#ovsec').hidden=false;
+  $('#ovl').innerHTML=D.ovpn.map(o=>`<li><span class="f">🔒</span><span class="n">${esc(o.n)}</span><span class="tag">.ovpn</span><a class="sm k" href="${esc(D.sub)}/ovpn/${Number(o.i)}" download="${esc(o.f)}">دانلود فایل</a></li>`).join('');
 }
 
 /* برنامه‌ها */

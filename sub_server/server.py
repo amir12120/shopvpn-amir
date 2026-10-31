@@ -8,6 +8,7 @@
 مسیرها:
     GET /s/{token}              اپ VPN → ساب (با هدرها/کانفیگ نمایشی/خط اول)؛ مرورگر → صفحه‌ی وب
     GET /s/{token}/qr.png       کیوآر لینک ساب (یا ?i=N برای کانفیگ شماره‌ی N)
+    GET /s/{token}/ovpn/{n}     دانلود فایل OpenVPN شماره‌ی n (.ovpn) برای سرویس‌های دارای OpenVPN
     GET /sub/smart/{token}      اشتراک هوشمند (ادغام چند سرویس/پنل در یک لینک)
     GET /healthz                سلامت سرویس
 
@@ -295,6 +296,7 @@ async def sub_endpoint(request: Request) -> Response:
         if pool_info:
             info = pool_info
         uris = ds.extract_uris(up.body) if ok else []
+        ovpn_files = await asyncio.to_thread(ds.ovpn_files_for_config, db, cc["id"], cc)
         if ok:
             # حساب‌های SSH متصل به همین سرویس را در صفحه‌ی اشتراک هم نشان بده.
             uris.extend(await asyncio.to_thread(ds.ssh_uris_for_config, db, cc["id"], cc))
@@ -306,7 +308,7 @@ async def sub_endpoint(request: Request) -> Response:
             points = await asyncio.to_thread(db.ds_usage_points, cc["id"], now - 31 * 86400)
             series = ds.build_series(points, now)
         data = ds.build_page_data(cc, info, uris, settings, brand, page_url or str(request.url).split("?")[0],
-                                  series)
+                                  series, ovpn=ovpn_files)
         data["live"] = ok
         await _log(cc["id"], request, "page", 200, settings)
         return render_page(data, f"{brand} · اشتراک {ds.service_name(cc)}".strip(" ·"), settings)
@@ -389,6 +391,31 @@ async def qr_endpoint(request: Request) -> Response:
         log.exception("qr generation failed")
         return PlainTextResponse("QR unavailable", status_code=503)
     return Response(png, media_type="image/png", headers={"cache-control": "private, max-age=300"})
+
+
+# ---------------------------------------------------------------------------
+# /s/{token}/ovpn/{n}
+# ---------------------------------------------------------------------------
+async def ovpn_endpoint(request: Request) -> Response:
+    ip = client_ip(request)
+    if not limiter.allow("ok:" + ip, RATE_OK):
+        return PlainTextResponse("Too many requests", status_code=429, headers={"retry-after": "60"})
+    token = request.path_params["token"]
+    cc = await asyncio.to_thread(db.ds_get_config_by_token, token)
+    if cc is None or str(cc["status"] or "").lower() == "deleted" or not ds.is_enabled(db):
+        if not limiter.allow("miss:" + ip, RATE_MISS):
+            return PlainTextResponse("Too many requests", status_code=429)
+        return _not_found()
+    files = await asyncio.to_thread(ds.ovpn_files_for_config, db, cc["id"], cc)
+    item = next((f for f in files if f["index"] == request.path_params["n"]), None)
+    if item is None:
+        if not limiter.allow("miss:" + ip, RATE_MISS):
+            return PlainTextResponse("Too many requests", status_code=429)
+        return _not_found()
+    settings = await asyncio.to_thread(ds.all_settings, db)
+    await _log(cc["id"], request, "ovpn", 200, settings)
+    headers = {"cache-control": "no-store", "content-disposition": f'attachment; filename="{item["filename"]}"'}
+    return _raw(200, headers, "application/x-openvpn-profile", item["profile"].encode("utf-8"))
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +538,7 @@ app = Starlette(
     routes=[
         Route("/s/{token}", sub_endpoint, methods=["GET", "HEAD"]),
         Route("/s/{token}/qr.png", qr_endpoint, methods=["GET"]),
+        Route("/s/{token}/ovpn/{n:int}", ovpn_endpoint, methods=["GET"]),
         Route("/sub/smart/{token}", smart_endpoint, methods=["GET", "HEAD"]),
         Route("/healthz", healthz, methods=["GET"]),
         Route("/robots.txt", robots, methods=["GET"]),
