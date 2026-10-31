@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""نصب خودکار نود SSH (Linux Agent) روی یک سرور Debian/Ubuntu فقط با IP و رمز root.
+"""نصب خودکار نود (Linux Agent با SSH و/یا OpenVPN) روی یک سرور Debian/Ubuntu فقط با IP و رمز root.
+همچنین می‌تواند روی نود موجود پروتکل جدید (مثلاً OpenVPN) اضافه کند.
 
 پنل با asyncssh به سرور مقصد وصل می‌شود، فایل‌های Agent را آپلود و نصب می‌کند،
 توکن و گواهی TLS (با pin کردن fingerprint) می‌سازد، دسترسی Agent را فقط به IP همین
@@ -25,7 +26,11 @@ _FILES = (
     "deploy/install-shopvpn-ssh-agent.sh",
     "deploy/shopvpn-ssh-agent.service",
     "deploy/shopvpn-sshd@.service",
+    "deploy/shopvpn-ovpn-disconnect.sh",
+    "deploy/shopvpn-ovpn-nat.service",
 )
+SUPPORTED_PROTOCOLS = ("ssh", "openvpn")
+PROTOCOL_LABELS = {"ssh": "SSH", "openvpn": "OpenVPN"}
 _JOBS: dict = {}
 _MAX_JOBS = 30
 
@@ -57,13 +62,22 @@ def _log(job, text: str):
     job["log"].append(str(text)[:400])
 
 
-def start_install(db, *, name, host, ssh_port, username, password=None, private_key=None) -> str:
+def start_install(db, *, name, host, ssh_port, username, password=None, private_key=None,
+                  protocols=None, node_id=None, ovpn_port=1194, ovpn_proto="udp") -> str:
     """Create a background job and return its id. Secrets live only inside the task closure."""
+    wanted = [p for p in SUPPORTED_PROTOCOLS if p in (protocols or ["ssh"])]
+    if not wanted:
+        raise InstallError("حداقل یک پروتکل (SSH یا OpenVPN) انتخاب کنید.")
+    if str(ovpn_proto) not in {"udp", "tcp"}:
+        raise InstallError("پروتکل انتقال OpenVPN باید udp یا tcp باشد.")
+    if not 1 <= int(ovpn_port) <= 65535 or int(ovpn_port) in {22, AGENT_PORT} or 20000 <= int(ovpn_port) <= 39999:
+        raise InstallError("پورت OpenVPN نامعتبر است (22، 8765 و بازه 20000-39999 مجاز نیست).")
     job = _new_job()
 
     async def _runner():
         try:
-            await _install(db, job, name, host, int(ssh_port), username, password, private_key)
+            await _install(db, job, name, host, int(ssh_port), username, password, private_key,
+                           wanted, node_id, int(ovpn_port), str(ovpn_proto))
             job["status"] = "done"
         except InstallError as exc:
             job["status"] = "error"
@@ -78,7 +92,21 @@ def start_install(db, *, name, host, ssh_port, username, password=None, private_
     return job["id"]
 
 
-async def _install(db, job, name, host, ssh_port, username, password, private_key):
+def _node_protocols(node) -> list:
+    import json
+    config = node.get("config_json") or {}
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except ValueError:
+            config = {}
+    listed = config.get("protocols") if isinstance(config, dict) else None
+    found = [p for p in SUPPORTED_PROTOCOLS if p in (listed or [])]
+    return found or ["ssh"]
+
+
+async def _install(db, job, name, host, ssh_port, username, password, private_key,
+                   protocols, node_id, ovpn_port, ovpn_proto):
     try:
         import asyncssh
     except ImportError as exc:
@@ -93,6 +121,16 @@ async def _install(db, job, name, host, ssh_port, username, password, private_ke
         raise InstallError("رمز root یا کلید خصوصی لازم است.")
     encrypt_credential("preflight")  # fail early if the encryption key cannot be created
 
+    existing_node = None
+    existing_protocols = []
+    if node_id is not None:
+        existing_node = next((n for n in db.list_ssh_nodes() if int(n["id"]) == int(node_id)), None)
+        if not existing_node or existing_node.get("node_type") != "linux":
+            raise InstallError("نود Linux Agent موردنظر پیدا نشد.")
+        existing_protocols = _node_protocols(existing_node)
+    final_protocols = [p for p in SUPPORTED_PROTOCOLS if p in set(existing_protocols) | set(protocols)]
+    labels = " + ".join(PROTOCOL_LABELS[p] for p in protocols)
+
     kwargs = dict(host=host, port=ssh_port, username=username, known_hosts=None, connect_timeout=20)
     if private_key:
         try:
@@ -103,6 +141,7 @@ async def _install(db, job, name, host, ssh_port, username, password, private_ke
         kwargs["password"] = password
         kwargs["client_keys"] = None
 
+    _log(job, f"نصب {labels}" + (" روی نود موجود" if existing_node else " روی نود جدید"))
     _log(job, "در حال اتصال به سرور...")
     try:
         conn = await asyncssh.connect(**kwargs)
@@ -111,6 +150,9 @@ async def _install(db, job, name, host, ssh_port, username, password, private_ke
     except (OSError, asyncssh.Error, asyncio.TimeoutError) as exc:
         raise InstallError(f"اتصال SSH برقرار نشد: {type(exc).__name__}") from exc
 
+    fp = ""
+    token = ""
+    client_ip = ""
     async with conn:
         async def run(cmd, timeout=600, check=True):
             try:
@@ -142,60 +184,92 @@ async def _install(db, job, name, host, ssh_port, username, password, private_ke
         _log(job, "نصب پیش‌نیازها (ممکن است چند دقیقه طول بکشد)...")
         await run("export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq openssl", timeout=900)
 
-        _log(job, "ساخت گواهی TLS و توکن...")
-        await run("install -d -m 0755 /etc/shopvpn && "
-                  "openssl req -x509 -newkey rsa:2048 -nodes -keyout /etc/shopvpn/agent.key "
-                  "-out /etc/shopvpn/agent.crt -days 3650 -subj /CN=shopvpn-agent >/dev/null 2>&1 && "
-                  "chmod 600 /etc/shopvpn/agent.key")
-        fp_raw = await run("openssl x509 -in /etc/shopvpn/agent.crt -noout -fingerprint -sha256")
-        fp = fp_raw.split("=", 1)[-1].replace(":", "").strip().lower()
-        if not re.fullmatch(r"[0-9a-f]{64}", fp):
-            raise InstallError("خواندن fingerprint گواهی ناموفق بود.")
+        if not existing_node:
+            _log(job, "ساخت گواهی TLS و توکن...")
+            await run("install -d -m 0755 /etc/shopvpn && "
+                      "openssl req -x509 -newkey rsa:2048 -nodes -keyout /etc/shopvpn/agent.key "
+                      "-out /etc/shopvpn/agent.crt -days 3650 -subj /CN=shopvpn-agent >/dev/null 2>&1 && "
+                      "chmod 600 /etc/shopvpn/agent.key")
+            fp_raw = await run("openssl x509 -in /etc/shopvpn/agent.crt -noout -fingerprint -sha256")
+            fp = fp_raw.split("=", 1)[-1].replace(":", "").strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", fp):
+                raise InstallError("خواندن fingerprint گواهی ناموفق بود.")
 
-        token = secrets.token_hex(32)
-        env_lines = [
-            f"SHOPVPN_AGENT_TOKEN={token}",
-            "SHOPVPN_AGENT_HOST=0.0.0.0",
-            f"SHOPVPN_AGENT_PORT={AGENT_PORT}",
-            "SHOPVPN_AGENT_DB=/var/lib/shopvpn-ssh-agent/agent.db",
-            "SHOPVPN_NFT_ACCOUNTING=1",
-            "SHOPVPN_AGENT_TLS_CERT=/etc/shopvpn/agent.crt",
-            "SHOPVPN_AGENT_TLS_KEY=/etc/shopvpn/agent.key",
-        ]
-        if client_ip:
-            env_lines.append(f"SHOPVPN_AGENT_ALLOWED_IPS={client_ip}")
-        async with conn.start_sftp_client() as sftp:
-            async with sftp.open("/tmp/shopvpn-install/agent.env", "wb") as fh:
-                await fh.write(("\n".join(env_lines) + "\n").encode())
-        await run("install -m 0600 -o root -g root /tmp/shopvpn-install/agent.env /etc/shopvpn-ssh-agent.env")
+            token = secrets.token_hex(32)
+            env_lines = [
+                f"SHOPVPN_AGENT_TOKEN={token}",
+                "SHOPVPN_AGENT_HOST=0.0.0.0",
+                f"SHOPVPN_AGENT_PORT={AGENT_PORT}",
+                "SHOPVPN_AGENT_DB=/var/lib/shopvpn-ssh-agent/agent.db",
+                f"SHOPVPN_NFT_ACCOUNTING={1 if 'ssh' in protocols else 0}",
+                "SHOPVPN_AGENT_TLS_CERT=/etc/shopvpn/agent.crt",
+                "SHOPVPN_AGENT_TLS_KEY=/etc/shopvpn/agent.key",
+            ]
+            if client_ip:
+                env_lines.append(f"SHOPVPN_AGENT_ALLOWED_IPS={client_ip}")
+            async with conn.start_sftp_client() as sftp:
+                async with sftp.open("/tmp/shopvpn-install/agent.env", "wb") as fh:
+                    await fh.write(("\n".join(env_lines) + "\n").encode())
+            await run("install -m 0600 -o root -g root /tmp/shopvpn-install/agent.env /etc/shopvpn-ssh-agent.env")
+        else:
+            has_env = await run("test -f /etc/shopvpn-ssh-agent.env && echo yes", check=False)
+            if has_env != "yes":
+                raise InstallError("فایل /etc/shopvpn-ssh-agent.env روی نود پیدا نشد؛ این نود با نصب‌کننده ShopVPN ساخته نشده است.")
 
-        _log(job, "نصب و راه‌اندازی سرویس Agent...")
-        await run("cd /tmp/shopvpn-install && bash deploy/install-shopvpn-ssh-agent.sh", timeout=900)
+        _log(job, f"نصب و راه‌اندازی سرویس‌ها ({', '.join(PROTOCOL_LABELS[p] for p in final_protocols)})...")
+        script_env = f"OVPN_PORT={int(ovpn_port)} OVPN_PROTO={ovpn_proto}"
+        if existing_node and "ssh" in protocols:
+            script_env += " SHOPVPN_ENABLE_NFT=1"
+        await run(f"cd /tmp/shopvpn-install && {script_env} bash deploy/install-shopvpn-ssh-agent.sh {','.join(final_protocols)}",
+                  timeout=1200)
         await run("systemctl restart shopvpn-ssh-agent; sleep 4", check=False)
         state = await run("systemctl is-active shopvpn-ssh-agent", check=False)
         if state != "active":
             tail = await run("journalctl -u shopvpn-ssh-agent -n 12 --no-pager -o cat", check=False)
             raise InstallError(f"سرویس Agent بالا نیامد ({state}). خروجی سرور:\n{tail[-600:]}")
 
+        if "openvpn" in protocols:
+            ovpn_state = ""
+            for _ in range(8):
+                ovpn_state = await run("systemctl is-active openvpn-server@shopvpn", check=False)
+                if ovpn_state == "active":
+                    break
+                await asyncio.sleep(1.5)
+            if ovpn_state != "active":
+                tail = await run("journalctl -u openvpn-server@shopvpn -n 12 --no-pager -o cat", check=False)
+                raise InstallError(f"سرویس OpenVPN بالا نیامد ({ovpn_state}). خروجی سرور:\n{tail[-600:]}")
+            sock_ok = await run("test -S /run/openvpn-server/shopvpn.sock && echo yes", check=False)
+            if sock_ok != "yes":
+                raise InstallError("سوکت management سرویس OpenVPN ساخته نشد؛ حسابداری حجم ممکن نیست.")
+
         _log(job, "تنظیم فایروال...")
         rules = []
-        if client_ip:
-            rules.append(f"ufw allow from {client_ip} to any port {AGENT_PORT} proto tcp")
-        else:
-            rules.append(f"ufw allow {AGENT_PORT}/tcp")
-        rules.append("ufw allow 20000:39999/tcp")
-        await run("if command -v ufw >/dev/null 2>&1 && ufw status | grep -q 'Status: active'; then "
-                  + " && ".join(rules) + "; fi", check=False)
+        if not existing_node:
+            rules.append(f"ufw allow from {client_ip} to any port {AGENT_PORT} proto tcp" if client_ip
+                         else f"ufw allow {AGENT_PORT}/tcp")
+        if "ssh" in protocols:
+            rules.append("ufw allow 20000:39999/tcp")
+        if "openvpn" in protocols:
+            rules.append(f"ufw allow {int(ovpn_port)}/{ovpn_proto}")
+            rules.append("ufw route allow in on tun0")
+        if rules:
+            await run("if command -v ufw >/dev/null 2>&1 && ufw status | grep -q 'Status: active'; then "
+                      + " && ".join(rules) + "; fi", check=False)
         await run("rm -rf /tmp/shopvpn-install", check=False)
 
-    # ثبت نود و تست واقعی
-    secret_ref = "enc:" + encrypt_credential(token)
-    node_id = db.create_ssh_node(
-        name, "linux", host, ssh_port, auth_type="api_token", username="root", secret_ref=secret_ref,
-        config_json={"agent_url": f"https://{host}:{AGENT_PORT}", "cert_sha256": fp,
-                     "auto_installed": True, "agent_allowed_ip": client_ip})
+    node_config = {"protocols": final_protocols}
+    if "openvpn" in final_protocols:
+        node_config.update({"ovpn_port": ovpn_port, "ovpn_proto": ovpn_proto})
+    if existing_node:
+        db.merge_ssh_node_config(int(node_id), node_config)
+    else:
+        secret_ref = "enc:" + encrypt_credential(token)
+        node_id = db.create_ssh_node(
+            name, "linux", host, ssh_port, auth_type="api_token", username="root", secret_ref=secret_ref,
+            config_json={"agent_url": f"https://{host}:{AGENT_PORT}", "cert_sha256": fp,
+                         "auto_installed": True, "agent_allowed_ip": client_ip, **node_config})
     job["node_id"] = node_id
-    node = next(n for n in db.list_ssh_nodes() if int(n["id"]) == node_id)
+    node = next(n for n in db.list_ssh_nodes() if int(n["id"]) == int(node_id))
     provider = get_ssh_provider(node, secret_resolver=_env_secret_resolver)
     _log(job, "تست اتصال به Agent...")
     ok = False
@@ -212,19 +286,21 @@ async def _install(db, job, name, host, ssh_port, username, password, private_ke
                            f"{AGENT_PORT} را بررسی کنید. نود با شناسه {node_id} ثبت شده و با «تست اتصال» دوباره امتحان می‌شود.")
     db.update_ssh_node_status(node_id, "active", None)
 
-    _log(job, "تست حسابداری حجم (ساخت و حذف حساب آزمایشی)...")
-    try:
-        test_name = "svtest" + secrets.token_hex(3)
-        res = await provider.create_account(test_name, 0, None)
+    warnings = []
+    for proto in protocols:
+        label = PROTOCOL_LABELS[proto]
+        _log(job, f"تست حسابداری حجم {label} (ساخت و حذف حساب آزمایشی)...")
         try:
-            usage = await provider.get_usage(res.account_id)
-        finally:
-            await provider.delete_account(res.account_id)
-        if usage.get("accounting_ready"):
-            _log(job, "حسابداری حجم فعال است ✅")
-        else:
-            job["warning"] = ("نود فعال شد ولی شمارنده حجم (nftables) آماده نیست؛ فروش محصول حجمی روی این نود "
-                              "تا رفع مشکل متوقف می‌ماند.")
-    except Exception as exc:
-        job["warning"] = f"تست حساب آزمایشی ناموفق بود: {type(exc).__name__}: {str(exc)[:160]}"
+            res = await provider.create_account("svtest" + secrets.token_hex(3), 0, None, protocol=proto)
+            try:
+                usage = await provider.get_usage(res.account_id)
+            finally:
+                await provider.delete_account(res.account_id)
+            if usage.get("accounting_ready"):
+                _log(job, f"حسابداری حجم {label} فعال است ✅")
+            else:
+                warnings.append(f"شمارنده حجم {label} آماده نیست؛ فروش محصول حجمی {label} روی این نود تا رفع مشکل متوقف می‌ماند.")
+        except Exception as exc:
+            warnings.append(f"تست حساب آزمایشی {label} ناموفق بود: {type(exc).__name__}: {str(exc)[:160]}")
+    job["warning"] = " | ".join(warnings) or None
     _log(job, "نود آماده است ✅")

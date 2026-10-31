@@ -50,8 +50,12 @@ class BaseSSHProvider(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def create_account(self, username: str, limit_bytes: int, expires_at: str = None) -> SSHAccountResult:
+    async def create_account(self, username: str, limit_bytes: int, expires_at: str = None,
+                             protocol: str = "ssh") -> SSHAccountResult:
         raise NotImplementedError
+
+    async def get_info(self) -> dict:
+        return {}
 
     @abstractmethod
     async def get_usage(self, account_id: str) -> dict:
@@ -126,8 +130,29 @@ class LinuxAgentSSHProvider(BaseSSHProvider):
         data = await self._request("GET", "/v1/accounts")
         return isinstance(data.get("accounts"), list)
 
-    async def create_account(self, username: str, limit_bytes: int, expires_at: str = None) -> SSHAccountResult:
-        # Password is generated here and returned once to the caller; never persisted by this provider.
+    async def get_info(self) -> dict:
+        data = await self._request("GET", "/v1/info")
+        return data if isinstance(data, dict) else {}
+
+    async def create_account(self, username: str, limit_bytes: int, expires_at: str = None,
+                             protocol: str = "ssh") -> SSHAccountResult:
+        protocol = str(protocol or "ssh").strip().lower()
+        if protocol == "openvpn":
+            account_id = str(uuid.uuid4())
+            data = await self._request("POST", "/v1/accounts", {
+                "account_id": account_id, "username": username, "protocol": "openvpn",
+                "remote_host": str(self.node.get("host") or ""), "expires_at": expires_at,
+                "limit_bytes": max(0, int(limit_bytes)),
+            })
+            profile = str(data.get("profile") or "")
+            if "<ca>" not in profile:
+                raise SSHProviderError("پاسخ Agent شامل پروفایل OpenVPN معتبر نیست")
+            return SSHAccountResult(account_id=account_id, username=data.get("username", username),
+                host=str(self.node.get("host") or ""), port=int(data.get("port") or 1194),
+                metadata={"profile": profile, "protocol": "openvpn", "transport": data.get("transport"),
+                          "limit_bytes_requested": int(limit_bytes), "accounting_ready": False})
+        if protocol != "ssh":
+            raise SSHProviderError(f"پروتکل پشتیبانی‌نشده: {protocol}")
         alphabet = string.ascii_letters + string.digits + "-_"
         password = "".join(secrets.choice(alphabet) for _ in range(28))
         account_id = str(uuid.uuid4())
@@ -176,7 +201,8 @@ class SSHPanelAPIProvider(BaseSSHProvider):
     async def test_connection(self) -> bool:
         await self._not_configured()
 
-    async def create_account(self, username: str, limit_bytes: int, expires_at: str = None) -> SSHAccountResult:
+    async def create_account(self, username: str, limit_bytes: int, expires_at: str = None,
+                             protocol: str = "ssh") -> SSHAccountResult:
         await self._not_configured()
 
     async def get_usage(self, account_id: str) -> dict:

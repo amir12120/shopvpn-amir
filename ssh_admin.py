@@ -90,7 +90,7 @@ async def _run(args):
             row_id = None
             try:
                 usage = await provider.get_usage(result.account_id)
-                reliable_sources = {"nftables_port_counters", "external-counter", "ssh-traffic-accountant"}
+                reliable_sources = {"nftables_port_counters", "external-counter", "ssh-traffic-accountant", "openvpn_accounting"}
                 volume_limited = limit_bytes > 0 or bool(pool and int(pool.get("limit_bytes") or 0) > 0)
                 if volume_limited and (not usage.get("accounting_ready") or usage.get("source") not in reliable_sources):
                     raise ValueError("سهمیه حجمی نیازمند شمارنده‌ی دوطرفه‌ی معتبر SSH است؛ حساب ایجاد نشد")
