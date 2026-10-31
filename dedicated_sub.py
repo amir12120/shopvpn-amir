@@ -466,7 +466,6 @@ def ssh_uris_for_config(db, config_id, cc=None) -> List[str]:
             password = decrypt_credential(row.get("credential_enc"))
         except Exception:
             continue
-        host = str(row.get("host") or "")
         remark = str(row.get("node_name") or "").strip() or "SSH " + str(row.get("username") or "")
         # مثل بقیه کانفیگ‌ها: نام نود + نام کاربری سرویس
         svc = str(_row(cc, "username") or _row(cc, "display_name") or "").strip() if cc is not None else ""
@@ -474,11 +473,14 @@ def ssh_uris_for_config(db, config_id, cc=None) -> List[str]:
             remark += " " + svc
         if len(rows) > 1:
             remark += f" {n}"
-        try:
-            from ssh_uri import build_ssh_uri
-            out.append(build_ssh_uri(row.get("username"), password, host, int(row.get("port") or 22), remark))
-        except (TypeError, ValueError):
-            continue
+        import ssh_hosts
+        for ep in ssh_hosts.endpoints(row, "ssh", row.get("host"), int(row.get("port") or 22)):
+            try:
+                from ssh_uri import build_ssh_uri
+                out.append(build_ssh_uri(row.get("username"), password, ep["address"], ep["port"],
+                                         remark + (f" {ep['remark']}" if ep["remark"] else "")))
+            except (TypeError, ValueError):
+                continue
     return out
 
 
@@ -504,8 +506,13 @@ def ovpn_files_for_config(db, config_id, cc=None) -> List[dict]:
         remark = str(row.get("node_name") or "").strip() or "OpenVPN"
         if svc and svc not in remark:
             remark += " " + svc
-        out.append({"index": len(out) + 1, "remark": remark + " (OpenVPN)", "filename": f"{username}.ovpn",
-                    "profile": profile})
+        import ssh_hosts
+        eps = ssh_hosts.endpoints(row, "openvpn", row.get("host"), int(row.get("port") or 1194))
+        for pos, ep in enumerate(eps, start=1):
+            tag = f" {ep['remark']}" if ep["remark"] else (f" {pos}" if len(eps) > 1 else "")
+            out.append({"index": len(out) + 1, "remark": remark + tag + " (OpenVPN)",
+                        "filename": f"{username}{'-' + str(pos) if len(eps) > 1 else ''}.ovpn",
+                        "profile": ssh_hosts.rewrite_ovpn_profile(profile, ep["address"], ep["port"])})
     return out
 
 
@@ -531,8 +538,13 @@ def wg_files_for_config(db, config_id, cc=None) -> List[dict]:
         remark = str(row.get("node_name") or "").strip() or "WireGuard"
         if svc and svc not in remark:
             remark += " " + svc
-        out.append({"index": len(out) + 1, "remark": remark + " (WireGuard)", "filename": f"{username}.conf",
-                    "profile": profile})
+        import ssh_hosts
+        eps = ssh_hosts.endpoints(row, "wireguard", row.get("host"), int(row.get("port") or 51820))
+        for pos, ep in enumerate(eps, start=1):
+            tag = f" {ep['remark']}" if ep["remark"] else (f" {pos}" if len(eps) > 1 else "")
+            out.append({"index": len(out) + 1, "remark": remark + tag + " (WireGuard)",
+                        "filename": f"{username}{'-' + str(pos) if len(eps) > 1 else ''}.conf",
+                        "profile": ssh_hosts.rewrite_wg_profile(profile, ep["address"], ep["port"])})
     return out
 
 

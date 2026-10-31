@@ -363,13 +363,21 @@ async def provision_ssh_direct(db, product, quantity: int = 1, user_id: int = No
             raise
         raise ProvisionError(f"ساخت محصول SSH ناموفق بود: {exc}") from exc
 
+    import ssh_hosts
     output = []
     for item in built:
         password = str(item.metadata.get("password") or "")
-        host = str(item.host or "")
-        uri = "" if protocol in FILE_PROTOCOLS else build_ssh_uri(item.username, password, host, int(item.port), str(node.get("name") or "SSH"))
-        output.append({"username": item.username, "host": host, "port": int(item.port),
+        # آدرس/پورت نمایشی از «هاست»های نود می‌آید؛ بدون هاست همان آدرس واقعی نود است.
+        eps = ssh_hosts.endpoints(node, protocol, str(item.host or ""), int(item.port))
+        primary = eps[0]
+        label = str(node.get("name") or "SSH")
+        uri = "" if protocol in FILE_PROTOCOLS else build_ssh_uri(item.username, password, primary["address"], primary["port"],
+                                                                    label + (f" {primary['remark']}" if primary["remark"] else ""))
+        extra = [] if protocol in FILE_PROTOCOLS else [
+            build_ssh_uri(item.username, password, ep["address"], ep["port"], label + (f" {ep['remark']}" if ep["remark"] else ""))
+            for ep in eps[1:]]
+        output.append({"username": item.username, "host": primary["address"], "port": int(primary["port"]),
             "password": password, "account_id": item.account_id, "quota_pool_id": int(pool_id),
-            "subscription_url": uri, "volume_gb": volume_gb, "duration_days": duration_days,
+            "subscription_url": uri, "extra_uris": extra, "volume_gb": volume_gb, "duration_days": duration_days,
             "protocol": protocol, "accounting_ready": bool(item.metadata.get("accounting_ready"))})
     return output

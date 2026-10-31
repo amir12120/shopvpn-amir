@@ -170,12 +170,26 @@ class LinuxAgentSSHProvider(BaseSSHProvider):
         alphabet = string.ascii_letters + string.digits + "-_"
         password = "".join(secrets.choice(alphabet) for _ in range(28))
         account_id = str(uuid.uuid4())
-        data = await self._request("POST", "/v1/accounts", {
-            "account_id": account_id, "username": username, "password": password,
-            "expires_at": expires_at, "limit_bytes": max(0, int(limit_bytes)),
-        })
+        payload = {"account_id": account_id, "username": username, "password": password,
+                   "expires_at": expires_at, "limit_bytes": max(0, int(limit_bytes))}
+        from ssh_hosts import ssh_port_range, ssh_port_range_is_custom
+        custom_range = ssh_port_range_is_custom(self.node)
+        low, high = ssh_port_range(self.node)
+        if custom_range:
+            payload["port_min"], payload["port_max"] = low, high
+        data = await self._request("POST", "/v1/accounts", payload)
+        port = int(data.get("port") or self.node.get("port") or 22)
+        if custom_range and not low <= port <= high:
+            # Agent قدیمی بازه را نادیده گرفته؛ حساب را برنگردان تا پورت خارج از بازه به کاربر نرسد.
+            try:
+                await self._request("POST", f"/v1/accounts/{account_id}/delete")
+            except Exception:
+                pass
+            raise SSHProviderError(
+                f"Agent این نود بازه‌ی پورت SSH را اعمال نکرد (پورت {port}، بازه‌ی تنظیم‌شده {low}-{high}). "
+                "فایل ssh_node_agent.py را روی نود به‌روز و سرویس shopvpn-ssh-agent را ری‌استارت کنید.")
         return SSHAccountResult(account_id=account_id, username=data.get("username", username),
-            host=str(self.node.get("host") or ""), port=int(data.get("port") or self.node.get("port") or 22),
+            host=str(self.node.get("host") or ""), port=port,
             metadata={"password": password, "limit_bytes_requested": int(limit_bytes),
                       "accounting_ready": False, "warning": "وضعیت شمارنده پس از اولین گزارش مصرف بررسی می‌شود"})
 

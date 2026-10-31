@@ -632,8 +632,13 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
             await message.answer("برای حساب شما سرویس SSH ثبت نشده است.")
             return
         from ssh_credentials import decrypt_credential
+        import ssh_hosts
+        node_by_id = {int(n["id"]): n for n in await asyncio.to_thread(db.list_ssh_nodes)}
         blocks = []
         for row in rows:
+            ep = ssh_hosts.endpoints(node_by_id.get(int(row.get("node_id") or 0)), row.get("protocol") or "ssh",
+                                     row.get("host"), int(row.get("port") or 22))[0]
+            row = dict(row, host=ep["address"], port=ep["port"])
             status = str(row.get("status") or "unknown")
             status_label = {"active": "فعال", "disabled": "غیرفعال", "expired": "منقضی", "deleted": "حذف‌شده", "error": "خطا"}.get(status, status)
             block = [

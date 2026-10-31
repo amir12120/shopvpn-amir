@@ -12,6 +12,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import ssh_hosts
+
 logger = logging.getLogger(__name__)
 
 RELIABLE_SOURCES = {"nftables_port_counters", "external-counter", "ssh-traffic-accountant", "openvpn_accounting",
@@ -66,9 +68,88 @@ def overview(db) -> dict:
         item["ovpn_port"] = cfg.get("ovpn_port")
         item["ovpn_proto"] = cfg.get("ovpn_proto")
         item["wg_port"] = cfg.get("wg_port")
+        item["hosts"] = ssh_hosts.list_hosts(node)
+        item["ssh_port_min"], item["ssh_port_max"] = ssh_hosts.ssh_port_range(node)
+        item["ssh_port_custom"] = ssh_hosts.ssh_port_range_is_custom(node)
         item.pop("config_json", None)
         nodes.append(item)
-    return {"nodes": nodes, "pools": pool_items, "accounts": db.list_ssh_accounts()}
+    node_by_id = {int(n["id"]): n for n in db.list_ssh_nodes()}
+    accounts = []
+    for acc in db.list_ssh_accounts():
+        node = node_by_id.get(int(acc["node_id"]))
+        acc = dict(acc)
+        acc["endpoints"] = ssh_hosts.endpoints(node, acc.get("protocol") or "ssh", acc.get("host"), acc.get("port") or 0) if node else []
+        accounts.append(acc)
+    return {"nodes": nodes, "pools": pool_items, "accounts": accounts}
+
+
+def _linux_node(db, node_id: int) -> dict:
+    node = db.get_ssh_node(int(node_id))
+    if not node:
+        raise SSHServiceError("نود پیدا نشد.", 404)
+    return node
+
+
+def get_node_hosts(db, node_id: int) -> dict:
+    node = _linux_node(db, node_id)
+    low, high = ssh_hosts.ssh_port_range(node)
+    return {"hosts": ssh_hosts.list_hosts(node), "protocols": node_protocols(node),
+            "ssh_port_min": low, "ssh_port_max": high, "ssh_port_custom": ssh_hosts.ssh_port_range_is_custom(node),
+            "node_host": node.get("host")}
+
+
+def set_node_hosts(db, node_id: int, hosts) -> list:
+    """جایگزینی کامل لیست هاست‌های نود (مثل ذخیره‌ی فرم). هاست برای پروتکل نصب‌نشده مجاز نیست."""
+    node = _linux_node(db, node_id)
+    try:
+        normalized = ssh_hosts.normalize_hosts(hosts)
+    except ssh_hosts.HostConfigError as exc:
+        raise SSHServiceError(str(exc))
+    installed = set(node_protocols(node))
+    for item in normalized:
+        if item["protocol"] not in installed:
+            raise SSHServiceError(f"پروتکل {item['protocol']} روی این نود نصب نشده است؛ برایش هاست نمی‌شود ساخت.")
+    db.merge_ssh_node_config(int(node_id), {"hosts": normalized})
+    return normalized
+
+
+async def set_ssh_port_range(db, node_id: int, port_min=None, port_max=None) -> dict:
+    """بازه‌ی پورتی که نود برای حساب‌های SSH جدید می‌سازد؛ port_min=None یعنی برگشت به پیش‌فرض 20000-39999."""
+    node = _linux_node(db, node_id)
+    if "ssh" not in node_protocols(node):
+        raise SSHServiceError("SSH روی این نود نصب نیست.")
+    if port_min is None and port_max is None:
+        db.replace_ssh_node_config_keys(int(node_id), {}, remove=("ssh_port_min", "ssh_port_max"))
+        low, high = ssh_hosts.DEFAULT_SSH_PORT_MIN, ssh_hosts.DEFAULT_SSH_PORT_MAX
+        return {"ssh_port_min": low, "ssh_port_max": high, "ssh_port_custom": False, "capacity": high - low + 1}
+    cfg = ssh_hosts.node_config(node)
+    reserved = [22, 8765, cfg.get("ovpn_port"), cfg.get("wg_port")]
+    try:
+        low, high = ssh_hosts.validate_ssh_port_range(port_min, port_max, reserved)
+    except ssh_hosts.HostConfigError as exc:
+        raise SSHServiceError(str(exc))
+    # اگر Agent قدیمی باشد بازه را نادیده می‌گیرد؛ قبل از ذخیره بررسی می‌کنیم.
+    from ssh_providers import get_ssh_provider
+    from quota_reconciler import _env_secret_resolver
+    try:
+        info = await get_ssh_provider(node, secret_resolver=_env_secret_resolver).get_info()
+    except Exception as exc:
+        raise SSHServiceError(f"ارتباط با Agent نود برقرار نشد؛ بازه ذخیره نشد: {str(exc)[:200]}")
+    if "ssh_port_range" not in (info.get("features") or []):
+        raise SSHServiceError("Agent این نود قدیمی است و بازه‌ی پورت را پشتیبانی نمی‌کند. فایل ssh_node_agent.py را روی نود "
+                              "به‌روز و سرویس shopvpn-ssh-agent را ری‌استارت کنید، بعد دوباره امتحان کنید.", 409)
+    db.merge_ssh_node_config(int(node_id), {"ssh_port_min": low, "ssh_port_max": high})
+    return {"ssh_port_min": low, "ssh_port_max": high, "ssh_port_custom": True, "capacity": high - low + 1}
+
+
+def user_endpoints(node, account: dict, profile: str = None) -> list:
+    """خروجی‌های قابل نمایش به کاربر برای یک حساب (با درنظرگرفتن هاست‌های نود)."""
+    protocol = str(account.get("protocol") or "ssh").lower()
+    items = ssh_hosts.endpoints(node, protocol, account.get("host"), account.get("port") or 0)
+    if profile and protocol in ssh_hosts.FILE_PROTOCOLS:
+        for item in items:
+            item["profile"] = ssh_hosts.rewrite_profile(protocol, profile, item["address"], item["port"])
+    return items
 
 
 def _validate_ovpn(ovpn_port, ovpn_proto) -> tuple:
@@ -280,9 +361,13 @@ async def create_account(db, *, node_id: int, user_id: int, username: str, limit
         raise
     except (ValueError, SSHProviderError) as exc:
         raise SSHServiceError(str(exc)[:300])
+    shown = user_endpoints(node, {"protocol": protocol, "host": result.host, "port": result.port},
+                           result.metadata.get("profile") if protocol in ssh_hosts.FILE_PROTOCOLS else None)
+    primary = shown[0]
     return {"ok": True, "id": row_id, "account_id": result.account_id, "username": result.username,
-            "host": result.host, "port": result.port, "protocol": protocol,
-            "password": result.metadata.get("password"), "profile": result.metadata.get("profile"),
+            "host": primary["address"], "port": primary["port"], "protocol": protocol, "endpoints": shown,
+            "password": result.metadata.get("password"),
+            "profile": primary.get("profile") or result.metadata.get("profile"),
             "expires_at": expires_at, "quota_pool_id": quota_pool_id, "node_name": node.get("name"),
             "accounting_ready": bool(usage.get("accounting_ready")),
             "warning": (None if usage.get("source") in RELIABLE_SOURCES

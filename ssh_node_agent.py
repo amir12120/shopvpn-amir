@@ -228,12 +228,41 @@ class Agent:
                 db.execute("UPDATE usage SET used_bytes=?,raw_counter_bytes=?,counter_offset_bytes=?,uploaded_bytes=0,downloaded_bytes=0,reported_at=?,source='nftables_port_counters' WHERE account_id=?",
                            (used, raw, offset, stamp, account_id))
 
-    def _allocate_ssh_port(self) -> int:
+    @staticmethod
+    def _default_ssh_port_range() -> tuple[int, int]:
+        try:
+            low = int(os.getenv("SHOPVPN_SSH_PORT_MIN", "20000"))
+            high = int(os.getenv("SHOPVPN_SSH_PORT_MAX", "39999"))
+        except ValueError:
+            return 20000, 39999
+        return (low, high) if 1024 <= low <= high <= 65535 else (20000, 39999)
+
+    def _reserved_ports(self) -> set[int]:
+        reserved = {22, 8765}
+        try:
+            reserved.add(int(os.getenv("SHOPVPN_AGENT_PORT", "8765")))
+            reserved.add(self._ovpn_settings()[0])
+            reserved.add(self._wg_port())
+        except (TypeError, ValueError):
+            pass
+        return reserved
+
+    def _allocate_ssh_port(self, port_min: int | None = None, port_max: int | None = None) -> int:
+        low, high = self._default_ssh_port_range()
+        if port_min is not None and port_max is not None:
+            low, high = int(port_min), int(port_max)
         with self._conn() as db:
             used = {int(row[0]) for row in db.execute("SELECT ssh_port FROM accounts WHERE ssh_port IS NOT NULL").fetchall()}
-        for _ in range(400):
-            port = 20000 + secrets.randbelow(20000)
-            if port in used:
+        skip = used | self._reserved_ports()
+        span = high - low + 1
+        # بازه‌ی کوچک: همه‌ی پورت‌ها به ترتیب تصادفی؛ بازه‌ی بزرگ: انتخاب تصادفی با سقف تلاش
+        if span <= 2000:
+            candidates = list(range(low, high + 1))
+            secrets.SystemRandom().shuffle(candidates)
+        else:
+            candidates = (low + secrets.randbelow(span) for _ in range(400))
+        for port in candidates:
+            if port in skip:
                 continue
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
@@ -244,7 +273,19 @@ class Agent:
             finally:
                 sock.close()
             return port
-        raise RuntimeError("no free dedicated SSH port available in range 20000-39999")
+        raise RuntimeError(f"no free dedicated SSH port available in range {low}-{high}")
+
+    def _open_firewall_range(self, low: int, high: int):
+        """بازه‌ی پورت‌های SSH خارج از 20000-39999 در ufw (فقط اگر ufw فعال باشد) باز می‌شود."""
+        if low >= 20000 and high <= 39999:
+            return
+        if shutil.which("ufw") is None:
+            return
+        status = self._run("ufw", "status", check=False)
+        if "Status: active" not in str(getattr(status, "stdout", "") or ""):
+            return
+        spec = f"{low}/tcp" if low == high else f"{low}:{high}/tcp"
+        self._run("ufw", "allow", spec, check=False)
 
     def _write_account_sshd_config(self, account_id: str, username: str, port: int) -> str:
         root = Path("/etc/shopvpn/sshd")
@@ -637,7 +678,10 @@ class Agent:
 
     async def info(self, request):
         port, proto = self._ovpn_settings()
-        return web.json_response({"ok": True, "version": 2, "protocols": sorted(self.protocols),
+        low, high = self._default_ssh_port_range()
+        return web.json_response({"ok": True, "version": 3, "protocols": sorted(self.protocols),
+                                  "features": ["ssh_port_range"],
+                                  "ssh": {"port_min": low, "port_max": high},
                                   "openvpn": {"ready": self._ovpn_ready(), "port": port, "transport": proto}
                                   if "openvpn" in self.protocols else None,
                                   "wireguard": {"ready": self._wg_ready(), "port": self._wg_port(), "transport": "udp"}
@@ -679,6 +723,14 @@ class Agent:
             return await self._create_wireguard_account(account_id, username, expires_at, limit_bytes, remote_host)
         if len(password) < 16 or len(password) > 128 or "\n" in password or "\r" in password or ":" in password:
             raise web.HTTPBadRequest(text="password must be 16-128 safe characters")
+        port_min = port_max = None
+        if body.get("port_min") is not None or body.get("port_max") is not None:
+            try:
+                port_min, port_max = int(body.get("port_min")), int(body.get("port_max"))
+            except (TypeError, ValueError):
+                raise web.HTTPBadRequest(text="port_min and port_max must be integers")
+            if not 1024 <= port_min <= port_max <= 65535:
+                raise web.HTTPBadRequest(text="invalid ssh port range; need 1024 <= port_min <= port_max <= 65535")
         with self._conn() as db:
             if db.execute("SELECT 1 FROM accounts WHERE account_id=? OR username=?", (account_id, username)).fetchone():
                 raise web.HTTPConflict(text="account already exists")
@@ -690,7 +742,8 @@ class Agent:
                 self._ensure_nft_table()
             self._ensure_ssh_group()
             nologin = "/usr/sbin/nologin" if os.path.exists("/usr/sbin/nologin") else "/sbin/nologin"
-            ssh_port = self._allocate_ssh_port()
+            ssh_port = self._allocate_ssh_port(port_min, port_max)
+            self._open_firewall_range(*( (port_min, port_max) if port_min is not None else self._default_ssh_port_range() ))
             self._run("useradd", "--create-home", "--gid", "shopvpnssh", "--shell", nologin, "--password", "!", username)
             self._run("chpasswd", input_text=f"{username}:{password}\n")
             self._write_account_sshd_config(account_id, username, ssh_port)
