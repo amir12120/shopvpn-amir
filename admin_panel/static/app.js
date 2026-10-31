@@ -3462,10 +3462,18 @@ async function openCustomConfigPaymentMethodsModal() {
   });
 }
 
+let catalogDsubEnabled = false;
+
 function productProvisionFieldsHtml(panelServers, sshNodes = [], prefill = null) {
   panelServers = panelServers || []; sshNodes = sshNodes || [];
   const isDirect = !!(prefill && (prefill.provision_server_id || prefill.provision_ssh_node_id));
-  const target = prefill && prefill.provision_ssh_node_id ? (prefill.provision_server_id ? 'both' : 'ssh') : 'vpn';
+  const extraPanels = ((prefill && prefill.extra_panel_ids) || []).map(Number);
+  const extraNodes = ((prefill && prefill.extra_ssh_node_ids) || []).map(Number);
+  const isMulti = extraPanels.length + extraNodes.length > 0;
+  const selPanels = isMulti ? [Number(prefill.provision_server_id || 0), ...extraPanels].filter(Boolean) : [];
+  const selNodes = isMulti ? [Number(prefill.provision_ssh_node_id || 0), ...extraNodes].filter(Boolean) : [];
+  const target = isMulti ? 'multi' : (prefill && prefill.provision_ssh_node_id ? (prefill.provision_server_id ? 'both' : 'ssh') : 'vpn');
+  const comboLocked = !catalogDsubEnabled;
   const durUnlimited = !!(prefill && prefill.duration_days === 0);
   const volUnlimited = !!(prefill && prefill.auto_provision_volume_gb === 0);
   return `
@@ -3474,9 +3482,16 @@ function productProvisionFieldsHtml(panelServers, sshNodes = [], prefill = null)
       <label style="display:flex;align-items:center;gap:4px"><input type="radio" name="prod-source" value="direct" ${isDirect ? 'checked' : ''}> ساخت خودکار</label>
     </div>
     <div id="prod-direct-fields" class="form-grid" style="display:${isDirect ? '' : 'none'}">
-      <label class="field"><span>نوع مقصد</span><select class="input" id="prod-target-type"><option value="vpn" ${target === 'vpn' ? 'selected' : ''}>پنل VPN</option>${sshNodes.length || (prefill && prefill.provision_ssh_node_id) ? `<option value="ssh" ${target === 'ssh' ? 'selected' : ''}>نود SSH (Linux Agent)</option><option value="both" ${target === 'both' ? 'selected' : ''}>ترکیبی VPN + SSH (حجم و زمان مشترک)</option>` : ''}</select></label>
-      <div id="prod-vpn-fields" style="display:${target === 'ssh' ? 'none' : ''}"><label class="field"><span>پنل VPN</span><select class="input" id="prod-server">${panelServers.map(s => `<option value="${s.id}" ${prefill && Number(prefill.provision_server_id) === Number(s.id) ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label></div>
-      <div id="prod-ssh-fields" style="display:${(target === 'ssh' || target === 'both') ? '' : 'none'}"><label class="field"><span>نود SSH</span><select class="input" id="prod-ssh-node">${sshNodes.map(n => `<option value="${n.id}" data-protocols="${esc((n.protocols || ['ssh']).join(','))}" ${prefill && Number(prefill.provision_ssh_node_id) === Number(n.id) ? 'selected' : ''}>${esc(n.name)} · ${esc(n.host || '')}</option>`).join('')}</select><span class="card-sub">فقط Linux Agent فعال با حسابداری معتبر پشتیبانی می‌شود.</span></label>
+      <label class="field"><span>نوع مقصد</span><select class="input" id="prod-target-type"><option value="vpn" ${target === 'vpn' ? 'selected' : ''}>پنل VPN</option>${sshNodes.length || (prefill && prefill.provision_ssh_node_id) ? `<option value="ssh" ${target === 'ssh' ? 'selected' : ''}>نود SSH (Linux Agent)</option><option value="both" ${target === 'both' ? 'selected' : ''} ${comboLocked && target !== 'both' ? 'disabled' : ''}>ترکیبی VPN + SSH (حجم و زمان مشترک)${comboLocked ? ' — نیازمند ساب اختصاصی فعال' : ''}</option>` : ''}<option value="multi" ${target === 'multi' ? 'selected' : ''} ${comboLocked && target !== 'multi' ? 'disabled' : ''}>چند پنل / چند نود (حجم و زمان مشترک)${comboLocked ? ' — نیازمند ساب اختصاصی فعال' : ''}</option></select><span class="card-sub" id="prod-multi-hint" style="display:${comboLocked ? '' : 'none'}">ترکیب و چند مقصدی فقط وقتی ساب اختصاصی فعال باشد کار می‌کند.</span></label>
+      <div id="prod-multi-fields" style="display:${target === 'multi' ? '' : 'none'}">
+        <div class="card-sub">پنل‌های VPN (هر تعداد)</div>
+        ${panelServers.map(s2 => `<label class="field field-row"><span>${esc(s2.name)}</span><input type="checkbox" class="prod-multi-panel" value="${s2.id}" ${selPanels.includes(Number(s2.id)) ? 'checked' : ''}></label>`).join('') || '<div class="card-sub">پنلی نیست</div>'}
+        <div class="card-sub">نودهای SSH (هر تعداد)</div>
+        ${sshNodes.map(n2 => `<label class="field field-row"><span>${esc(n2.name)} · ${esc(n2.host || '')}</span><input type="checkbox" class="prod-multi-node" value="${n2.id}" data-protocols="${esc((n2.protocols || ['ssh']).join(','))}" ${selNodes.includes(Number(n2.id)) ? 'checked' : ''}></label>`).join('') || '<div class="card-sub">نودی نیست</div>'}
+        <span class="card-sub">حجم و زمان بین همه‌ی مقصدها مشترک است و خروجی همه در یک لینک ساب اختصاصی ادغام می‌شود.</span>
+      </div>
+      <div id="prod-vpn-fields" style="display:${(target === 'ssh' || target === 'multi') ? 'none' : ''}"><label class="field"><span>پنل VPN</span><select class="input" id="prod-server">${panelServers.map(s => `<option value="${s.id}" ${prefill && Number(prefill.provision_server_id) === Number(s.id) ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label></div>
+      <div id="prod-ssh-fields" style="display:${(target === 'ssh' || target === 'both' || target === 'multi') ? '' : 'none'}"><label class="field" id="prod-ssh-node-field" style="display:${target === 'multi' ? 'none' : ''}"><span>نود SSH</span><select class="input" id="prod-ssh-node">${sshNodes.map(n => `<option value="${n.id}" data-protocols="${esc((n.protocols || ['ssh']).join(','))}" ${prefill && Number(prefill.provision_ssh_node_id) === Number(n.id) ? 'selected' : ''}>${esc(n.name)} · ${esc(n.host || '')}</option>`).join('')}</select><span class="card-sub">فقط Linux Agent فعال با حسابداری معتبر پشتیبانی می‌شود.</span></label>
       <label class="field"><span>پروتکل حساب</span><select class="input" id="prod-ssh-protocol" data-prefill="${esc((prefill && prefill.provision_ssh_protocol) || 'ssh')}"><option value="ssh">SSH</option></select><span class="card-sub">OpenVPN و WireGuard فقط در محصول «ترکیبی» ممکن‌اند و فایل آن‌ها داخل لینک ساب اختصاصی تحویل می‌شود (ساب اختصاصی باید فعال باشد).</span></label></div>
       <label class="field field-row"><span>♾ مدت اعتبار نامحدود</span><input type="checkbox" id="prod-duration-unlimited" ${durUnlimited ? 'checked' : ''}></label>
       <label class="field"><span>حجم (GB) — ۰ = نامحدود</span><input class="input" id="prod-volume" type="number" min="0" step="1" placeholder="حجم (گیگابایت)" value="${prefill && prefill.auto_provision_volume_gb != null ? prefill.auto_provision_volume_gb : ''}" ${volUnlimited ? 'disabled' : ''}></label>
@@ -3493,20 +3508,29 @@ function wireProductProvisionToggle(b) {
   const syncSshProtocol = () => {
     const sel = $('#prod-ssh-protocol', b), nodeSel = $('#prod-ssh-node', b);
     if (!sel || !nodeSel) return;
-    const available = (nodeSel.selectedOptions[0]?.dataset.protocols || 'ssh').split(',').filter(Boolean);
-    const list = (targetType && targetType.value === 'both') ? available : ['ssh'];
+    let available = (nodeSel.selectedOptions[0]?.dataset.protocols || 'ssh').split(',').filter(Boolean);
+    const isMultiType = targetType && targetType.value === 'multi';
+    if (isMultiType) {
+      const picked = $$('.prod-multi-node:checked', b).map(c => (c.dataset.protocols || 'ssh').split(',').filter(Boolean));
+      available = picked.length ? picked.reduce((a, c) => a.filter(x => c.includes(x))) : ['ssh'];
+      if (!$$('.prod-multi-panel:checked', b).length) available = available.filter(x => x === 'ssh');
+    }
+    const list = (targetType && (targetType.value === 'both' || isMultiType)) ? available : ['ssh'];
     const keep = sel.value && sel.dataset.touched ? sel.value : (sel.dataset.prefill || 'ssh');
     sel.innerHTML = list.map(p => `<option value="${esc(p)}" ${p === keep ? 'selected' : ''}>${esc(SSH_PROTO_LABELS[p] || p)}</option>`).join('');
   };
   if ($('#prod-ssh-protocol', b)) {
     $('#prod-ssh-protocol', b).addEventListener('change', e => { e.target.dataset.touched = '1'; });
     if ($('#prod-ssh-node', b)) $('#prod-ssh-node', b).addEventListener('change', syncSshProtocol);
+    $$('.prod-multi-node, .prod-multi-panel', b).forEach(c => c.addEventListener('change', syncSshProtocol));
     syncSshProtocol();
   }
   if (targetType) targetType.addEventListener('change', () => {
     const t = targetType.value;
-    if ($('#prod-vpn-fields', b)) $('#prod-vpn-fields', b).style.display = t === 'ssh' ? 'none' : '';
-    if ($('#prod-ssh-fields', b)) $('#prod-ssh-fields', b).style.display = (t === 'ssh' || t === 'both') ? '' : 'none';
+    if ($('#prod-vpn-fields', b)) $('#prod-vpn-fields', b).style.display = (t === 'ssh' || t === 'multi') ? 'none' : '';
+    if ($('#prod-ssh-fields', b)) $('#prod-ssh-fields', b).style.display = (t === 'ssh' || t === 'both' || t === 'multi') ? '' : 'none';
+    if ($('#prod-ssh-node-field', b)) $('#prod-ssh-node-field', b).style.display = t === 'multi' ? 'none' : '';
+    if ($('#prod-multi-fields', b)) $('#prod-multi-fields', b).style.display = t === 'multi' ? '' : 'none';
     syncSshProtocol();
   });
   const durUnlimitedCb = $('#prod-duration-unlimited', b);
@@ -3529,7 +3553,7 @@ function readProductProvisionFields(b) {
   const durationUnlimited = isDirect && durUnlimitedCb && durUnlimitedCb.checked;
   const durInput = $('#prod-duration', b);
   const duration_days = durationUnlimited ? 0 : (Number(durInput ? durInput.value : 0) || 30);
-  if (!isDirect) return { ok: true, source: 'bank', provision_server_id: null, provision_ssh_node_id: null, auto_provision_volume_gb: null, duration_days };
+  if (!isDirect) return { ok: true, source: 'bank', provision_server_id: null, provision_ssh_node_id: null, extra_panel_ids: [], extra_ssh_node_ids: [], auto_provision_volume_gb: null, duration_days };
   const target = $('#prod-target-type', b)?.value || 'vpn';
   const volUnlimitedCb = $('#prod-volume-unlimited', b);
   const volumeUnlimited = volUnlimitedCb && volUnlimitedCb.checked;
@@ -3537,21 +3561,30 @@ function readProductProvisionFields(b) {
   if (auto_provision_volume_gb < 0 || (!volumeUnlimited && !auto_provision_volume_gb)) {
     toast('برای ساخت خودکار، حجم معتبر یا حجم نامحدود را انتخاب کنید.', true); return { ok: false };
   }
+  if (target === 'multi') {
+    if (!catalogDsubEnabled) { toast('چند پنل/نود فقط وقتی ساب اختصاصی فعال است ممکن است.', true); return { ok: false }; }
+    const panels = $$('.prod-multi-panel:checked', b).map(c => Number(c.value));
+    const nodes = $$('.prod-multi-node:checked', b).map(c => Number(c.value));
+    if (panels.length + nodes.length < 2) { toast('حداقل دو مقصد (پنل یا نود) انتخاب کنید.', true); return { ok: false }; }
+    return { ok: true, source: 'direct', provision_server_id: panels[0] || null, provision_ssh_node_id: nodes[0] || null,
+      extra_panel_ids: panels.slice(1), extra_ssh_node_ids: nodes.slice(1),
+      provision_ssh_protocol: nodes.length ? ($('#prod-ssh-protocol', b)?.value || 'ssh') : 'ssh', auto_provision_volume_gb, duration_days };
+  }
   if (target === 'both') {
     const provision_server_id = Number($('#prod-server', b)?.value || 0);
     const provision_ssh_node_id = Number($('#prod-ssh-node', b)?.value || 0);
     if (!provision_server_id) { toast('یک پنل VPN فعال انتخاب کنید.', true); return { ok: false }; }
     if (!provision_ssh_node_id) { toast('یک نود SSH فعال انتخاب کنید.', true); return { ok: false }; }
-    return { ok: true, source: 'direct', provision_server_id, provision_ssh_node_id, provision_ssh_protocol: $('#prod-ssh-protocol', b)?.value || 'ssh', auto_provision_volume_gb, duration_days };
+    return { ok: true, source: 'direct', provision_server_id, provision_ssh_node_id, extra_panel_ids: [], extra_ssh_node_ids: [], provision_ssh_protocol: $('#prod-ssh-protocol', b)?.value || 'ssh', auto_provision_volume_gb, duration_days };
   }
   if (target === 'ssh') {
     const provision_ssh_node_id = Number($('#prod-ssh-node', b)?.value || 0);
     if (!provision_ssh_node_id) { toast('یک نود SSH فعال انتخاب کنید.', true); return { ok: false }; }
-    return { ok: true, source: 'direct', provision_server_id: null, provision_ssh_node_id, provision_ssh_protocol: 'ssh', auto_provision_volume_gb, duration_days };
+    return { ok: true, source: 'direct', provision_server_id: null, provision_ssh_node_id, extra_panel_ids: [], extra_ssh_node_ids: [], provision_ssh_protocol: 'ssh', auto_provision_volume_gb, duration_days };
   }
   const provision_server_id = Number($('#prod-server', b)?.value || 0);
   if (!provision_server_id) { toast('یک پنل VPN فعال انتخاب کنید.', true); return { ok: false }; }
-  return { ok: true, source: 'direct', provision_server_id, provision_ssh_node_id: null, auto_provision_volume_gb, duration_days };
+  return { ok: true, source: 'direct', provision_server_id, provision_ssh_node_id: null, extra_panel_ids: [], extra_ssh_node_ids: [], auto_provision_volume_gb, duration_days };
 }
 
 // روش‌های پرداخت مجاز حین «ساخت» محصول جدید (پیش‌فرض: همه تیک‌خورده = بدون
@@ -3662,6 +3695,8 @@ function openProductEditModal(product, categories, panelServers, sshNodes) {
         payload.provision_server_id = prov.provision_server_id;
         payload.provision_ssh_node_id = prov.provision_ssh_node_id;
         payload.provision_ssh_protocol = prov.provision_ssh_protocol;
+        payload.extra_panel_ids = prov.extra_panel_ids;
+        payload.extra_ssh_node_ids = prov.extra_ssh_node_ids;
         payload.auto_provision_volume_gb = prov.auto_provision_volume_gb;
       }
       try {
@@ -3673,9 +3708,11 @@ function openProductEditModal(product, categories, panelServers, sshNodes) {
 }
 
 async function renderCatalog() {
-  const [categories, products, panelServers, sshNodes, paymentMethods] = await Promise.all([
+  const [categories, products, panelServers, sshNodes, paymentMethods, multiInfo] = await Promise.all([
     apiGet('/categories'), apiGet('/products'), apiGet('/panel-servers-lite'), apiGet('/ssh/nodes-lite').catch(() => []), apiGet('/payment-methods'),
+    apiGet('/products/multi-target-info').catch(() => ({ dsub_enabled: false })),
   ]);
+  catalogDsubEnabled = !!(multiInfo && multiInfo.dsub_enabled);
   if (loadTheme().theme === 'brutalist') return renderCatalogBrutalist(categories, products, panelServers, sshNodes, paymentMethods);
   if (loadTheme().theme === 'bento') return renderCatalogBento(categories, products, panelServers, sshNodes, paymentMethods);
   setContent(`
@@ -3730,7 +3767,7 @@ async function renderCatalog() {
         </div>
         ${esc(p.name)}
       </td><td>${esc(p.category_name)}</td><td class="mono">${fmt(p.price)}</td>
-      <td class="mono">${p.is_auto_provision ? `<span class="chip">${p.provision_ssh_node_id ? 'SSH خودکار' : (p.provision_server_id ? 'VPN مستقیم' : 'خودکار')}</span>` : fmt(p.stock)}</td>
+      <td class="mono">${p.is_auto_provision ? `<span class="chip">${((p.extra_panel_ids || []).length + (p.extra_ssh_node_ids || []).length) ? 'چندمقصدی' : (p.provision_ssh_node_id ? 'SSH خودکار' : (p.provision_server_id ? 'VPN مستقیم' : 'خودکار'))}</span>` : fmt(p.stock)}</td>
       <td>${p.is_active ? '<span class="badge badge-approved">فعال</span>' : '<span class="badge badge-rejected">غیرفعال</span>'}</td>
       <td>
         ${!p.is_auto_provision ? `<button class="btn btn-sm" data-configs="${p.id}">بانک کانفیگ</button>` : ''}
@@ -3768,7 +3805,7 @@ async function renderCatalog() {
         await apiPost('/products', {
           category_id: Number($('#prod-cat', b).value), name, price: disc.price, compare_price: disc.compare_price, discount_days: disc.discount_days, discount_max_uses: disc.discount_max_uses,
           description: $('#prod-desc', b).value, duration_days: prov.duration_days,
-          provision_server_id: prov.provision_server_id, provision_ssh_node_id: prov.provision_ssh_node_id, provision_ssh_protocol: prov.provision_ssh_protocol,
+          provision_server_id: prov.provision_server_id, provision_ssh_node_id: prov.provision_ssh_node_id, provision_ssh_protocol: prov.provision_ssh_protocol, extra_panel_ids: prov.extra_panel_ids, extra_ssh_node_ids: prov.extra_ssh_node_ids,
           auto_provision_volume_gb: prov.auto_provision_volume_gb, payment_methods,
         });
         toast('محصول اضافه شد.'); close(); renderCatalog();
@@ -3903,7 +3940,7 @@ function renderCatalogBento(categories, products, panelServers, sshNodes, paymen
         await apiPost('/products', {
           category_id: Number($('#prod-cat', b).value), name, price: disc.price, compare_price: disc.compare_price, discount_days: disc.discount_days, discount_max_uses: disc.discount_max_uses,
           description: $('#prod-desc', b).value, duration_days: prov.duration_days,
-          provision_server_id: prov.provision_server_id, provision_ssh_node_id: prov.provision_ssh_node_id, provision_ssh_protocol: prov.provision_ssh_protocol,
+          provision_server_id: prov.provision_server_id, provision_ssh_node_id: prov.provision_ssh_node_id, provision_ssh_protocol: prov.provision_ssh_protocol, extra_panel_ids: prov.extra_panel_ids, extra_ssh_node_ids: prov.extra_ssh_node_ids,
           auto_provision_volume_gb: prov.auto_provision_volume_gb, payment_methods,
         });
         toast('محصول اضافه شد.'); close(); renderCatalog();
@@ -4037,7 +4074,7 @@ function renderCatalogBrutalist(categories, products, panelServers, sshNodes, pa
         await apiPost('/products', {
           category_id: Number($('#prod-cat', b).value), name, price: disc.price, compare_price: disc.compare_price, discount_days: disc.discount_days, discount_max_uses: disc.discount_max_uses,
           description: $('#prod-desc', b).value, duration_days: prov.duration_days,
-          provision_server_id: prov.provision_server_id, provision_ssh_node_id: prov.provision_ssh_node_id, provision_ssh_protocol: prov.provision_ssh_protocol,
+          provision_server_id: prov.provision_server_id, provision_ssh_node_id: prov.provision_ssh_node_id, provision_ssh_protocol: prov.provision_ssh_protocol, extra_panel_ids: prov.extra_panel_ids, extra_ssh_node_ids: prov.extra_ssh_node_ids,
           auto_provision_volume_gb: prov.auto_provision_volume_gb, payment_methods,
         });
         toast('محصول اضافه شد.'); close(); renderCatalog();
