@@ -665,6 +665,24 @@ class SSHNodeRenameBody(BaseModel):
     name: str
 
 
+class SSHHostBody(BaseModel):
+    id: Optional[str] = None
+    protocol: str
+    remark: str = ""
+    address: str
+    port: Optional[int] = None
+    enabled: bool = True
+
+
+class SSHNodeHostsBody(BaseModel):
+    hosts: List[SSHHostBody] = []
+
+
+class SSHPortRangeBody(BaseModel):
+    port_min: Optional[int] = None   # هر دو None = برگشت به پیش‌فرض 20000-39999
+    port_max: Optional[int] = None
+
+
 class SSHPoolCreateBody(BaseModel):
     user_id: int
     limit_gb: float = 0
@@ -5867,31 +5885,8 @@ def _panel_server_public(s, health=None) -> dict:
 # ------------------------------------------------------------ SSH / shared quota
 @app.get("/api/ssh/overview")
 def api_ssh_overview(admin=Depends(require_permission("panels")), _fa=Depends(require_full_access_tenant)):
-    pools = db.list_quota_pools(active_only=False)
-    pool_items = []
-    for pool in pools:
-        item = dict(pool)
-        item["usage"] = db.get_quota_usage(int(pool["id"]))
-        item["members"] = db.get_quota_members(int(pool["id"]))
-        pool_items.append(item)
-    nodes = []
-    for node in db.list_ssh_nodes():
-        item = dict(node)
-        # Only non-secret configuration needed by the UI is exposed.
-        try:
-            cfg = json.loads(item.get("config_json") or "{}")
-        except (TypeError, ValueError):
-            cfg = {}
-        item["agent_url"] = cfg.get("agent_url", "")
-        import ssh_service
-        item["protocols"] = ssh_service.node_protocols(node)
-        item["ovpn_port"] = cfg.get("ovpn_port")
-        item["ovpn_proto"] = cfg.get("ovpn_proto")
-        item["wg_port"] = cfg.get("wg_port")
-        item.pop("config_json", None)
-        nodes.append(item)
-    return {"nodes": nodes, "pools": pool_items,
-            "accounts": db.list_ssh_accounts()}
+    import ssh_service
+    return ssh_service.overview(db)
 
 
 @app.post("/api/ssh/nodes/auto-install")
@@ -5963,6 +5958,37 @@ def api_ssh_rename_node(node_id: int, body: SSHNodeRenameBody, admin=Depends(req
         raise HTTPException(404, "نود پیدا نشد.")
     db.log_admin_action(admin["id"], "ssh_node_rename", f"SSH node #{node_id}: {body.name.strip()}", "ssh")
     return {"ok": True}
+
+
+@app.get("/api/ssh/nodes/{node_id}/hosts")
+def api_ssh_node_hosts(node_id: int, admin=Depends(require_permission("panels")), _fa=Depends(require_full_access_tenant)):
+    import ssh_service
+    try:
+        return ssh_service.get_node_hosts(db, node_id)
+    except ssh_service.SSHServiceError as exc:
+        raise HTTPException(exc.status, str(exc))
+
+
+@app.put("/api/ssh/nodes/{node_id}/hosts")
+def api_ssh_node_set_hosts(node_id: int, body: SSHNodeHostsBody, admin=Depends(require_permission("panels")), _fa=Depends(require_full_access_tenant)):
+    import ssh_service
+    try:
+        hosts = ssh_service.set_node_hosts(db, node_id, [h.model_dump() if hasattr(h, "model_dump") else h.dict() for h in body.hosts])
+    except ssh_service.SSHServiceError as exc:
+        raise HTTPException(exc.status, str(exc))
+    db.log_admin_action(admin["id"], "ssh_node_hosts", f"SSH node #{node_id}: {len(hosts)} host(s)", "ssh")
+    return {"ok": True, "hosts": hosts}
+
+
+@app.put("/api/ssh/nodes/{node_id}/ssh-port-range")
+async def api_ssh_node_set_port_range(node_id: int, body: SSHPortRangeBody, admin=Depends(require_permission("panels")), _fa=Depends(require_full_access_tenant)):
+    import ssh_service
+    try:
+        r = await ssh_service.set_ssh_port_range(db, node_id, body.port_min, body.port_max)
+    except ssh_service.SSHServiceError as exc:
+        raise HTTPException(exc.status, str(exc))
+    db.log_admin_action(admin["id"], "ssh_node_port_range", f"SSH node #{node_id}: {r['ssh_port_min']}-{r['ssh_port_max']}", "ssh")
+    return {"ok": True, **r}
 
 
 @app.post("/api/ssh/nodes/{node_id}/test")
