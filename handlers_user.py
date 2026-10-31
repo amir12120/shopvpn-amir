@@ -4440,6 +4440,8 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
                                 "حذف کاربر «%s» از پنل سرور #%s ناموفق بود؛ در هر صورت از لیست کاربر حذف می‌شود.",
                                 cc_row["username"], cc_row["panel_server_id"],
                             )
+                from multi_target import delete_linked_panel_users
+                await delete_linked_panel_users(db, item_id)
                 removed = (await asyncio.to_thread(
                     db.delete_owned_custom_config, item_id, user_tg_id, wallet_refund_amount(quote, panel_deleted),
                 ))

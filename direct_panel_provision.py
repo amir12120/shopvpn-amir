@@ -28,6 +28,10 @@ class ProvisionError(Exception):
     pass
 
 
+MULTI_TARGET_NEEDS_DSUB = ("محصول با چند پنل/نود یا ترکیب پنل و نود فقط با ساب اختصاصی فعال کار می‌کند؛ "
+                           "ساب اختصاصی را فعال کنید.")
+
+
 def _random_username(prefix: str = "") -> str:
     suffix = "d" + "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
     return f"{prefix}-{suffix}" if prefix else suffix
@@ -63,21 +67,27 @@ async def provision_direct(db, product, quantity: int = 1, user_id: int = None, 
         ssh_node_id = product["provision_ssh_node_id"]
     except (KeyError, IndexError):
         pass
-    if ssh_node_id and product["provision_server_id"]:
-        return await _provision_combined(db, product, quantity=quantity, user_id=user_id, order_id=order_id)
+    targets = db.product_target_counts(product)
+    if len(targets["panels"]) + len(targets["ssh"]) > 1:
+        import dedicated_sub
+        if not dedicated_sub.is_enabled(db):
+            raise ProvisionError(MULTI_TARGET_NEEDS_DSUB)
+        if len(targets["panels"]) == 1 and len(targets["ssh"]) == 1:
+            return await _provision_combined(db, product, quantity=quantity, user_id=user_id, order_id=order_id)
+        return await _provision_multi(db, product, targets, quantity=quantity, user_id=user_id, order_id=order_id)
     if ssh_node_id:
         return await provision_ssh_direct(db, product, quantity=quantity, user_id=user_id, order_id=order_id)
     return await _provision_vpn(db, product, quantity=quantity, user_id=user_id, order_id=order_id)
 
 
 async def _provision_vpn(db, product, quantity: int = 1, user_id: int = None, order_id: int = None,
-                         shared_pool: bool = False) -> list:
+                         shared_pool: bool = False, server_id: int = None, register: bool = True) -> list:
     """ساخت کاربر روی پنل VPN. با shared_pool=True حجم روی خود پنل نامحدود ساخته می‌شود
     (سقف حجم را استخر مشترک VPN+SSH اعمال می‌کند) ولی حجم محصول در custom_configs ثبت می‌شود."""
     if not isinstance(quantity, int) or quantity < 1:
         raise ProvisionError("تعداد درخواستی نامعتبر است.")
 
-    server_id = product["provision_server_id"]
+    server_id = server_id or product["provision_server_id"]
     if not server_id:
         raise ProvisionError("این محصول به هیچ پنلی وصل نشده است.")
 
@@ -149,6 +159,7 @@ async def _provision_vpn(db, product, quantity: int = 1, user_id: int = None, or
                 raise ProvisionError("ساخت نام کاربری یکتا روی پنل ناموفق بود؛ دوباره تلاش کنید.")
             built.append({
                 "username": result.username,
+                "panel_server_id": int(server_id),
                 "subscription_url": result.subscription_url,
                 "volume_gb": volume_gb,
                 "duration_days": duration_days,
@@ -160,7 +171,7 @@ async def _provision_vpn(db, product, quantity: int = 1, user_id: int = None, or
         await _rollback_built()
         raise ProvisionError(f"خطا در ساخت کانفیگ روی پنل: {e}")
 
-    if user_id is not None:
+    if user_id is not None and register:
         for item in built:
             try:
                 item["custom_config_id"] = db.add_custom_config(
@@ -191,9 +202,8 @@ async def _provision_combined(db, product, quantity: int = 1, user_id: int = Non
     if user_id is None:
         raise ProvisionError("شناسه کاربر برای ساخت محصول ترکیبی VPN+SSH الزامی است.")
     import dedicated_sub
-    if _product_ssh_protocol(product) in FILE_PROTOCOLS and not dedicated_sub.is_enabled(db):
-        label = "WireGuard" if _product_ssh_protocol(product) == "wireguard" else "OpenVPN"
-        raise ProvisionError(f"فایل {label} فقط از لینک ساب اختصاصی تحویل می‌شود؛ ساب اختصاصی را فعال کنید.")
+    if not dedicated_sub.is_enabled(db):
+        raise ProvisionError(MULTI_TARGET_NEEDS_DSUB)
     # ابتدا SSH (شکست‌پذیرتر: نیاز به شمارنده معتبر)، بعد VPN.
     ssh_items = await provision_ssh_direct(db, product, quantity=quantity, user_id=user_id, order_id=order_id,
                                            allow_openvpn=True)
@@ -248,9 +258,103 @@ async def _provision_combined(db, product, quantity: int = 1, user_id: int = Non
 
     for item in vpn_items:
         item["quota_pool_id"] = int(pool_id)
-    if dedicated_sub.is_enabled(db):
-        return vpn_items
-    return vpn_items + ssh_items
+    return vpn_items
+
+
+async def _provision_multi(db, product, targets: dict, quantity: int = 1, user_id: int = None,
+                           order_id: int = None) -> list:
+    """محصول چندمقصدی: هر تعداد پنل VPN و نود SSH با حجم و زمان مشترک (یک استخر سهمیه برای هر واحد).
+    پنل اول سرویس اصلی (custom_config) است و بقیه‌ی پنل‌ها با config_panel_links به آن وصل می‌شوند؛
+    لینک ساب اختصاصی خروجی همه را یکجا می‌دهد. همه‌یا‌هیچ: با خطا هرچه ساخته شده پاک می‌شود."""
+    if user_id is None or not isinstance(quantity, int) or quantity < 1:
+        raise ProvisionError("شناسه کاربر یا تعداد برای ساخت محصول چندمقصدی نامعتبر است.")
+    panel_ids, node_ids = list(targets["panels"]), list(targets["ssh"])
+    if not panel_ids and _product_ssh_protocol(product) in FILE_PROTOCOLS:
+        raise ProvisionError("تحویل فایل OpenVPN/WireGuard حداقل یک پنل VPN در محصول لازم دارد.")
+    for sid in panel_ids:
+        server = db.get_panel_server(sid)
+        if not server or not server["is_active"]:
+            raise ProvisionError(f"پنل #{sid} متصل به این محصول یافت نشد یا غیرفعال است؛ با پشتیبانی تماس بگیرید.")
+    volume_gb = float(product["auto_provision_volume_gb"] or 0)
+    duration_days = int(product["duration_days"] if product["duration_days"] is not None else 30)
+    if volume_gb < 0 or duration_days < 0:
+        raise ProvisionError("حجم یا مدت محصول نامعتبر است.")
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=duration_days)).isoformat() if duration_days else None
+
+    finished = []
+    output = []
+    try:
+        for _ in range(quantity):
+            unit_items, unit_rollback = await _provision_multi_unit(
+                db, product, panel_ids, node_ids, user_id, order_id, volume_gb, expires_at)
+            finished.append(unit_rollback)
+            output.extend(unit_items)
+    except Exception:
+        for rollback in reversed(finished):
+            await rollback()
+        raise
+    return output
+
+
+async def _provision_multi_unit(db, product, panel_ids, node_ids, user_id, order_id, volume_gb, expires_at):
+    pool_id = db.create_quota_pool(int(user_id), volume_gb, expires_at,
+        label=f"{product['name']}" + (f" · order #{order_id}" if order_id else ""))
+    ssh_items, vpn_items = [], []
+    primary_cc_id = None
+
+    async def rollback():
+        for item in ssh_items:
+            try:
+                from ssh_providers import get_ssh_provider
+                from quota_reconciler import _env_secret_resolver
+                node = next((n for n in db.list_ssh_nodes() if int(n["id"]) == int(item["node_id"])), None)
+                await get_ssh_provider(node, secret_resolver=_env_secret_resolver).delete_account(item["account_id"])
+            except Exception:
+                logger.exception("multi rollback: SSH delete failed for %s", item.get("account_id"))
+        for item in vpn_items:
+            try:
+                await get_provider(db.get_panel_server(item["panel_server_id"])).delete_user(item["username"])
+            except Exception:
+                logger.exception("multi rollback: VPN delete failed for %s", item.get("username"))
+        if primary_cc_id:
+            db.delete_config_panel_links(primary_cc_id)
+            with db._get_conn() as conn:
+                conn.execute("DELETE FROM quota_pool_members WHERE service_kind='vpn' AND service_id=?",
+                             (f"custom_config:{int(primary_cc_id)}",))
+                conn.execute("DELETE FROM custom_configs WHERE id=?", (int(primary_cc_id),))
+        db.delete_quota_pool(pool_id)
+
+    try:
+        for node_id in node_ids:
+            ssh_items.extend(await provision_ssh_direct(
+                db, product, quantity=1, user_id=user_id, order_id=order_id,
+                allow_openvpn=bool(panel_ids), node_id=node_id, pool_id=pool_id))
+        for index, server_id in enumerate(panel_ids):
+            built = await _provision_vpn(db, product, quantity=1, user_id=user_id, order_id=order_id,
+                                         shared_pool=True, server_id=server_id, register=(index == 0))
+            vpn_items.extend(built)
+            if index == 0:
+                primary_cc_id = built[0].get("custom_config_id")
+                if not primary_cc_id:
+                    raise ProvisionError("ثبت سرویس اصلی برای اتصال به سهمیه مشترک ناموفق بود.")
+                db.attach_custom_config_to_quota_pool(pool_id, primary_cc_id)
+                for ssh_item in ssh_items:
+                    db.link_ssh_account_to_config(ssh_item["account_id"], primary_cc_id)
+            else:
+                link_id = db.add_config_panel_link(primary_cc_id, server_id, built[0]["username"],
+                                                   built[0]["subscription_url"])
+                db.attach_quota_service(pool_id, "vpn", f"panel_link:{link_id}", node_id=server_id)
+    except Exception as exc:
+        await rollback()
+        if isinstance(exc, ProvisionError):
+            raise
+        raise ProvisionError(f"ساخت محصول چندمقصدی ناموفق بود: {exc}") from exc
+
+    if not panel_ids:
+        return ssh_items, rollback
+    primary = dict(vpn_items[0])
+    primary["quota_pool_id"] = int(pool_id)
+    return [primary], rollback
 
 
 FILE_PROTOCOLS = ("openvpn", "wireguard")
@@ -265,7 +369,7 @@ def _product_ssh_protocol(product) -> str:
 
 
 async def provision_ssh_direct(db, product, quantity: int = 1, user_id: int = None, order_id: int = None,
-                               allow_openvpn: bool = False) -> list:
+                               allow_openvpn: bool = False, node_id: int = None, pool_id: int = None) -> list:
     """Provision a paid SSH product on a Linux Agent and create one shared quota pool.
 
     Commercial delivery fails closed unless the Agent reports a valid per-account
@@ -274,7 +378,7 @@ async def provision_ssh_direct(db, product, quantity: int = 1, user_id: int = No
     """
     if not isinstance(quantity, int) or quantity < 1 or user_id is None:
         raise ProvisionError("تعداد یا شناسه کاربر برای ساخت محصول SSH نامعتبر است.")
-    node_id = product["provision_ssh_node_id"]
+    node_id = node_id or product["provision_ssh_node_id"]
     node = next((n for n in db.list_ssh_nodes(active_only=True) if int(n["id"]) == int(node_id)), None)
     if not node or node.get("node_type") != "linux":
         raise ProvisionError("نود Linux Agent فعال پیدا نشد؛ پنل SSH هنوز آداپتور عملیاتی ندارد.")
@@ -298,10 +402,13 @@ async def provision_ssh_direct(db, product, quantity: int = 1, user_id: int = No
         encrypt_credential("preflight-check")
     except RuntimeError as exc:
         raise ProvisionError(str(exc))
+    own_pool = False
     try:
         provider = get_ssh_provider(node, secret_resolver=_env_secret_resolver)
-        pool_id = db.create_quota_pool(int(user_id), volume_gb, expires_at,
-            label=f"{product['name']} SSH" + (f" · order #{order_id}" if order_id else ""))
+        if pool_id is None:
+            pool_id = db.create_quota_pool(int(user_id), volume_gb, expires_at,
+                label=f"{product['name']} SSH" + (f" · order #{order_id}" if order_id else ""))
+            own_pool = True
     except Exception as exc:
         raise ProvisionError(f"آماده‌سازی محصول SSH ناموفق بود: {exc}") from exc
     built = []
@@ -358,7 +465,8 @@ async def provision_ssh_direct(db, product, quantity: int = 1, user_id: int = No
                 await provider.delete_account(item.account_id)
             except Exception:
                 logger.exception("SSH provisioning rollback failed for %s", item.account_id)
-        db.delete_quota_pool(pool_id)
+        if own_pool:
+            db.delete_quota_pool(pool_id)
         if isinstance(exc, ProvisionError):
             raise
         raise ProvisionError(f"ساخت محصول SSH ناموفق بود: {exc}") from exc
@@ -377,7 +485,7 @@ async def provision_ssh_direct(db, product, quantity: int = 1, user_id: int = No
             build_ssh_uri(item.username, password, ep["address"], ep["port"], label + (f" {ep['remark']}" if ep["remark"] else ""))
             for ep in eps[1:]]
         output.append({"username": item.username, "host": primary["address"], "port": int(primary["port"]),
-            "password": password, "account_id": item.account_id, "quota_pool_id": int(pool_id),
+            "password": password, "account_id": item.account_id, "quota_pool_id": int(pool_id), "node_id": int(node_id),
             "subscription_url": uri, "extra_uris": extra, "volume_gb": volume_gb, "duration_days": duration_days,
             "protocol": protocol, "accounting_ready": bool(item.metadata.get("accounting_ready"))})
     return output

@@ -77,6 +77,22 @@ class QuotaReconciler:
             server = conn.execute("SELECT * FROM panel_servers WHERE id=?", (int(cc["panel_server_id"]),)).fetchone()
             return (dict(cc), dict(server) if server else None)
 
+    def _vpn_member(self, service_id):
+        kind, _, raw = str(service_id).partition(":")
+        if kind == "custom_config":
+            return self._vpn_record(raw)
+        if kind == "panel_link":
+            with self.db._get_conn() as conn:
+                link = conn.execute(
+                    "SELECT id,panel_server_id,username FROM config_panel_links WHERE id=? AND status='active'",
+                    (int(raw),)).fetchone()
+                if not link:
+                    return None, None
+                server = conn.execute("SELECT * FROM panel_servers WHERE id=?",
+                                      (int(link["panel_server_id"]),)).fetchone()
+                return dict(link), (dict(server) if server else None)
+        raise RuntimeError("شناسه سرویس VPN باید custom_config:<id> یا panel_link:<id> باشد")
+
     def _ssh_record(self, account_id):
         accounts = self.db.list_ssh_accounts()
         account = next((a for a in accounts if str(a.get("account_id")) == str(account_id)), None)
@@ -87,10 +103,7 @@ class QuotaReconciler:
         return account, node
 
     async def _poll_vpn(self, service_id):
-        if not str(service_id).startswith("custom_config:"):
-            raise RuntimeError("شناسه سرویس VPN باید custom_config:<id> باشد")
-        config_id = str(service_id).split(":", 1)[1]
-        cc, server = self._vpn_record(config_id)
+        cc, server = self._vpn_member(service_id)
         if not cc or not server:
             raise RuntimeError("سرویس VPN یا پنل مربوطه پیدا نشد")
         provider = self.vpn_provider_factory(server)
@@ -146,8 +159,7 @@ class QuotaReconciler:
             return {"service_kind": kind, "service_id": service_id, "ok": True, "skipped": True}
         try:
             if kind == "vpn":
-                config_id = str(service_id).split(":", 1)[1]
-                cc, server = self._vpn_record(config_id)
+                cc, server = self._vpn_member(service_id)
                 if not cc or not server:
                     raise RuntimeError("سرویس VPN یا پنل مربوطه پیدا نشد")
                 provider = self.vpn_provider_factory(server)
@@ -194,7 +206,7 @@ class QuotaReconciler:
         فقط وقتی اجرا می‌شود که استخر سقف مشخص دارد، حداقل یک عضو SSH دارد و همه‌ی
         شمارنده‌ها تازه‌اند. خطای یک پنل هیچ‌وقت enforcement را مختل نمی‌کند."""
         limit = int(pool.get("limit_bytes") or 0)
-        if limit <= 0 or not any(m["service_kind"] == "ssh" for m in members):
+        if limit <= 0 or len(members) < 2:
             return []
         remaining = max(limit - int((usage or {}).get("used_bytes") or 0), 0)
         results = []
@@ -203,8 +215,7 @@ class QuotaReconciler:
                 continue
             service_id = res["service_id"]
             try:
-                config_id = str(service_id).split(":", 1)[1]
-                cc, server = self._vpn_record(config_id)
+                cc, server = self._vpn_member(service_id)
                 if not cc or not server:
                     continue
                 provider = self.vpn_provider_factory(server)
