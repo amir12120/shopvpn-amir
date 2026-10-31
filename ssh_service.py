@@ -21,6 +21,9 @@ RELIABLE_SOURCES = {"nftables_port_counters", "external-counter", "ssh-traffic-a
 SUPPORTED_PROTOCOLS = ("ssh", "openvpn", "wireguard")
 
 
+AGENT_UNREACHABLE_STATUS = 502  # فرانت‌اندها با همین کد پیشنهاد «حذف اجباری» را نشان می‌دهند.
+
+
 class SSHServiceError(Exception):
     def __init__(self, message: str, status: int = 400):
         super().__init__(message)
@@ -235,7 +238,12 @@ def get_install_job(job_id: str) -> Optional[dict]:
     return ssh_auto_install.get_job(job_id)
 
 
-def delete_node(db, node_id: int) -> None:
+def delete_node(db, node_id: int, force: bool = False) -> None:
+    """حذف نود. با force=True (سرور نود از بین رفته) حساب‌های باقی‌مانده فقط از دیتابیس پنل حذف می‌شوند."""
+    if force:
+        for acc in db.list_ssh_accounts(node_id=int(node_id)):
+            if acc.get("status") != "deleted":
+                _force_delete_local(db, acc)
     try:
         removed = db.delete_ssh_node(int(node_id))
     except ValueError as exc:
@@ -374,8 +382,21 @@ async def create_account(db, *, node_id: int, user_id: int, username: str, limit
                         else "حسابداری حجم دقیق نیست؛ قبل از فروش حجمی وضعیت نود را بررسی کنید.")}
 
 
-async def account_action(db, account_id: str, action: str) -> str:
-    from ssh_providers import get_ssh_provider, SSHProviderError
+def _force_delete_local(db, account: dict) -> None:
+    """حذف حساب فقط از دیتابیس پنل (وقتی نود در دسترس نیست). مصرف آخرین snapshot در استخر حفظ می‌شود."""
+    pool_id = account.get("quota_pool_id")
+    if pool_id:
+        db.detach_quota_service(int(pool_id), "ssh", str(account["account_id"]))
+    db.set_ssh_account_status(account["id"], "deleted")
+
+
+async def account_action(db, account_id: str, action: str, force: bool = False) -> str:
+    """enable/disable/delete یک حساب SSH روی نود.
+
+    اگر Agent نود در دسترس نباشد (سرور حذف/خاموش شده) عملیات با کد 502 رد می‌شود؛
+    فقط «delete» با force=True بدون تماس با نود و صرفاً از پنل حذف می‌شود.
+    """
+    from ssh_providers import get_ssh_provider, SSHProviderError, SSHAgentUnreachable
     from quota_reconciler import _env_secret_resolver
     action = (action or "").strip().lower()
     if action not in {"enable", "disable", "delete"}:
@@ -383,9 +404,22 @@ async def account_action(db, account_id: str, action: str) -> str:
     account = next((a for a in db.list_ssh_accounts() if str(a["account_id"]) == str(account_id)), None)
     if not account:
         raise SSHServiceError("حساب SSH پیدا نشد.", 404)
+    if action == "delete" and account.get("status") == "deleted":
+        return "deleted"
     node = next((n for n in db.list_ssh_nodes() if int(n["id"]) == int(account["node_id"])), None)
     if not node:
+        if action == "delete":
+            _force_delete_local(db, account)
+            return "deleted"
         raise SSHServiceError("نود حساب پیدا نشد.", 404)
+    if action == "delete" and force:
+        # اگر نود سالم است همچنان تلاش می‌کنیم از روی آن هم پاک شود؛ در غیر این صورت فقط محلی.
+        try:
+            await get_ssh_provider(node, secret_resolver=_env_secret_resolver).delete_account(account_id)
+        except SSHProviderError as exc:
+            logger.warning("Force delete of SSH account %s: node %s not cleaned (%s)", account_id, node.get("id"), exc)
+        _force_delete_local(db, account)
+        return "deleted"
     try:
         provider = get_ssh_provider(node, secret_resolver=_env_secret_resolver)
         if action == "enable":
@@ -417,6 +451,10 @@ async def account_action(db, account_id: str, action: str) -> str:
             db.set_ssh_account_status(account["id"], "deleted")
     except SSHServiceError:
         raise
+    except SSHAgentUnreachable as exc:
+        hint = (" اگر سرور نود حذف یا برای همیشه از دسترس خارج شده، «حذف اجباری (فقط از پنل)» را بزنید."
+                if action == "delete" else " تا وصل‌شدن دوباره‌ی نود این عملیات ممکن نیست.")
+        raise SSHServiceError(f"{exc}.{hint}", AGENT_UNREACHABLE_STATUS)
     except SSHProviderError as exc:
         raise SSHServiceError(str(exc)[:300])
     return "deleted" if action == "delete" else ("active" if action == "enable" else "disabled")

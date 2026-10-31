@@ -16,7 +16,11 @@ import aiohttp
 
 
 class SSHProviderError(RuntimeError):
-    pass
+    http_status = None
+
+
+class SSHAgentUnreachable(SSHProviderError):
+    """Agent پاسخ نداد (سرور خاموش/حذف‌شده، فایروال، DNS، timeout یا خطای TLS)؛ با خطای HTTP خود Agent فرق دارد."""
 
 
 @dataclass
@@ -116,7 +120,9 @@ class LinuxAgentSSHProvider(BaseSSHProvider):
                     raw = await response.text()
                     if response.status >= 400:
                         safe_detail = raw[:240].replace("\n", " ")
-                        raise SSHProviderError(f"Linux Agent HTTP {response.status}: {safe_detail}")
+                        err = SSHProviderError(f"Linux Agent HTTP {response.status}: {safe_detail}")
+                        err.http_status = response.status
+                        raise err
                     try:
                         return json.loads(raw) if raw else {}
                     except ValueError as exc:
@@ -124,7 +130,9 @@ class LinuxAgentSSHProvider(BaseSSHProvider):
         except SSHProviderError:
             raise
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            raise SSHProviderError(f"ارتباط با Linux Agent برقرار نشد: {type(exc).__name__}") from exc
+            raise SSHAgentUnreachable(f"ارتباط با Linux Agent برقرار نشد: {type(exc).__name__}") from exc
+        except OSError as exc:  # مثلاً ssl/socket خطاهایی که aiohttp بسته‌بندی نکرده
+            raise SSHAgentUnreachable(f"ارتباط با Linux Agent برقرار نشد: {type(exc).__name__}") from exc
 
     async def test_connection(self) -> bool:
         data = await self._request("GET", "/v1/accounts")
@@ -208,7 +216,12 @@ class LinuxAgentSSHProvider(BaseSSHProvider):
         return True
 
     async def delete_account(self, account_id: str) -> bool:
-        await self._request("POST", f"/v1/accounts/{account_id}/delete")
+        try:
+            await self._request("POST", f"/v1/accounts/{account_id}/delete")
+        except SSHProviderError as exc:
+            if getattr(exc, "http_status", None) == 404:
+                return True  # روی نود از قبل وجود ندارد؛ هدف (حذف) برقرار است.
+            raise
         return True
 
     async def update_account(self, account_id: str, limit_bytes: int = None, expires_at: str = None) -> bool:

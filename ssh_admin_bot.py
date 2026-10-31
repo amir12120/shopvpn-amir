@@ -177,17 +177,24 @@ def register(router: Router, db, *, full_access_bot, senior_admin_only, deny_mid
             [_btn("❌ انصراف", f"adm_ssh_node:{node_id}")]))
         await call.answer()
 
-    @router.callback_query(F.data.startswith("adm_ssh_node_delc:"))
+    @router.callback_query(F.data.startswith(("adm_ssh_node_delc:", "adm_ssh_node_delf:")))
     async def cb_ssh_node_delc(call: CallbackQuery):
         if not await _guard(call):
             return
         node_id = int(call.data.split(":")[1])
+        force = call.data.startswith("adm_ssh_node_delf:")
         try:
-            ssh_service.delete_node(db, node_id)
+            ssh_service.delete_node(db, node_id, force=force)
         except SSHServiceError as exc:
+            if "حساب SSH فعال" in str(exc) and not force:
+                await safe_edit(call, tr("⚠️ ") + str(exc) + "\n\n" + tr("اگر سرور این نود حذف شده یا از دسترس خارج است، نود و همه‌ی حساب‌هایش فقط از پنل پاک می‌شوند (روی سرور تغییری داده نمی‌شود)."),
+                                reply_markup=_kb([_btn("🗑 حذف اجباری نود و حساب‌ها", f"adm_ssh_node_delf:{node_id}")],
+                                                 [_btn("❌ انصراف", f"adm_ssh_node:{node_id}")]))
+                await call.answer()
+                return
             await call.answer(str(exc)[:180], show_alert=True)
             return
-        _log(call.from_user.id, "ssh_node_delete", f"SSH node #{node_id}")
+        _log(call.from_user.id, "ssh_node_delete", f"SSH node #{node_id}" + (" (force)" if force else ""))
         await replace_admin_view(call, tr("🗑 نود حذف شد."), reply_markup=_nodes_kb())
         await call.answer()
 
@@ -341,7 +348,7 @@ def register(router: Router, db, *, full_access_bot, senior_admin_only, deny_mid
             await call.message.answer(tr("❌ ") + html.escape(str(exc)))
         await _show_account(call, row_id)
 
-    @router.callback_query(F.data.startswith("adm_ssh_accxc:"))
+    @router.callback_query(F.data.startswith(("adm_ssh_accxc:", "adm_ssh_accxf:")))
     async def cb_ssh_acc_delete(call: CallbackQuery):
         if not await _guard(call):
             return
@@ -350,10 +357,17 @@ def register(router: Router, db, *, full_access_bot, senior_admin_only, deny_mid
         if not a:
             await call.answer(tr("حساب پیدا نشد."), show_alert=True)
             return
+        force = call.data.startswith("adm_ssh_accxf:")
         try:
-            await ssh_service.account_action(db, a["account_id"], "delete")
-            _log(call.from_user.id, "ssh_account_delete", f"SSH account {a['account_id']}")
+            await ssh_service.account_action(db, a["account_id"], "delete", force=force)
+            _log(call.from_user.id, "ssh_account_delete", f"SSH account {a['account_id']}" + (" (force)" if force else ""))
         except SSHServiceError as exc:
+            if exc.status == ssh_service.AGENT_UNREACHABLE_STATUS:
+                await safe_edit(call, tr("⚠️ ") + str(exc) + "\n\n" + tr("حذف اجباری فقط از پنل انجام شود؟ (روی سرور نود تغییری داده نمی‌شود)"),
+                                reply_markup=_kb([_btn("🗑 حذف اجباری (فقط از پنل)", f"adm_ssh_accxf:{row_id}")],
+                                                 [_btn("❌ انصراف", f"adm_ssh_acc:{row_id}")]))
+                await call.answer()
+                return
             await call.answer(str(exc)[:180], show_alert=True)
             return
         await replace_admin_view(call, tr("🗑 حساب حذف شد."), reply_markup=_accounts_kb())
