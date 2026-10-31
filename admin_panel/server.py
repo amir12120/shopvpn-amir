@@ -641,6 +641,7 @@ class SSHNodeAutoInstallBody(BaseModel):
     protocols: List[str] = ["ssh"]
     ovpn_port: int = 1194
     ovpn_proto: str = "udp"
+    wg_port: int = 51820
 
 
 class SSHNodeAddProtocolsBody(BaseModel):
@@ -648,6 +649,7 @@ class SSHNodeAddProtocolsBody(BaseModel):
     protocols: List[str]
     ovpn_port: int = 1194
     ovpn_proto: str = "udp"
+    wg_port: int = 51820
 
 
 class SSHNodeCreateBody(BaseModel):
@@ -3932,17 +3934,18 @@ def api_add_product(body: ProductBody, admin=Depends(require_permission("catalog
 
 
 def _checked_ssh_protocol(requested, server_id, node) -> str:
-    """پروتکل حساب سمت SSH محصول؛ OpenVPN فقط در محصول ترکیبی (فایل داخل ساب اختصاصی) و روی نودی که نصب شده است."""
+    """پروتکل حساب سمت SSH محصول؛ OpenVPN/WireGuard فقط در محصول ترکیبی (فایل داخل ساب اختصاصی) و روی نودی که نصب شده است."""
     import ssh_service
     wanted = str(requested or "ssh").strip().lower()
-    if wanted not in ("ssh", "openvpn"):
+    if wanted not in ("ssh", "openvpn", "wireguard"):
         raise HTTPException(400, "پروتکل نامعتبر است.")
     if not node:
         return "ssh"
     if wanted not in ssh_service.node_protocols(node):
         raise HTTPException(400, f"پروتکل {wanted} روی این نود نصب نشده است.")
-    if wanted == "openvpn" and not server_id:
-        raise HTTPException(400, "OpenVPN فقط در محصول ترکیبی VPN + SSH ممکن است؛ فایل آن داخل لینک ساب اختصاصی تحویل می‌شود.")
+    if wanted in ("openvpn", "wireguard") and not server_id:
+        label = "WireGuard" if wanted == "wireguard" else "OpenVPN"
+        raise HTTPException(400, f"{label} فقط در محصول ترکیبی VPN + SSH ممکن است؛ فایل آن داخل لینک ساب اختصاصی تحویل می‌شود.")
     return wanted
 
 
@@ -5884,6 +5887,7 @@ def api_ssh_overview(admin=Depends(require_permission("panels")), _fa=Depends(re
         item["protocols"] = ssh_service.node_protocols(node)
         item["ovpn_port"] = cfg.get("ovpn_port")
         item["ovpn_proto"] = cfg.get("ovpn_proto")
+        item["wg_port"] = cfg.get("wg_port")
         item.pop("config_json", None)
         nodes.append(item)
     return {"nodes": nodes, "pools": pool_items,
@@ -5905,9 +5909,10 @@ async def api_ssh_auto_install(body: SSHNodeAutoInstallBody, admin=Depends(requi
     try:
         protocols = ssh_service.normalize_protocols(body.protocols)
         ovpn_port, ovpn_proto = ssh_service._validate_ovpn(body.ovpn_port, body.ovpn_proto) if "openvpn" in protocols else (1194, "udp")
+        wg_port = ssh_service._validate_wg(body.wg_port) if "wireguard" in protocols else 51820
         job_id = ssh_auto_install.start_install(db, name=name, host=host, ssh_port=body.ssh_port,
             username=(body.username or "root").strip(), password=body.password, private_key=body.private_key,
-            protocols=protocols, ovpn_port=ovpn_port, ovpn_proto=ovpn_proto)
+            protocols=protocols, ovpn_port=ovpn_port, ovpn_proto=ovpn_proto, wg_port=wg_port)
     except (ssh_service.SSHServiceError, ssh_auto_install.InstallError) as exc:
         raise HTTPException(getattr(exc, "status", 400), str(exc))
     db.log_admin_action(admin["id"], "ssh_node_auto_install", f"SSH node auto-install started: {name} ({host}) [{','.join(protocols)}]", "ssh")
@@ -5916,11 +5921,11 @@ async def api_ssh_auto_install(body: SSHNodeAutoInstallBody, admin=Depends(requi
 
 @app.post("/api/ssh/nodes/{node_id}/add-protocols")
 async def api_ssh_node_add_protocols(node_id: int, body: SSHNodeAddProtocolsBody, admin=Depends(require_permission("panels")), _fa=Depends(require_full_access_tenant)):
-    """نصب پروتکل‌های جدید (مثلاً OpenVPN) روی نود موجود؛ رمز root فقط برای همین نصب استفاده می‌شود."""
+    """نصب پروتکل‌های جدید (مثلاً OpenVPN یا WireGuard) روی نود موجود؛ رمز root فقط برای همین نصب استفاده می‌شود."""
     import ssh_service
     try:
         job_id = ssh_service.start_node_upgrade(db, node_id=node_id, password=body.password, protocols=body.protocols,
-                                                ovpn_port=body.ovpn_port, ovpn_proto=body.ovpn_proto)
+                                                ovpn_port=body.ovpn_port, ovpn_proto=body.ovpn_proto, wg_port=body.wg_port)
     except ssh_service.SSHServiceError as exc:
         raise HTTPException(exc.status, str(exc))
     db.log_admin_action(admin["id"], "ssh_node_add_protocols", f"SSH node #{node_id}: +{','.join(body.protocols)}", "ssh")
