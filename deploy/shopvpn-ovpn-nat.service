@@ -1,0 +1,13 @@
+[Unit]
+Description=ShopVPN OpenVPN NAT rules
+After=network-online.target nftables.service
+Before=openvpn-server@shopvpn.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/shopvpn/ovpn-nat.nft
+ExecStop=/usr/sbin/nft delete table ip shopvpn_nat
+
+[Install]
+WantedBy=multi-user.target
