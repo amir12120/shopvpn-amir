@@ -3312,6 +3312,24 @@ class SshNodeRenameIn(BaseModel):
     name: str
 
 
+class SshHostIn(BaseModel):
+    id: Optional[str] = None
+    protocol: str
+    remark: str = ""
+    address: str
+    port: Optional[int] = None
+    enabled: bool = True
+
+
+class SshNodeHostsIn(BaseModel):
+    hosts: List[SshHostIn] = []
+
+
+class SshPortRangeIn(BaseModel):
+    port_min: Optional[int] = None
+    port_max: Optional[int] = None
+
+
 class SshPoolIn(BaseModel):
     user_id: int
     limit_gb: float = 0
@@ -3395,6 +3413,32 @@ def api_admin_ssh_rename_node(node_id: int, body: SshNodeRenameIn, auth=Depends(
     _ssh_call(ssh_service.rename_node, db, node_id, body.name)
     db.log_admin_action(admin_id, "ssh_node_rename", f"SSH node #{node_id}: {body.name.strip()}", "ssh")
     return {"ok": True}
+
+
+@app.get("/api/admin/ssh/nodes/{node_id}/hosts")
+def api_admin_ssh_node_hosts(node_id: int, auth=Depends(require_full_access_admin)):
+    import ssh_service
+    _, db, _ = auth
+    return _ssh_call(ssh_service.get_node_hosts, db, node_id)
+
+
+@app.put("/api/admin/ssh/nodes/{node_id}/hosts")
+def api_admin_ssh_node_set_hosts(node_id: int, body: SshNodeHostsIn, auth=Depends(require_full_access_admin)):
+    import ssh_service
+    admin_id, db, _ = auth
+    hosts = _ssh_call(ssh_service.set_node_hosts, db, node_id,
+                      [h.model_dump() if hasattr(h, "model_dump") else h.dict() for h in body.hosts])
+    db.log_admin_action(admin_id, "ssh_node_hosts", f"SSH node #{node_id}: {len(hosts)} host(s)", "ssh")
+    return {"ok": True, "hosts": hosts}
+
+
+@app.put("/api/admin/ssh/nodes/{node_id}/ssh-port-range")
+async def api_admin_ssh_node_set_port_range(node_id: int, body: SshPortRangeIn, auth=Depends(require_full_access_admin)):
+    import ssh_service
+    admin_id, db, _ = auth
+    r = await _ssh_acall(ssh_service.set_ssh_port_range, db, node_id, body.port_min, body.port_max)
+    db.log_admin_action(admin_id, "ssh_node_port_range", f"SSH node #{node_id}: {r['ssh_port_min']}-{r['ssh_port_max']}", "ssh")
+    return {"ok": True, **r}
 
 
 @app.post("/api/admin/ssh/nodes/{node_id}/test")
