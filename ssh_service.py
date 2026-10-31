@@ -14,8 +14,9 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-RELIABLE_SOURCES = {"nftables_port_counters", "external-counter", "ssh-traffic-accountant", "openvpn_accounting"}
-SUPPORTED_PROTOCOLS = ("ssh", "openvpn")
+RELIABLE_SOURCES = {"nftables_port_counters", "external-counter", "ssh-traffic-accountant", "openvpn_accounting",
+                    "wireguard_accounting"}
+SUPPORTED_PROTOCOLS = ("ssh", "openvpn", "wireguard")
 
 
 class SSHServiceError(Exception):
@@ -42,7 +43,7 @@ def node_protocols(node: dict) -> list:
 def normalize_protocols(values) -> list:
     chosen = [p for p in SUPPORTED_PROTOCOLS if p in {str(v).strip().lower() for v in (values or [])}]
     if not chosen:
-        raise SSHServiceError("حداقل یک پروتکل (SSH یا OpenVPN) را تیک بزنید.")
+        raise SSHServiceError("حداقل یک پروتکل (SSH، OpenVPN یا WireGuard) را تیک بزنید.")
     return chosen
 
 
@@ -64,6 +65,7 @@ def overview(db) -> dict:
         item["protocols"] = node_protocols(node)
         item["ovpn_port"] = cfg.get("ovpn_port")
         item["ovpn_proto"] = cfg.get("ovpn_proto")
+        item["wg_port"] = cfg.get("wg_port")
         item.pop("config_json", None)
         nodes.append(item)
     return {"nodes": nodes, "pools": pool_items, "accounts": db.list_ssh_accounts()}
@@ -82,8 +84,19 @@ def _validate_ovpn(ovpn_port, ovpn_proto) -> tuple:
     return port, proto
 
 
+def _validate_wg(wg_port) -> int:
+    try:
+        port = int(wg_port)
+    except (TypeError, ValueError):
+        raise SSHServiceError("پورت WireGuard نامعتبر است.")
+    if not 1 <= port <= 65535 or port in {22, 8765} or 20000 <= port <= 39999:
+        raise SSHServiceError("پورت WireGuard نامعتبر است (22، 8765 و بازه 20000-39999 مجاز نیست).")
+    return port
+
+
 def start_auto_install(db, *, name: str, host: str, ssh_port: int = 22, password: str = "",
-                       protocols=None, ovpn_port: int = 1194, ovpn_proto: str = "udp") -> str:
+                       protocols=None, ovpn_port: int = 1194, ovpn_proto: str = "udp",
+                       wg_port: int = 51820) -> str:
     name, host = (name or "").strip(), (host or "").strip()
     if not name or not re.fullmatch(r"[A-Za-z0-9.\-:]{3,255}", host):
         raise SSHServiceError("نام و میزبان (IP یا دامنه) معتبر لازم است.")
@@ -93,17 +106,18 @@ def start_auto_install(db, *, name: str, host: str, ssh_port: int = 22, password
         raise SSHServiceError("رمز root لازم است.")
     chosen = normalize_protocols(protocols if protocols is not None else ["ssh"])
     port, proto = _validate_ovpn(ovpn_port, ovpn_proto)
+    wport = _validate_wg(wg_port)
     import ssh_auto_install
     try:
         return ssh_auto_install.start_install(db, name=name, host=host, ssh_port=int(ssh_port),
                                               username="root", password=password, private_key=None,
-                                              protocols=chosen, ovpn_port=port, ovpn_proto=proto)
+                                              protocols=chosen, ovpn_port=port, ovpn_proto=proto, wg_port=wport)
     except ssh_auto_install.InstallError as exc:
         raise SSHServiceError(str(exc))
 
 
 def start_node_upgrade(db, *, node_id: int, password: str, protocols, ovpn_port: int = 1194,
-                       ovpn_proto: str = "udp") -> str:
+                       ovpn_proto: str = "udp", wg_port: int = 51820) -> str:
     node = next((n for n in db.list_ssh_nodes() if int(n["id"]) == int(node_id)), None)
     if not node or node.get("node_type") != "linux":
         raise SSHServiceError("نود Linux Agent پیدا نشد.", 404)
@@ -114,11 +128,13 @@ def start_node_upgrade(db, *, node_id: int, password: str, protocols, ovpn_port:
     if not to_add:
         raise SSHServiceError("پروتکل‌های انتخاب‌شده از قبل روی این نود نصب هستند.")
     port, proto = _validate_ovpn(ovpn_port, ovpn_proto)
+    wport = _validate_wg(wg_port)
     import ssh_auto_install
     try:
         return ssh_auto_install.start_install(db, name=node["name"], host=node["host"], ssh_port=int(node["port"]),
                                               username="root", password=password, private_key=None,
-                                              protocols=to_add, node_id=int(node_id), ovpn_port=port, ovpn_proto=proto)
+                                              protocols=to_add, node_id=int(node_id), ovpn_port=port, ovpn_proto=proto,
+                                              wg_port=wport)
     except ssh_auto_install.InstallError as exc:
         raise SSHServiceError(str(exc))
 
@@ -243,7 +259,7 @@ async def create_account(db, *, node_id: int, user_id: int, username: str, limit
             volume_limited = limit_bytes > 0 or bool(pool and int(pool.get("limit_bytes") or 0) > 0)
             if volume_limited and (not usage.get("accounting_ready") or usage.get("source") not in RELIABLE_SOURCES):
                 raise SSHServiceError("ساخت متوقف شد: شمارنده‌ی معتبر حجم برای حساب SSH آماده نیست.", 409)
-            secret = result.metadata.get("profile", "") if protocol == "openvpn" else result.metadata.get("password", "")
+            secret = result.metadata.get("profile", "") if protocol in ("openvpn", "wireguard") else result.metadata.get("password", "")
             credential_enc = encrypt_credential(secret)
             row_id = db.register_ssh_account(int(node_id), int(user_id), result.account_id,
                 result.username, result.host, result.port, quota_pool_id, expires_at, credential_enc,

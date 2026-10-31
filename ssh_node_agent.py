@@ -13,6 +13,7 @@ import argparse
 import asyncio
 from contextlib import contextmanager
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -32,14 +33,19 @@ from aiohttp import web
 USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{2,31}$")
 ACCOUNT_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 REMOTE_HOST_RE = re.compile(r"^[A-Za-z0-9.\-:]{3,255}$")
-SUPPORTED_PROTOCOLS = {"ssh", "openvpn"}
+SUPPORTED_PROTOCOLS = {"ssh", "openvpn", "wireguard"}
 OVPN_DIR = Path(os.getenv("SHOPVPN_OVPN_DIR", "/etc/openvpn/server/shopvpn"))
 OVPN_CCD = OVPN_DIR / "ccd"
 OVPN_PKI = Path(os.getenv("SHOPVPN_OVPN_PKI", "/etc/shopvpn/ovpn-pki"))
 OVPN_SOCK = Path(os.getenv("SHOPVPN_OVPN_SOCK", "/run/openvpn-server/shopvpn.sock"))
 OVPN_EVENTS = Path(os.getenv("SHOPVPN_OVPN_EVENTS", "/var/lib/shopvpn-ovpn-events"))
 EASYRSA_CANDIDATES = ("/usr/share/easy-rsa/easyrsa", "/usr/bin/easyrsa")
-TRUSTED_SOURCES = {"nftables_port_counters", "external-counter", "ssh-traffic-accountant", "openvpn_accounting"}
+WG_IFACE = os.getenv("SHOPVPN_WG_IFACE", "wg-shopvpn")
+WG_SUBNET = ipaddress.ip_network(os.getenv("SHOPVPN_WG_SUBNET", "10.88.0.0/16"))
+WG_DNS = os.getenv("SHOPVPN_WG_DNS", "1.1.1.1, 8.8.8.8")
+WG_KEY_RE = re.compile(r"^[A-Za-z0-9+/]{43}=$")
+TRUSTED_SOURCES = {"nftables_port_counters", "external-counter", "ssh-traffic-accountant", "openvpn_accounting",
+                   "wireguard_accounting"}
 logger = logging.getLogger(__name__)
 # web.AppKey فقط از aiohttp 3.9 به بعد وجود دارد؛ Ubuntu 22.04 نسخه 3.8 دارد.
 ENFORCEMENT_TASK_KEY = web.AppKey("enforcement_task", asyncio.Task) if hasattr(web, "AppKey") else "enforcement_task"
@@ -79,6 +85,10 @@ class Agent:
                     raw_counter_bytes INTEGER NOT NULL DEFAULT 0,
                     counter_offset_bytes INTEGER NOT NULL DEFAULT 0,
                     reported_at TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'unreported'
+                );
+                CREATE TABLE IF NOT EXISTS wg_peers (
+                    account_id TEXT PRIMARY KEY REFERENCES accounts(account_id) ON DELETE CASCADE,
+                    public_key TEXT UNIQUE NOT NULL, preshared_key TEXT NOT NULL, address TEXT UNIQUE NOT NULL
                 );
             """)
             # Safe additive migration for existing agent databases.
@@ -441,6 +451,168 @@ class Agent:
                                   "limit_bytes": limit_bytes, "profile": profile}, status=201)
 
     @staticmethod
+    def _wg_port() -> int:
+        return int(os.getenv("SHOPVPN_WG_PORT", "51820"))
+
+    def _wg_ready(self) -> bool:
+        if "wireguard" not in self.protocols:
+            return False
+        try:
+            return self._run("wg", "show", WG_IFACE, "public-key", check=False).returncode == 0
+        except OSError:
+            return False
+
+    def _wg_server_public_key(self) -> str:
+        key = self._run("wg", "show", WG_IFACE, "public-key").stdout.strip()
+        if not WG_KEY_RE.fullmatch(key):
+            raise RuntimeError("wireguard interface is not up on this node")
+        return key
+
+    def _wg_keypair(self) -> tuple[str, str, str]:
+        private = self._run("wg", "genkey").stdout.strip()
+        public = self._run("wg", "pubkey", input_text=private + "\n").stdout.strip()
+        preshared = self._run("wg", "genpsk").stdout.strip()
+        if not all(WG_KEY_RE.fullmatch(k) for k in (private, public, preshared)):
+            raise RuntimeError("wg key generation returned invalid output")
+        return private, public, preshared
+
+    @staticmethod
+    def _wg_allocate_address(db) -> str:
+        used = {row[0] for row in db.execute("SELECT address FROM wg_peers").fetchall()}
+        hosts = WG_SUBNET.hosts()
+        next(hosts)
+        for host in hosts:
+            if str(host) not in used:
+                return str(host)
+        raise RuntimeError("wireguard address pool is exhausted")
+
+    def _wg_profile(self, private_key: str, preshared_key: str, address: str, remote_host: str) -> str:
+        host = f"[{remote_host}]" if ":" in remote_host and not remote_host.startswith("[") else remote_host
+        return "\n".join([
+            "[Interface]", f"PrivateKey = {private_key}", f"Address = {address}/32", f"DNS = {WG_DNS}", "",
+            "[Peer]", f"PublicKey = {self._wg_server_public_key()}", f"PresharedKey = {preshared_key}",
+            f"Endpoint = {host}:{self._wg_port()}", "AllowedIPs = 0.0.0.0/0", "PersistentKeepalive = 25",
+        ]) + "\n"
+
+    def _wg_peer_add(self, public_key: str, preshared_key: str, address: str):
+        self._run("wg", "set", WG_IFACE, "peer", public_key, "preshared-key", "/dev/stdin",
+                  "allowed-ips", f"{address}/32", input_text=preshared_key + "\n")
+
+    def _wg_peer_remove(self, public_key: str):
+        self._run("wg", "set", WG_IFACE, "peer", public_key, "remove", check=False)
+
+    def _wg_transfer(self) -> dict:
+        result = self._run("wg", "show", WG_IFACE, "transfer", check=False)
+        if result.returncode != 0:
+            raise RuntimeError("wireguard interface is not available")
+        live = {}
+        for line in result.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) == 3:
+                try:
+                    live[parts[0]] = max(0, int(parts[1])) + max(0, int(parts[2]))
+                except ValueError:
+                    continue
+        return live
+
+    def _wg_collect_usage(self):
+        if "wireguard" not in self.protocols:
+            return
+        live = self._wg_transfer()
+        stamp = utc_now()
+        with self._conn() as db:
+            rows = db.execute("SELECT a.account_id,p.public_key,u.used_bytes,u.raw_counter_bytes,u.counter_offset_bytes,u.source "
+                              "FROM accounts a JOIN wg_peers p USING(account_id) JOIN usage u USING(account_id) "
+                              "WHERE a.protocol='wireguard'").fetchall()
+            for row in rows:
+                if row["source"] not in {"unreported", "wireguard_accounting"}:
+                    continue
+                raw = live.get(row["public_key"], 0)
+                old_raw = int(row["raw_counter_bytes"] or 0)
+                old_used = int(row["used_bytes"] or 0)
+                offset = int(row["counter_offset_bytes"] or 0)
+                if raw < old_raw:
+                    offset = old_used
+                db.execute("UPDATE usage SET used_bytes=?,raw_counter_bytes=?,counter_offset_bytes=?,uploaded_bytes=0,"
+                           "downloaded_bytes=0,reported_at=?,source='wireguard_accounting' WHERE account_id=?",
+                           (offset + raw, raw, offset, stamp, row["account_id"]))
+
+    def _wg_sync(self):
+        if "wireguard" not in self.protocols:
+            return
+        with self._conn() as db:
+            desired = {row["public_key"]: (row["preshared_key"], row["address"]) for row in db.execute(
+                "SELECT p.public_key,p.preshared_key,p.address FROM accounts a JOIN wg_peers p USING(account_id) "
+                "WHERE a.protocol='wireguard' AND a.status='active'").fetchall()}
+        listed = self._run("wg", "show", WG_IFACE, "peers", check=False)
+        if listed.returncode != 0:
+            return
+        present = set(listed.stdout.split())
+        for public_key, (preshared, address) in desired.items():
+            if public_key not in present:
+                self._wg_peer_add(public_key, preshared, address)
+        for public_key in present - set(desired):
+            self._wg_peer_remove(public_key)
+
+    def _wg_peer_row(self, account_id: str):
+        with self._conn() as db:
+            return db.execute("SELECT public_key,preshared_key,address FROM wg_peers WHERE account_id=?", (account_id,)).fetchone()
+
+    def _wg_disable(self, account_id: str):
+        peer = self._wg_peer_row(account_id)
+        if not peer:
+            return
+        try:
+            self._wg_collect_usage()
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            logger.warning("WireGuard usage refresh failed before disabling %s", account_id)
+        self._wg_peer_remove(peer["public_key"])
+        with self._conn() as db:
+            db.execute("UPDATE usage SET raw_counter_bytes=0,counter_offset_bytes=used_bytes "
+                       "WHERE account_id=? AND source='wireguard_accounting'", (account_id,))
+
+    def _wg_enable(self, account_id: str):
+        peer = self._wg_peer_row(account_id)
+        if peer:
+            self._wg_peer_add(peer["public_key"], peer["preshared_key"], peer["address"])
+
+    async def _create_wireguard_account(self, account_id, username, expires_at, limit_bytes, remote_host):
+        with self._conn() as db:
+            if db.execute("SELECT 1 FROM accounts WHERE account_id=? OR username=?", (account_id, username)).fetchone():
+                raise web.HTTPConflict(text="account already exists")
+        if not remote_host or not REMOTE_HOST_RE.fullmatch(remote_host):
+            raise web.HTTPBadRequest(text="valid remote_host is required for wireguard accounts")
+        public_key = None
+        try:
+            if not self._wg_ready():
+                raise RuntimeError("wireguard server is not installed on this node")
+            private, public_key, preshared = self._wg_keypair()
+            now = utc_now()
+            source = "wireguard_accounting"
+            with self._conn() as db:
+                address = self._wg_allocate_address(db)
+                profile = self._wg_profile(private, preshared, address, remote_host)
+                db.execute("INSERT INTO accounts(account_id,username,ssh_port,status,expires_at,limit_bytes,protocol,created_at,updated_at) "
+                           "VALUES(?,?,NULL,'active',?,?,'wireguard',?,?)",
+                           (account_id, username, expires_at, limit_bytes, now, now))
+                db.execute("INSERT INTO usage(account_id,reported_at,source) VALUES(?,?,?)", (account_id, now, source))
+                db.execute("INSERT INTO wg_peers(account_id,public_key,preshared_key,address) VALUES(?,?,?,?)",
+                           (account_id, public_key, preshared, address))
+                self._wg_peer_add(public_key, preshared, address)
+        except Exception as exc:
+            if public_key:
+                self._wg_peer_remove(public_key)
+            detail = type(exc).__name__
+            if isinstance(exc, subprocess.CalledProcessError):
+                detail += f" [{(exc.cmd or ['?'])[0]}]: {(exc.stderr or '').strip()[-200:]}"
+            elif isinstance(exc, RuntimeError):
+                detail += f": {str(exc)[:160]}"
+            raise web.HTTPInternalServerError(text=f"account creation failed: {detail}")
+        return web.json_response({"ok": True, "account_id": account_id, "username": username, "port": self._wg_port(),
+                                  "protocol": "wireguard", "transport": "udp", "status": "active",
+                                  "limit_bytes": limit_bytes, "profile": profile}, status=201)
+
+    @staticmethod
     def _unit_name(account_id: str) -> str:
         return f"shopvpn-sshd@{account_id}.service"
 
@@ -467,7 +639,9 @@ class Agent:
         port, proto = self._ovpn_settings()
         return web.json_response({"ok": True, "version": 2, "protocols": sorted(self.protocols),
                                   "openvpn": {"ready": self._ovpn_ready(), "port": port, "transport": proto}
-                                  if "openvpn" in self.protocols else None})
+                                  if "openvpn" in self.protocols else None,
+                                  "wireguard": {"ready": self._wg_ready(), "port": self._wg_port(), "transport": "udp"}
+                                  if "wireguard" in self.protocols else None})
 
     def _ensure_ssh_group(self):
         """Create a dedicated group for tunnel-only ShopVPN accounts."""
@@ -500,6 +674,9 @@ class Agent:
         if protocol == "openvpn":
             remote_host = str(body.get("remote_host") or os.getenv("SHOPVPN_OVPN_REMOTE", "")).strip()
             return await self._create_openvpn_account(account_id, username, expires_at, limit_bytes, remote_host)
+        if protocol == "wireguard":
+            remote_host = str(body.get("remote_host") or os.getenv("SHOPVPN_WG_REMOTE", "")).strip()
+            return await self._create_wireguard_account(account_id, username, expires_at, limit_bytes, remote_host)
         if len(password) < 16 or len(password) > 128 or "\n" in password or "\r" in password or ":" in password:
             raise web.HTTPBadRequest(text="password must be 16-128 safe characters")
         with self._conn() as db:
@@ -563,8 +740,20 @@ class Agent:
         if reason not in {"manual", "stale", "quota_exceeded", "expired"}:
             raise web.HTTPBadRequest(text="invalid disable reason")
         is_ovpn = row["protocol"] == "openvpn"
+        is_wg = row["protocol"] == "wireguard"
         try:
-            if is_ovpn and action == "enable":
+            if is_wg and action == "enable":
+                self._wg_enable(account_id)
+                status = "active"
+            elif is_wg and action == "disable":
+                self._wg_disable(account_id)
+                status = "disabled"
+            elif is_wg and action == "delete":
+                self._wg_disable(account_id)
+                with self._conn() as db:
+                    db.execute("DELETE FROM accounts WHERE account_id=?", (account_id,))
+                return web.json_response({"ok": True, "account_id": account_id, "status": "deleted"})
+            elif is_ovpn and action == "enable":
                 self._ovpn_enable(username)
                 status = "active"
             elif is_ovpn and action == "disable":
@@ -661,6 +850,8 @@ class Agent:
             return False
         if row["protocol"] == "openvpn":
             await self._ovpn_disable(row["username"])
+        elif row["protocol"] == "wireguard":
+            self._wg_disable(account_id)
         else:
             self._run("usermod", "--lock", row["username"])
             self._run("pkill", "-KILL", "-u", row["username"], check=False)
@@ -679,6 +870,14 @@ class Agent:
                         self._collect_nft_usage()
                     except Exception:
                         pass
+                if "wireguard" in self.protocols:
+                    try:
+                        self._wg_collect_usage()
+                        self._wg_sync()
+                    except (OSError, RuntimeError, subprocess.SubprocessError):
+                        logger.warning("WireGuard accounting poll failed; will retry")
+                    except Exception:
+                        logger.exception("WireGuard accounting poll crashed")
                 if "openvpn" in self.protocols:
                     try:
                         await self._collect_ovpn_usage()
@@ -730,6 +929,11 @@ class Agent:
                 self._collect_nft_usage()
             except Exception:
                 logger.exception("Unable to refresh nftables usage for account %s", account_id)
+        if "wireguard" in self.protocols:
+            try:
+                self._wg_collect_usage()
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                logger.warning("WireGuard accounting refresh failed for account %s", account_id)
         if "openvpn" in self.protocols:
             try:
                 await self._collect_ovpn_usage()

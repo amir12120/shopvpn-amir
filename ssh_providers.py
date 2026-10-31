@@ -151,6 +151,20 @@ class LinuxAgentSSHProvider(BaseSSHProvider):
                 host=str(self.node.get("host") or ""), port=int(data.get("port") or 1194),
                 metadata={"profile": profile, "protocol": "openvpn", "transport": data.get("transport"),
                           "limit_bytes_requested": int(limit_bytes), "accounting_ready": False})
+        if protocol == "wireguard":
+            account_id = str(uuid.uuid4())
+            data = await self._request("POST", "/v1/accounts", {
+                "account_id": account_id, "username": username, "protocol": "wireguard",
+                "remote_host": str(self.node.get("host") or ""), "expires_at": expires_at,
+                "limit_bytes": max(0, int(limit_bytes)),
+            })
+            profile = str(data.get("profile") or "")
+            if "[Interface]" not in profile or "PrivateKey" not in profile:
+                raise SSHProviderError("پاسخ Agent شامل پروفایل WireGuard معتبر نیست")
+            return SSHAccountResult(account_id=account_id, username=data.get("username", username),
+                host=str(self.node.get("host") or ""), port=int(data.get("port") or 51820),
+                metadata={"profile": profile, "protocol": "wireguard", "transport": data.get("transport"),
+                          "limit_bytes_requested": int(limit_bytes), "accounting_ready": False})
         if protocol != "ssh":
             raise SSHProviderError(f"پروتکل پشتیبانی‌نشده: {protocol}")
         alphabet = string.ascii_letters + string.digits + "-_"

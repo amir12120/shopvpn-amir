@@ -191,8 +191,9 @@ async def _provision_combined(db, product, quantity: int = 1, user_id: int = Non
     if user_id is None:
         raise ProvisionError("شناسه کاربر برای ساخت محصول ترکیبی VPN+SSH الزامی است.")
     import dedicated_sub
-    if _product_ssh_protocol(product) == "openvpn" and not dedicated_sub.is_enabled(db):
-        raise ProvisionError("فایل OpenVPN فقط از لینک ساب اختصاصی تحویل می‌شود؛ ساب اختصاصی را فعال کنید.")
+    if _product_ssh_protocol(product) in FILE_PROTOCOLS and not dedicated_sub.is_enabled(db):
+        label = "WireGuard" if _product_ssh_protocol(product) == "wireguard" else "OpenVPN"
+        raise ProvisionError(f"فایل {label} فقط از لینک ساب اختصاصی تحویل می‌شود؛ ساب اختصاصی را فعال کنید.")
     # ابتدا SSH (شکست‌پذیرتر: نیاز به شمارنده معتبر)، بعد VPN.
     ssh_items = await provision_ssh_direct(db, product, quantity=quantity, user_id=user_id, order_id=order_id,
                                            allow_openvpn=True)
@@ -252,12 +253,15 @@ async def _provision_combined(db, product, quantity: int = 1, user_id: int = Non
     return vpn_items + ssh_items
 
 
+FILE_PROTOCOLS = ("openvpn", "wireguard")
+
+
 def _product_ssh_protocol(product) -> str:
     try:
         value = str(product["provision_ssh_protocol"] or "ssh").strip().lower()
     except (KeyError, IndexError, TypeError):
         value = "ssh"
-    return value if value in ("ssh", "openvpn") else "ssh"
+    return value if value in ("ssh", "openvpn", "wireguard") else "ssh"
 
 
 async def provision_ssh_direct(db, product, quantity: int = 1, user_id: int = None, order_id: int = None,
@@ -276,8 +280,9 @@ async def provision_ssh_direct(db, product, quantity: int = 1, user_id: int = No
         raise ProvisionError("نود Linux Agent فعال پیدا نشد؛ پنل SSH هنوز آداپتور عملیاتی ندارد.")
     from ssh_service import node_protocols
     protocol = _product_ssh_protocol(product)
-    if protocol == "openvpn" and not allow_openvpn:
-        raise ProvisionError("OpenVPN فقط در محصول ترکیبی VPN + SSH پشتیبانی می‌شود (فایل آن داخل لینک ساب اختصاصی تحویل می‌شود).")
+    if protocol in FILE_PROTOCOLS and not allow_openvpn:
+        label = "WireGuard" if protocol == "wireguard" else "OpenVPN"
+        raise ProvisionError(f"{label} فقط در محصول ترکیبی VPN + SSH پشتیبانی می‌شود (فایل آن داخل لینک ساب اختصاصی تحویل می‌شود).")
     if protocol not in node_protocols(node):
         raise ProvisionError(f"پروتکل {protocol} روی این نود نصب نشده است.")
     volume_gb = float(product["auto_provision_volume_gb"] or 0)
@@ -327,11 +332,12 @@ async def provision_ssh_direct(db, product, quantity: int = 1, user_id: int = No
                 raise ProvisionError("ساخت نام کاربری SSH یکتا ناموفق بود.")
             try:
                 usage = await provider.get_usage(result.account_id)
-                reliable_sources = {"nftables_port_counters", "external-counter", "ssh-traffic-accountant", "openvpn_accounting"}
+                reliable_sources = {"nftables_port_counters", "external-counter", "ssh-traffic-accountant", "openvpn_accounting",
+                                    "wireguard_accounting"}
                 if volume_gb > 0 and (not usage.get("accounting_ready") or usage.get("source") not in reliable_sources):
                     raise ProvisionError("فروش محصول حجمی SSH متوقف شد: شمارنده‌ی دوطرفه‌ی معتبر آماده نیست. nftables را فعال کنید و مطمئن شوید منبع برابر nftables_port_counters یا یک external-counter معتبر است.")
                 result.metadata["accounting_ready"] = bool(usage.get("accounting_ready"))
-                secret = result.metadata.get("profile", "") if protocol == "openvpn" else result.metadata.get("password", "")
+                secret = result.metadata.get("profile", "") if protocol in FILE_PROTOCOLS else result.metadata.get("password", "")
                 credential_enc = encrypt_credential(secret)
                 db.register_ssh_account(int(node_id), int(user_id), result.account_id, result.username,
                     result.host, result.port, int(pool_id), expires_at, credential_enc, protocol=protocol)
@@ -361,7 +367,7 @@ async def provision_ssh_direct(db, product, quantity: int = 1, user_id: int = No
     for item in built:
         password = str(item.metadata.get("password") or "")
         host = str(item.host or "")
-        uri = "" if protocol == "openvpn" else build_ssh_uri(item.username, password, host, int(item.port), str(node.get("name") or "SSH"))
+        uri = "" if protocol in FILE_PROTOCOLS else build_ssh_uri(item.username, password, host, int(item.port), str(node.get("name") or "SSH"))
         output.append({"username": item.username, "host": host, "port": int(item.port),
             "password": password, "account_id": item.account_id, "quota_pool_id": int(pool_id),
             "subscription_url": uri, "volume_gb": volume_gb, "duration_days": duration_days,

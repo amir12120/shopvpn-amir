@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-"""نصب خودکار نود (Linux Agent با SSH و/یا OpenVPN) روی یک سرور Debian/Ubuntu فقط با IP و رمز root.
-همچنین می‌تواند روی نود موجود پروتکل جدید (مثلاً OpenVPN) اضافه کند.
+"""نصب خودکار نود (Linux Agent با SSH و/یا OpenVPN و/یا WireGuard) روی یک سرور Debian/Ubuntu فقط با IP و رمز root.
+همچنین می‌تواند روی نود موجود پروتکل جدید (مثلاً OpenVPN یا WireGuard) اضافه کند.
 
 پنل با asyncssh به سرور مقصد وصل می‌شود، فایل‌های Agent را آپلود و نصب می‌کند،
 توکن و گواهی TLS (با pin کردن fingerprint) می‌سازد، دسترسی Agent را فقط به IP همین
@@ -28,9 +28,10 @@ _FILES = (
     "deploy/shopvpn-sshd@.service",
     "deploy/shopvpn-ovpn-disconnect.sh",
     "deploy/shopvpn-ovpn-nat.service",
+    "deploy/shopvpn-wg-nat.service",
 )
-SUPPORTED_PROTOCOLS = ("ssh", "openvpn")
-PROTOCOL_LABELS = {"ssh": "SSH", "openvpn": "OpenVPN"}
+SUPPORTED_PROTOCOLS = ("ssh", "openvpn", "wireguard")
+PROTOCOL_LABELS = {"ssh": "SSH", "openvpn": "OpenVPN", "wireguard": "WireGuard"}
 _JOBS: dict = {}
 _MAX_JOBS = 30
 
@@ -63,21 +64,25 @@ def _log(job, text: str):
 
 
 def start_install(db, *, name, host, ssh_port, username, password=None, private_key=None,
-                  protocols=None, node_id=None, ovpn_port=1194, ovpn_proto="udp") -> str:
+                  protocols=None, node_id=None, ovpn_port=1194, ovpn_proto="udp", wg_port=51820) -> str:
     """Create a background job and return its id. Secrets live only inside the task closure."""
     wanted = [p for p in SUPPORTED_PROTOCOLS if p in (protocols or ["ssh"])]
     if not wanted:
-        raise InstallError("حداقل یک پروتکل (SSH یا OpenVPN) انتخاب کنید.")
+        raise InstallError("حداقل یک پروتکل (SSH، OpenVPN یا WireGuard) انتخاب کنید.")
     if str(ovpn_proto) not in {"udp", "tcp"}:
         raise InstallError("پروتکل انتقال OpenVPN باید udp یا tcp باشد.")
     if not 1 <= int(ovpn_port) <= 65535 or int(ovpn_port) in {22, AGENT_PORT} or 20000 <= int(ovpn_port) <= 39999:
         raise InstallError("پورت OpenVPN نامعتبر است (22، 8765 و بازه 20000-39999 مجاز نیست).")
+    if not 1 <= int(wg_port) <= 65535 or int(wg_port) in {22, AGENT_PORT} or 20000 <= int(wg_port) <= 39999:
+        raise InstallError("پورت WireGuard نامعتبر است (22، 8765 و بازه 20000-39999 مجاز نیست).")
+    if "openvpn" in wanted and "wireguard" in wanted and str(ovpn_proto) == "udp" and int(ovpn_port) == int(wg_port):
+        raise InstallError("پورت OpenVPN (UDP) و WireGuard نمی‌توانند یکسان باشند.")
     job = _new_job()
 
     async def _runner():
         try:
             await _install(db, job, name, host, int(ssh_port), username, password, private_key,
-                           wanted, node_id, int(ovpn_port), str(ovpn_proto))
+                           wanted, node_id, int(ovpn_port), str(ovpn_proto), int(wg_port))
             job["status"] = "done"
         except InstallError as exc:
             job["status"] = "error"
@@ -106,7 +111,7 @@ def _node_protocols(node) -> list:
 
 
 async def _install(db, job, name, host, ssh_port, username, password, private_key,
-                   protocols, node_id, ovpn_port, ovpn_proto):
+                   protocols, node_id, ovpn_port, ovpn_proto, wg_port=51820):
     try:
         import asyncssh
     except ImportError as exc:
@@ -217,7 +222,7 @@ async def _install(db, job, name, host, ssh_port, username, password, private_ke
                 raise InstallError("فایل /etc/shopvpn-ssh-agent.env روی نود پیدا نشد؛ این نود با نصب‌کننده ShopVPN ساخته نشده است.")
 
         _log(job, f"نصب و راه‌اندازی سرویس‌ها ({', '.join(PROTOCOL_LABELS[p] for p in final_protocols)})...")
-        script_env = f"OVPN_PORT={int(ovpn_port)} OVPN_PROTO={ovpn_proto}"
+        script_env = f"OVPN_PORT={int(ovpn_port)} OVPN_PROTO={ovpn_proto} WG_PORT={int(wg_port)}"
         if existing_node and "ssh" in protocols:
             script_env += " SHOPVPN_ENABLE_NFT=1"
         await run(f"cd /tmp/shopvpn-install && {script_env} bash deploy/install-shopvpn-ssh-agent.sh {','.join(final_protocols)}",
@@ -242,6 +247,20 @@ async def _install(db, job, name, host, ssh_port, username, password, private_ke
             if sock_ok != "yes":
                 raise InstallError("سوکت management سرویس OpenVPN ساخته نشد؛ حسابداری حجم ممکن نیست.")
 
+        if "wireguard" in protocols:
+            wg_state = ""
+            for _ in range(8):
+                wg_state = await run("systemctl is-active wg-quick@wg-shopvpn", check=False)
+                if wg_state == "active":
+                    break
+                await asyncio.sleep(1.5)
+            if wg_state != "active":
+                tail = await run("journalctl -u wg-quick@wg-shopvpn -n 12 --no-pager -o cat", check=False)
+                raise InstallError(f"سرویس WireGuard بالا نیامد ({wg_state}). خروجی سرور:\n{tail[-600:]}")
+            wg_up = await run("wg show wg-shopvpn public-key >/dev/null 2>&1 && echo yes", check=False)
+            if wg_up != "yes":
+                raise InstallError("اینترفیس WireGuard ساخته نشد؛ حسابداری حجم ممکن نیست.")
+
         _log(job, "تنظیم فایروال...")
         rules = []
         if not existing_node:
@@ -252,6 +271,9 @@ async def _install(db, job, name, host, ssh_port, username, password, private_ke
         if "openvpn" in protocols:
             rules.append(f"ufw allow {int(ovpn_port)}/{ovpn_proto}")
             rules.append("ufw route allow in on tun0")
+        if "wireguard" in protocols:
+            rules.append(f"ufw allow {int(wg_port)}/udp")
+            rules.append("ufw route allow in on wg-shopvpn")
         if rules:
             await run("if command -v ufw >/dev/null 2>&1 && ufw status | grep -q 'Status: active'; then "
                       + " && ".join(rules) + "; fi", check=False)
@@ -260,6 +282,8 @@ async def _install(db, job, name, host, ssh_port, username, password, private_ke
     node_config = {"protocols": final_protocols}
     if "openvpn" in final_protocols:
         node_config.update({"ovpn_port": ovpn_port, "ovpn_proto": ovpn_proto})
+    if "wireguard" in protocols:
+        node_config.update({"wg_port": wg_port})
     if existing_node:
         db.merge_ssh_node_config(int(node_id), node_config)
     else:

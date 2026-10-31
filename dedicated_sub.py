@@ -509,6 +509,33 @@ def ovpn_files_for_config(db, config_id, cc=None) -> List[dict]:
     return out
 
 
+def wg_files_for_config(db, config_id, cc=None) -> List[dict]:
+    """فایل‌های .conf حساب‌های فعالِ WireGuard متصل به این سرویس؛ برای دانلود از لینک ساب اختصاصی."""
+    try:
+        rows = db.ssh_accounts_for_config(int(config_id), protocol="wireguard")
+    except Exception:
+        return []
+    if not rows:
+        return []
+    from ssh_credentials import decrypt_credential
+    svc = str(_row(cc, "username") or _row(cc, "display_name") or "").strip() if cc is not None else ""
+    out = []
+    for row in rows:
+        try:
+            profile = decrypt_credential(row.get("credential_enc"))
+        except Exception:
+            continue
+        if "[Interface]" not in profile or "PrivateKey" not in profile:
+            continue
+        username = re.sub(r"[^A-Za-z0-9_.-]", "", str(row.get("username") or "")) or "wireguard"
+        remark = str(row.get("node_name") or "").strip() or "WireGuard"
+        if svc and svc not in remark:
+            remark += " " + svc
+        out.append({"index": len(out) + 1, "remark": remark + " (WireGuard)", "filename": f"{username}.conf",
+                    "profile": profile})
+    return out
+
+
 def encode_uris(uris_text: str, was_b64: bool) -> bytes:
     data = uris_text.encode("utf-8")
     return base64.b64encode(data) if was_b64 else data
@@ -811,7 +838,7 @@ def build_series(points: List[tuple], now: Optional[int] = None) -> Optional[dic
 # ---------------------------------------------------------------------------
 def build_page_data(cc, info: dict, uris: List[str], settings: Dict[str, str], brand: str,
                     sub_link: str, series: Optional[dict], now: Optional[int] = None,
-                    ovpn: Optional[List[dict]] = None) -> dict:
+                    ovpn: Optional[List[dict]] = None, wg: Optional[List[dict]] = None) -> dict:
     now = now or int(time.time())
     state = compute_state(cc, info, now)
     total = info.get("total") or 0
@@ -832,6 +859,7 @@ def build_page_data(cc, info: dict, uris: List[str], settings: Dict[str, str], b
         logo = ""
     theme = settings.get("dsub_theme") or "auto"
     ovpn_items = [{"n": f["remark"], "f": f["filename"], "i": f["index"]} for f in (ovpn or [])[:20]]
+    wg_items = [{"n": f["remark"], "f": f["filename"], "i": f["index"]} for f in (wg or [])[:20]]
     return {
         "user": service_name(cc), "brand": brand, "logo": logo,
         "state": state, "online": False,
@@ -849,9 +877,11 @@ def build_page_data(cc, info: dict, uris: List[str], settings: Dict[str, str], b
             "apps": settings.get("dsub_show_apps") == "1",
             "faq": settings.get("dsub_show_faq") == "1",
             "ovpn": bool(ovpn_items),
+            "wg": bool(wg_items),
         },
         "configs": configs,
         "ovpn": ovpn_items,
+        "wg": wg_items,
         "apps": resolve_apps(settings),
         "faq": [list(x) for x in resolve_faq(settings)],
         "series": series,
