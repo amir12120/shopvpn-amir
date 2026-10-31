@@ -829,6 +829,8 @@ async def api_delete_custom_config(custom_config_id: int, auth=Depends(get_verif
                     "حذف کاربر «%s» از پنل سرور #%s ناموفق بود؛ در هر صورت از لیست کاربر حذف می‌شود.",
                     cc_row["username"], cc_row["panel_server_id"],
                 )
+    from multi_target import delete_linked_panel_users
+    await delete_linked_panel_users(db, custom_config_id)
     removed = db.delete_owned_custom_config(custom_config_id, tg_id, wallet_refund_amount(quote, panel_deleted))
     refunded = 0
     if removed:
@@ -7385,6 +7387,8 @@ async def api_admin_custom_config_delete(custom_config_id: int, auth=Depends(req
                     "حذف کاربر «%s» از پنل سرور #%s ناموفق بود؛ در هر صورت از دیتابیس حذف می‌شود.",
                     cc["username"], cc["panel_server_id"],
                 )
+    from multi_target import delete_linked_panel_users
+    await delete_linked_panel_users(db, custom_config_id)
     db.delete_owned_custom_config(custom_config_id, cc["user_id"])
     db.log_admin_action(
         admin_id, "custom_config_delete_admin",
