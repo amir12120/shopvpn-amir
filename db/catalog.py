@@ -3,6 +3,21 @@
 from .constants import *
 from .constants import _wallet_tag
 
+_SSH_PROTOCOL_ORDER = ("ssh", "openvpn", "wireguard")
+
+
+def _normalize_ssh_protocols(value) -> str:
+    """پروتکل(های) حساب محصول را به رشته‌ی کاما‌جدا (مثل 'ssh,wireguard') تبدیل می‌کند.
+    ورودی می‌تواند رشته‌ی تک‌پروتکلی (قدیمی)، رشته‌ی کاما‌جدا یا لیست باشد؛ مقدار نامعتبر نادیده گرفته می‌شود."""
+    if isinstance(value, (list, tuple, set)):
+        items = [str(x) for x in value]
+    else:
+        items = str(value or "").split(",")
+    picked = {x.strip().lower() for x in items}
+    result = [p for p in _SSH_PROTOCOL_ORDER if p in picked]
+    return ",".join(result) if result else "ssh"
+
+
 class CatalogMixin:
     def _seed_default_custom_config_product(self, conn):
         """مهاجرت یک‌باره: اگر نصب قدیمی‌تر تنظیمات سراسری «ساخت کانفیگ شخصی»
@@ -279,7 +294,7 @@ class CatalogMixin:
                 (category_id, name, price, description, duration_days,
                  1 if is_auto_provision else 0, auto_provision_volume_gb, provision_server_id, provision_ssh_node_id, pm_value,
                  base_users, extra_user_price, max_users, compare_price,
-                 str(provision_ssh_protocol).lower() if provision_ssh_node_id and str(provision_ssh_protocol).lower() in ("openvpn", "wireguard") else "ssh"),
+                 _normalize_ssh_protocols(provision_ssh_protocol) if provision_ssh_node_id else "ssh"),
             )
             return cur.lastrowid
 
@@ -419,7 +434,7 @@ class CatalogMixin:
         if provision_ssh_node_id is not ...:
             fields.append("provision_ssh_node_id=?"); values.append(provision_ssh_node_id)
         if provision_ssh_protocol is not ...:
-            fields.append("provision_ssh_protocol=?"); values.append(str(provision_ssh_protocol).lower() if str(provision_ssh_protocol).lower() in ("openvpn", "wireguard") else "ssh")
+            fields.append("provision_ssh_protocol=?"); values.append(_normalize_ssh_protocols(provision_ssh_protocol))
         if payment_methods is not ...:
             fields.append("payment_methods=?")
             values.append(json.dumps(payment_methods, ensure_ascii=False) if payment_methods else None)
