@@ -29,7 +29,7 @@ import time
 from collections import deque
 from contextlib import asynccontextmanager
 from io import BytesIO
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -223,6 +223,31 @@ def _forward_query(url: str, query: Dict[str, str]) -> str:
     return url + ("&" if "?" in url else "?") + urlencode(extra)
 
 
+async def _linked_panel_uris(cc, query: Dict[str, str], ua: str, ttl: int) -> List[str]:
+    """کانفیگ‌های پنل‌های اضافه‌ی همین سرویس (محصول چندپنلی)؛ فقط وقتی ساب اختصاصی روشن است."""
+    try:
+        links = await asyncio.to_thread(db.panel_links_for_config, cc["id"])
+    except Exception:
+        return []
+    if not links:
+        return []
+
+    async def one(link):
+        try:
+            up = await cache.get(_forward_query(link["subscription_url"], query), ua, ttl)
+        except Exception:
+            return []
+        return ds.extract_uris(up.body) if up.status == 200 and up.body else []
+
+    out, seen = [], set()
+    for part in await asyncio.gather(*[one(l) for l in links]):
+        for uri in part:
+            if uri not in seen:
+                seen.add(uri)
+                out.append(uri)
+    return out
+
+
 async def _log(config_id, request: Request, kind: str, status: int, settings: Dict[str, str]):
     if settings.get("dsub_log_enabled") != "1":
         return
@@ -300,8 +325,9 @@ async def sub_endpoint(request: Request) -> Response:
         ovpn_files = await asyncio.to_thread(ds.ovpn_files_for_config, db, cc["id"], cc)
         wg_files = await asyncio.to_thread(ds.wg_files_for_config, db, cc["id"], cc)
         if ok:
-            # حساب‌های SSH متصل به همین سرویس را در صفحه‌ی اشتراک هم نشان بده.
+            # حساب‌های SSH و پنل‌های اضافه‌ی متصل به همین سرویس را در صفحه‌ی اشتراک هم نشان بده.
             uris.extend(await asyncio.to_thread(ds.ssh_uris_for_config, db, cc["id"], cc))
+            uris.extend(await _linked_panel_uris(cc, {}, PAGE_UA, ttl))
         if ok and up.fresh:
             await _snapshot_usage(cc, up.headers)
         series = None
@@ -332,6 +358,7 @@ async def sub_endpoint(request: Request) -> Response:
             for key in ("upload", "download", "total", "expire") if key in pool_info
         )
     extra_uris = await asyncio.to_thread(ds.ssh_uris_for_config, db, cc["id"], cc)
+    extra_uris = list(extra_uris) + await _linked_panel_uris(cc, query, ua, ttl)
     reply = ds.compose_client_reply(up.status, up.headers, up.body, cc, settings, brand, page_url,
                                     extra_uris=extra_uris)
     if reply is None:
