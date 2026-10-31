@@ -4000,8 +4000,6 @@ def _checked_extra_targets(server_id, node_id, extra_panels, extra_nodes, protoc
     wanted_list = _split_ssh_protocols(protocol)
     all_nodes = ([int(node_id)] if node_id else []) + nodes
     all_panel_count = (1 if server_id else 0) + len(panels)
-    if len(wanted_list) > 1 and all_panel_count == 1 and len(all_nodes) == 1:
-        raise HTTPException(400, tr("در ترکیب یک پنل با یک نود فقط یک پروتکل قابل انتخاب است؛ برای چند پروتکل، مقصدهای بیشتری اضافه کنید."))
     node_objs = []
     for nid in all_nodes:
         node = active_nodes.get(int(nid))
@@ -4036,6 +4034,7 @@ def _checked_ssh_protocol(requested, server_id, node, multi: bool = False) -> st
     if not names <= {"ssh", "openvpn", "wireguard"}:
         raise HTTPException(400, "پروتکل نامعتبر است.")
     wanted_list = _split_ssh_protocols(names)
+    multi = bool(multi or (server_id and node))  # پنل+نود هم با چند پروتکل به مسیر چندمقصدی می‌رود
     if len(wanted_list) > 1 and not multi:
         raise HTTPException(400, tr("انتخاب چند پروتکل فقط در محصول «چند پنل / چند نود» ممکن است."))
     if not node:
