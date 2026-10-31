@@ -72,8 +72,11 @@ async def provision_direct(db, product, quantity: int = 1, user_id: int = None, 
         import dedicated_sub
         if not dedicated_sub.is_enabled(db):
             raise ProvisionError(MULTI_TARGET_NEEDS_DSUB)
-        if len(targets["panels"]) == 1 and len(targets["ssh"]) == 1:
+        if (len(targets["panels"]) == 1 and len(targets["ssh"]) == 1
+                and len(_product_ssh_protocols(product)) == 1):
             return await _provision_combined(db, product, quantity=quantity, user_id=user_id, order_id=order_id)
+        logger.info("provision_direct: product=%s -> multi path (panels=%s ssh=%s protocols=%s)",
+                    product["id"], targets["panels"], targets["ssh"], _product_ssh_protocols(product))
         return await _provision_multi(db, product, targets, quantity=quantity, user_id=user_id, order_id=order_id)
     if ssh_node_id:
         return await provision_ssh_direct(db, product, quantity=quantity, user_id=user_id, order_id=order_id)
@@ -335,6 +338,8 @@ async def _provision_multi_unit(db, product, panel_ids, node_ids, user_id, order
             node_picks = [p for p in wanted_protocols if p in supported]
             if not node_picks:
                 raise ProvisionError(f"هیچ‌یک از پروتکل‌های انتخابی محصول روی نود #{node_id} نصب نیست.")
+            logger.info("multi provision: product=%s order=%s node=%s wanted=%s supported=%s -> creating %s",
+                        product["id"], order_id, node_id, wanted_protocols, supported, node_picks)
             for proto in node_picks:
                 ssh_items.extend(await provision_ssh_direct(
                     db, product, quantity=1, user_id=user_id, order_id=order_id,
