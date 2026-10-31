@@ -35,16 +35,6 @@ SETTINGS_FORM_SECTIONS = [
                 ],
             },
             {
-                "title": "🛍️ برندینگ و ظاهر فروشگاه وب",
-                "fields": [
-                    {"key": "web_store_logo", "label": "لوگوی فروشگاه وب", "type": "image"},
-                    {"key": "web_store_tagline", "label": "شعار کوتاه فروشگاه وب", "type": "text"},
-                    {"key": "web_store_primary_color", "label": "رنگ اصلی فروشگاه وب (HEX)", "type": "text"},
-                    {"key": "web_store_support_url", "label": "لینک پشتیبانی فروشگاه وب", "type": "text"},
-                    {"key": "web_store_preview_theme", "label": "تم پیش‌فرض پیش‌نمایش", "type": "select", "options": [["light", "روشن"], ["dark", "تیره"], ["auto", "خودکار"]]},
-                ],
-            },
-            {
                 "title": "🔗 برندینگ صفحه لینک ساب",
                 "fields": [
                     {"key": "dsub_brand", "label": "نام برند صفحه لینک ساب", "type": "text"},
@@ -165,6 +155,12 @@ SETTINGS_FORM_SECTIONS = [
                     {"key": "custom_config_max_gb", "label": "حداکثر حجم مجاز (گیگ)", "type": "number"},
                     {"key": "custom_config_duration_days", "label": "مدت اعتبار (روز)", "type": "number"},
                     {"key": "btn_custom_config", "label": "متن دکمه ساخت کانفیگ شخصی", "type": "text"},
+                ],
+            },
+            {
+                "title": "🗺 نقشه زنده شبکه (فروشگاه وب)",
+                "fields": [
+                    {"key": "netmap_locations", "label": "اصلاح دستی مکان سرورها (JSON: product_ids یا match + cc, city, city_fa, lat, lon)", "type": "textarea"},
                 ],
             },
             {

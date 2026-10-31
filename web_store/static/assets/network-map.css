@@ -190,3 +190,159 @@
   .nm-details{order:1;grid-column:auto}.nm-routes{order:2}.nm-settings{order:3}
   .nm-metrics b{font-size:12.5px}
 }
+
+.nm-route.down{stroke-dasharray:5 5;opacity:.6}
+.d-bad{background:var(--nm-red);box-shadow:0 0 8px #ff4d5e99}
+.nm-badge.down{background:#4a1220;color:#ff7a88}
+.nm-flag-t{display:inline-flex;align-items:center;justify-content:center;background:#143262;color:#cfe0ff;font-size:9px;font-weight:800;letter-spacing:.3px;direction:ltr}
+.nm-metrics{grid-template-columns:repeat(3,1fr)}
+.nm-plist-wrap{flex:1;display:flex;flex-direction:column;min-height:0}
+.nm-plist-wrap small{display:block;font-size:10.5px;color:var(--nm-mute);margin-bottom:8px}
+.nm-plist{display:flex;flex-direction:column;gap:7px;max-height:230px;overflow:auto;padding-inline-end:2px}
+.nm-prod{display:flex;align-items:center;gap:10px;width:100%;padding:9px 11px;border-radius:10px;border:1px solid #14305a;background:#07152d;text-align:start;color:inherit;font:inherit;cursor:pointer}
+.nm-prod:hover{border-color:#2d5aa0}
+.nm-pn{flex:1;min-width:0;display:flex;flex-direction:column}
+.nm-pn b{font-size:12.5px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nm-pn small{display:block;font-size:10.5px;color:var(--nm-mute);margin:2px 0 0}
+.nm-pp{font-size:12px;font-weight:700;white-space:nowrap}
+
+/* ---- v2: کشورهای رنگی، تولتیپ، پینگ، نمودار، زوم لمسی ---- */
+.nm-map.zoomed{touch-action:none;cursor:grab}
+.nm-map.zoomed.drag{cursor:grabbing}
+.ctry-b{fill:none;stroke:#3b78d0;stroke-opacity:.28;stroke-width:.5px;vector-effect:non-scaling-stroke;pointer-events:none}
+.ctry-b.land-fill{fill:#0c2a56}
+.ctry-on{stroke-width:.9px;vector-effect:non-scaling-stroke;pointer-events:none;transition:fill-opacity .3s}
+.ctry-on.c-ok{fill:#2de2a6;fill-opacity:.16;stroke:#2de2a6;stroke-opacity:.7}
+.ctry-on.c-bad{fill:#ff4d5e;fill-opacity:.16;stroke:#ff4d5e;stroke-opacity:.7}
+.ctry-on.c-hub{fill:#4d8dff;fill-opacity:.2;stroke:#6aa6ff;stroke-opacity:.8}
+.nm-label{transition:opacity .15s}
+.nm-label.lh{opacity:0}
+.nm-node:hover .nm-label.lh,.nm-node:focus-visible .nm-label.lh,.nm-node.sel .nm-label.lh{opacity:1}
+.nm-node:focus-visible .nm-dot{outline:2px solid #8ab4ff;outline-offset:3px}
+.nm-tip{position:absolute;z-index:9;transform:translate(-50%,-100%);min-width:150px;max-width:230px;padding:9px 12px;border:1px solid #2a5aa5;border-radius:12px;background:#061429f2;box-shadow:0 10px 30px #000a;pointer-events:none;font-size:12px;direction:inherit}
+.nm-tip.below{transform:translate(-50%,0)}
+.nm-tip[hidden]{display:none}
+.nm-tip-h{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.nm-tip-h b{font-size:13px;color:#fff}
+.nm-tip-h .nm-flag{width:20px;height:20px}
+.nm-tip-r{display:flex;flex-wrap:wrap;gap:4px 12px;color:var(--nm-mute);font-weight:700}
+.nm-hint{position:absolute;z-index:7;bottom:10px;right:12px;padding:4px 10px;border-radius:99px;background:#061429cc;color:#8ba4c8;font-size:10.5px;pointer-events:none;opacity:.85}
+@media (hover:none){.nm-hint{display:none}}
+.c-warn{color:var(--nm-orange)}
+.nm-ms{font-size:10.5px;font-weight:700;direction:ltr}
+.nm-row .nm-ms{margin-inline-start:auto}
+.nm-rr-m{grid-template-columns:repeat(4,1fr)}
+.nm-metrics{grid-template-columns:repeat(4,1fr)}
+.nm-spark-wrap{margin:0 0 12px}
+.nm-spark-wrap small{display:block;font-size:10.5px;color:var(--nm-mute);margin-bottom:6px}
+.nm-spark{display:block;width:100%;height:46px;border:1px solid #14305a;border-radius:10px;background:#07152d;padding:4px}
+.nm-spark .nm-ln{stroke-width:1.8px}
+.nm-spark .nm-dn{fill:#ff4d5e;opacity:.85}
+.nm-buy{margin-top:12px;height:42px;border:1px solid #2d5aa0;border-radius:12px;background:#0c2349;font-weight:700;font-size:13px}
+.nm-buy:hover{background:#12306a}
+.nm-stage{will-change:transform}
+@media (max-width:720px){.nm-rr-m{grid-template-columns:repeat(2,1fr)}.nm-metrics{grid-template-columns:repeat(2,1fr)}}
+
+/* ---- v2: تم روشن (هماهنگ با تم سایت) ---- */
+@media (prefers-color-scheme: light){
+
+:root:not([data-theme="dark"]) #shopvpn-network-map{--nm-card:#fff;--nm-line:#d3dff2;--nm-ink:#0d1f3c;--nm-mute:#566b8c;--nm-green:#0a9f73;--nm-orange:#c77a00;--nm-red:#d62f43;--nm-blue:#2557e0}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-app{background:radial-gradient(900px 420px at 85% -10%,#dbe8ff99,transparent 60%),linear-gradient(160deg,#f6f9ff,#e9f1fd 72%);border-color:#cddbf1;box-shadow:0 20px 60px #1d3f7a1f,inset 0 1px #fff}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-card{background:linear-gradient(180deg,#fff,#f7faff);border-color:#d3dff2}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-head p,:root:not([data-theme="dark"]) #shopvpn-network-map .nm-note{color:#5a7090}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-refresh,:root:not([data-theme="dark"]) #shopvpn-network-map .nm-sel select{background:#fff;border-color:#d3dff2;color:#0d1f3c}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-search{background:#f3f7ff;border-color:#d3dff2}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-search input{color:#0d1f3c}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-search input::placeholder{color:#8aa0c2}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-row{border-bottom-color:#e3ebf8}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-row:hover,:root:not([data-theme="dark"]) #shopvpn-network-map .nm-row.on{background:#eaf2ff}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-row.on{box-shadow:inset 0 0 0 1px #8fb0e6}
+:root:not([data-theme="dark"]) #shopvpn-network-map .s-green{--c:#0a8f68;--bd:#a6e3cf;--bg1:#e7faf3;--bg2:#d8f6eb;--ic:#bdeedd}
+:root:not([data-theme="dark"]) #shopvpn-network-map .s-red{--c:#d62f43;--bd:#f2b5be;--bg1:#fff0f2;--bg2:#ffe3e7;--ic:#ffd0d6}
+:root:not([data-theme="dark"]) #shopvpn-network-map .s-purple{--c:#5b4bd6;--bd:#cbc5f5;--bg1:#f1efff;--bg2:#e6e2ff;--ic:#d8d2ff}
+:root:not([data-theme="dark"]) #shopvpn-network-map .s-blue{--c:#1f5bd6;--bd:#b4cdf5;--bg1:#ecf3ff;--bg2:#dfeaff;--ic:#c8dcff}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-map{background:radial-gradient(ellipse at 60% 45%,#e9f3ff 0,#d9e8fb 55%,#cddff7 100%)}
+:root:not([data-theme="dark"]) #shopvpn-network-map .land-fill{fill:#f7faff;stroke:#7ea3dc;stroke-opacity:.7}
+:root:not([data-theme="dark"]) #shopvpn-network-map .ctry-b.land-fill{fill:#f7faff}
+:root:not([data-theme="dark"]) #shopvpn-network-map .ctry-b{stroke:#5f8bd0;stroke-opacity:.4}
+:root:not([data-theme="dark"]) #shopvpn-network-map .land-dots{opacity:.35}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-grid line{stroke:#2f63b5;stroke-opacity:.1}
+:root:not([data-theme="dark"]) #shopvpn-network-map .ctry-on.c-ok{fill:#0a9f73;fill-opacity:.2;stroke:#0a9f73}
+:root:not([data-theme="dark"]) #shopvpn-network-map .ctry-on.c-bad{fill:#d62f43;fill-opacity:.18;stroke:#d62f43}
+:root:not([data-theme="dark"]) #shopvpn-network-map .ctry-on.c-hub{fill:#2557e0;fill-opacity:.2;stroke:#2557e0}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-pk{fill:#2557e0}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-node.hub .nm-dot{background:#2557e0;box-shadow:0 0 0 5px #2557e044,0 0 0 11px #2557e01c,0 0 22px #2557e0}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-ring{border-color:#2557e0aa}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-lt b{color:#0d1f3c;text-shadow:0 1px 2px #fff}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-label{filter:drop-shadow(0 1px 3px #ffffffcc)}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-zoom,:root:not([data-theme="dark"]) #shopvpn-network-map .nm-legend,:root:not([data-theme="dark"]) #shopvpn-network-map .nm-hint{background:#fffffff0;border-color:#cddbf1;color:#27406b}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-zoom button{color:#27406b}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-zoom button+button{border-top-color:#cddbf1}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-zoom button:hover{background:#eaf2ff}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-tip{background:#fffffff7;border-color:#9bb8e6;box-shadow:0 10px 30px #1d3f7a33}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-tip-h b{color:#0d1f3c}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-route-i,:root:not([data-theme="dark"]) #shopvpn-network-map .nm-chip,:root:not([data-theme="dark"]) #shopvpn-network-map .nm-metrics,:root:not([data-theme="dark"]) #shopvpn-network-map .nm-prod,:root:not([data-theme="dark"]) #shopvpn-network-map .nm-spark{background:#f3f7ff;border-color:#d3dff2}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-route-i.on{background:linear-gradient(180deg,#e4faf2,#d7f5ea);border-color:#0a9f73}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-rr-m b,:root:not([data-theme="dark"]) #shopvpn-network-map .nm-metrics b{color:#0d1f3c}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-rec{background:#c9f2e3;color:#07775a}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-radio{border-color:#9bb3d8}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-badge.ok{background:#d3f5e8;color:#07775a}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-badge.down{background:#ffe0e4;color:#c4263a}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-switch i{background:#c5d3ea}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-slide,:root:not([data-theme="dark"]) #shopvpn-network-map .nm-srow{border-bottom-color:#e3ebf8}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-buy{background:#eaf2ff;border-color:#8fb0e6;color:#17356b}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-buy:hover{background:#dbe9ff}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-flag{box-shadow:0 0 0 1.5px #0d1f3c22}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-flag-t{background:#dbe7fa;color:#27406b}
+:root:not([data-theme="dark"]) #shopvpn-network-map .nm-srow,:root:not([data-theme="dark"]) #shopvpn-network-map .nm-slide{color:#0d1f3c}
+}
+
+:root[data-theme="light"] #shopvpn-network-map{--nm-card:#fff;--nm-line:#d3dff2;--nm-ink:#0d1f3c;--nm-mute:#566b8c;--nm-green:#0a9f73;--nm-orange:#c77a00;--nm-red:#d62f43;--nm-blue:#2557e0}
+:root[data-theme="light"] #shopvpn-network-map .nm-app{background:radial-gradient(900px 420px at 85% -10%,#dbe8ff99,transparent 60%),linear-gradient(160deg,#f6f9ff,#e9f1fd 72%);border-color:#cddbf1;box-shadow:0 20px 60px #1d3f7a1f,inset 0 1px #fff}
+:root[data-theme="light"] #shopvpn-network-map .nm-card{background:linear-gradient(180deg,#fff,#f7faff);border-color:#d3dff2}
+:root[data-theme="light"] #shopvpn-network-map .nm-head p,:root[data-theme="light"] #shopvpn-network-map .nm-note{color:#5a7090}
+:root[data-theme="light"] #shopvpn-network-map .nm-refresh,:root[data-theme="light"] #shopvpn-network-map .nm-sel select{background:#fff;border-color:#d3dff2;color:#0d1f3c}
+:root[data-theme="light"] #shopvpn-network-map .nm-search{background:#f3f7ff;border-color:#d3dff2}
+:root[data-theme="light"] #shopvpn-network-map .nm-search input{color:#0d1f3c}
+:root[data-theme="light"] #shopvpn-network-map .nm-search input::placeholder{color:#8aa0c2}
+:root[data-theme="light"] #shopvpn-network-map .nm-row{border-bottom-color:#e3ebf8}
+:root[data-theme="light"] #shopvpn-network-map .nm-row:hover,:root[data-theme="light"] #shopvpn-network-map .nm-row.on{background:#eaf2ff}
+:root[data-theme="light"] #shopvpn-network-map .nm-row.on{box-shadow:inset 0 0 0 1px #8fb0e6}
+:root[data-theme="light"] #shopvpn-network-map .s-green{--c:#0a8f68;--bd:#a6e3cf;--bg1:#e7faf3;--bg2:#d8f6eb;--ic:#bdeedd}
+:root[data-theme="light"] #shopvpn-network-map .s-red{--c:#d62f43;--bd:#f2b5be;--bg1:#fff0f2;--bg2:#ffe3e7;--ic:#ffd0d6}
+:root[data-theme="light"] #shopvpn-network-map .s-purple{--c:#5b4bd6;--bd:#cbc5f5;--bg1:#f1efff;--bg2:#e6e2ff;--ic:#d8d2ff}
+:root[data-theme="light"] #shopvpn-network-map .s-blue{--c:#1f5bd6;--bd:#b4cdf5;--bg1:#ecf3ff;--bg2:#dfeaff;--ic:#c8dcff}
+:root[data-theme="light"] #shopvpn-network-map .nm-map{background:radial-gradient(ellipse at 60% 45%,#e9f3ff 0,#d9e8fb 55%,#cddff7 100%)}
+:root[data-theme="light"] #shopvpn-network-map .land-fill{fill:#f7faff;stroke:#7ea3dc;stroke-opacity:.7}
+:root[data-theme="light"] #shopvpn-network-map .ctry-b.land-fill{fill:#f7faff}
+:root[data-theme="light"] #shopvpn-network-map .ctry-b{stroke:#5f8bd0;stroke-opacity:.4}
+:root[data-theme="light"] #shopvpn-network-map .land-dots{opacity:.35}
+:root[data-theme="light"] #shopvpn-network-map .nm-grid line{stroke:#2f63b5;stroke-opacity:.1}
+:root[data-theme="light"] #shopvpn-network-map .ctry-on.c-ok{fill:#0a9f73;fill-opacity:.2;stroke:#0a9f73}
+:root[data-theme="light"] #shopvpn-network-map .ctry-on.c-bad{fill:#d62f43;fill-opacity:.18;stroke:#d62f43}
+:root[data-theme="light"] #shopvpn-network-map .ctry-on.c-hub{fill:#2557e0;fill-opacity:.2;stroke:#2557e0}
+:root[data-theme="light"] #shopvpn-network-map .nm-pk{fill:#2557e0}
+:root[data-theme="light"] #shopvpn-network-map .nm-node.hub .nm-dot{background:#2557e0;box-shadow:0 0 0 5px #2557e044,0 0 0 11px #2557e01c,0 0 22px #2557e0}
+:root[data-theme="light"] #shopvpn-network-map .nm-ring{border-color:#2557e0aa}
+:root[data-theme="light"] #shopvpn-network-map .nm-lt b{color:#0d1f3c;text-shadow:0 1px 2px #fff}
+:root[data-theme="light"] #shopvpn-network-map .nm-label{filter:drop-shadow(0 1px 3px #ffffffcc)}
+:root[data-theme="light"] #shopvpn-network-map .nm-zoom,:root[data-theme="light"] #shopvpn-network-map .nm-legend,:root[data-theme="light"] #shopvpn-network-map .nm-hint{background:#fffffff0;border-color:#cddbf1;color:#27406b}
+:root[data-theme="light"] #shopvpn-network-map .nm-zoom button{color:#27406b}
+:root[data-theme="light"] #shopvpn-network-map .nm-zoom button+button{border-top-color:#cddbf1}
+:root[data-theme="light"] #shopvpn-network-map .nm-zoom button:hover{background:#eaf2ff}
+:root[data-theme="light"] #shopvpn-network-map .nm-tip{background:#fffffff7;border-color:#9bb8e6;box-shadow:0 10px 30px #1d3f7a33}
+:root[data-theme="light"] #shopvpn-network-map .nm-tip-h b{color:#0d1f3c}
+:root[data-theme="light"] #shopvpn-network-map .nm-route-i,:root[data-theme="light"] #shopvpn-network-map .nm-chip,:root[data-theme="light"] #shopvpn-network-map .nm-metrics,:root[data-theme="light"] #shopvpn-network-map .nm-prod,:root[data-theme="light"] #shopvpn-network-map .nm-spark{background:#f3f7ff;border-color:#d3dff2}
+:root[data-theme="light"] #shopvpn-network-map .nm-route-i.on{background:linear-gradient(180deg,#e4faf2,#d7f5ea);border-color:#0a9f73}
+:root[data-theme="light"] #shopvpn-network-map .nm-rr-m b,:root[data-theme="light"] #shopvpn-network-map .nm-metrics b{color:#0d1f3c}
+:root[data-theme="light"] #shopvpn-network-map .nm-rec{background:#c9f2e3;color:#07775a}
+:root[data-theme="light"] #shopvpn-network-map .nm-radio{border-color:#9bb3d8}
+:root[data-theme="light"] #shopvpn-network-map .nm-badge.ok{background:#d3f5e8;color:#07775a}
+:root[data-theme="light"] #shopvpn-network-map .nm-badge.down{background:#ffe0e4;color:#c4263a}
+:root[data-theme="light"] #shopvpn-network-map .nm-switch i{background:#c5d3ea}
+:root[data-theme="light"] #shopvpn-network-map .nm-slide,:root[data-theme="light"] #shopvpn-network-map .nm-srow{border-bottom-color:#e3ebf8}
+:root[data-theme="light"] #shopvpn-network-map .nm-buy{background:#eaf2ff;border-color:#8fb0e6;color:#17356b}
+:root[data-theme="light"] #shopvpn-network-map .nm-buy:hover{background:#dbe9ff}
+:root[data-theme="light"] #shopvpn-network-map .nm-flag{box-shadow:0 0 0 1.5px #0d1f3c22}
+:root[data-theme="light"] #shopvpn-network-map .nm-flag-t{background:#dbe7fa;color:#27406b}
+:root[data-theme="light"] #shopvpn-network-map .nm-srow,:root[data-theme="light"] #shopvpn-network-map .nm-slide{color:#0d1f3c}

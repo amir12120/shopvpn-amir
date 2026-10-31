@@ -2665,3 +2665,17 @@ EXTRA_PHRASES.update({
     "👤 حساب‌های SSH": "👤 SSH accounts",
     " — ۲۵ مورد آخر:": " — last 25:",
 })
+
+# --- upstream multi-target / SSH force-delete (4.21) ---
+EXTRA_PHRASES.update({
+    'اگر سرور این نود حذف شده یا از دسترس خارج است، نود و همه\u200cی حساب\u200cهایش فقط از پنل پاک می\u200cشوند (روی سرور تغییری داده نمی\u200cشود).': "If this node's server has been deleted or is unreachable, the node and all its accounts are removed from the panel only (nothing is changed on the server).",
+    'حذف اجباری فقط از پنل انجام شود؟ (روی سرور نود تغییری داده نمی\u200cشود)': 'Force-delete from the panel only? (nothing is changed on the node server)',
+    'اتصال مستقیم به پنل یا نود فقط برای بات اصلی مجاز است.': 'Direct connection to a panel or node is only allowed for the main bot.',
+    'اتصال چند پنل/نود یا ترکیب پنل و نود به یک محصول فقط وقتی ساب اختصاصی فعال است ممکن است؛ ابتدا ساب اختصاصی را فعال کنید.': 'Attaching multiple panels/nodes or mixing a panel and a node on one product is only possible when dedicated sub is enabled; enable dedicated sub first.',
+    'ابتدا مقصد اصلی محصول را انتخاب کنید.': "Select the product's primary destination first.",
+    'انتخاب چند پروتکل فقط در محصول «چند پنل / چند نود» ممکن است.': 'Choosing multiple protocols is only possible on a multi-panel / multi-node product.',
+    'پنل VPN فعال پیدا نشد.': 'No active VPN panel was found.',
+})
+EXTRA_DYNAMIC_PHRASES += [
+    ('👤 حساب\u200cهای SSH ({x}) — ۲۵ مورد آخر:', '👤 SSH accounts ({x}) — last 25:'),
+]

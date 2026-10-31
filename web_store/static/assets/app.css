@@ -844,3 +844,20 @@ html { overflow-x: clip; }
 @media (max-width: 480px) {
   .account-page .tabs button { padding: 0 10px; font-size: 14px; }
 }
+
+/* Final storefront polish */
+.section-kicker{display:inline-flex;align-items:center;gap:8px;color:var(--accent-2);font-size:11px;font-weight:900;letter-spacing:.14em;text-transform:uppercase;margin-bottom:10px}
+.section-kicker:before{content:"";width:22px;height:2px;border-radius:4px;background:linear-gradient(90deg,var(--accent),var(--accent-2))}
+.premium-highlights{padding-top:76px}
+.highlight-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:28px}
+.highlight-card{min-height:205px;padding:24px;border-radius:22px;border:1px solid var(--line);background:linear-gradient(155deg,rgba(24,31,55,.76),rgba(11,16,31,.7));box-shadow:var(--shadow-soft);transition:transform .2s ease,border-color .2s ease}
+.highlight-card:hover{transform:translateY(-4px);border-color:rgba(66,229,194,.28)}
+.highlight-icon{width:46px;height:46px;display:grid;place-items:center;border-radius:15px;background:linear-gradient(145deg,rgba(139,124,255,.16),rgba(66,229,194,.1));border:1px solid rgba(139,124,255,.22);font-size:20px;margin-bottom:22px}
+.highlight-card h3{font-size:17px}.highlight-card p{color:var(--mute);font-size:14px;line-height:1.85;margin-top:6px}
+.device-section{display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr);gap:36px;align-items:center}
+.device-copy h2{max-width:14ch}.device-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}.device-card{min-height:140px;padding:20px 12px;border-radius:20px;border:1px solid var(--line);background:rgba(18,24,42,.65);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;text-align:center}.device-logo{width:50px;height:50px;border-radius:16px;display:grid;place-items:center;font-size:21px;background:rgba(255,255,255,.045);border:1px solid var(--line);color:#dfe6ff}.device-card small{font-size:11px;color:var(--mute)}
+.testimonial-section{padding-top:72px}.rating-pill{padding:8px 13px;border-radius:999px;background:rgba(255,209,102,.08);border:1px solid rgba(255,209,102,.18);color:#ffd166;font-weight:800;font-size:12px}.quote-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:26px}.quote-card{padding:24px;border-radius:22px;border:1px solid var(--line);background:rgba(18,24,42,.6)}.stars{color:#ffd166;letter-spacing:2px;font-size:13px}.quote-card p{margin:16px 0 20px;color:#c3cce0;line-height:1.9;font-size:14px}.quote-card b{font-size:13px}
+.final-cta{margin-top:38px;margin-bottom:18px;padding:34px 38px;border-radius:28px;border:1px solid rgba(139,124,255,.24);background:radial-gradient(circle at 85% 20%,rgba(66,229,194,.12),transparent 32%),linear-gradient(135deg,rgba(30,27,62,.9),rgba(12,20,35,.92));display:flex;align-items:center;justify-content:space-between;gap:24px;box-shadow:0 28px 80px -40px rgba(0,0,0,.9)}.final-cta h2{font-size:clamp(25px,4vw,38px);letter-spacing:-.03em}.final-cta p{color:var(--mute);margin-top:6px}
+:root:not([data-theme="dark"]) .highlight-card,:root:not([data-theme="dark"]) .device-card,:root:not([data-theme="dark"]) .quote-card{background:#fff}.final-cta{color:var(--ink)}
+@media(max-width:900px){.highlight-grid{grid-template-columns:repeat(2,1fr)}.device-section{grid-template-columns:1fr}.device-grid{grid-template-columns:repeat(5,1fr)}.quote-grid{grid-template-columns:1fr}.final-cta{display:grid}}
+@media(max-width:560px){.highlight-grid{grid-template-columns:1fr}.device-grid{grid-template-columns:repeat(2,1fr)}.device-card{min-height:118px}.premium-highlights{padding-top:50px}.final-cta{padding:26px 22px;border-radius:22px}.final-cta .btn{width:100%}}

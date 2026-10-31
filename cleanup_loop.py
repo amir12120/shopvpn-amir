@@ -83,6 +83,14 @@ async def _provider_action(db, row, action):
             result = await provider.set_enabled(row["username"], False)
         else:
             result = await provider.delete_user(row["username"])
+        try:
+            import multi_target
+            if action == "disable":
+                await multi_target.set_linked_panel_users_enabled(db, row["id"], False)
+            elif result is not False:
+                await multi_target.delete_linked_panel_users(db, row["id"])
+        except (KeyError, IndexError, TypeError):
+            pass
         # برخی providerها None برمی‌گردانند ولی بدون exception موفق‌اند.
         return (result is not False), "ok"
     except Exception as exc:

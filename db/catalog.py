@@ -1,6 +1,22 @@
 # -*- coding: utf-8 -*-
+#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 from .constants import *
 from .constants import _wallet_tag
+
+_SSH_PROTOCOL_ORDER = ("ssh", "openvpn", "wireguard")
+
+
+def _normalize_ssh_protocols(value) -> str:
+    """پروتکل(های) حساب محصول را به رشته‌ی کاما‌جدا (مثل 'ssh,wireguard') تبدیل می‌کند.
+    ورودی می‌تواند رشته‌ی تک‌پروتکلی (قدیمی)، رشته‌ی کاما‌جدا یا لیست باشد؛ مقدار نامعتبر نادیده گرفته می‌شود."""
+    if isinstance(value, (list, tuple, set)):
+        items = [str(x) for x in value]
+    else:
+        items = str(value or "").split(",")
+    picked = {x.strip().lower() for x in items}
+    result = [p for p in _SSH_PROTOCOL_ORDER if p in picked]
+    return ",".join(result) if result else "ssh"
+
 
 class CatalogMixin:
     def _seed_default_custom_config_product(self, conn):
@@ -254,7 +270,8 @@ class CatalogMixin:
                      is_auto_provision: bool = False, auto_provision_volume_gb: int = None,
                      provision_server_id: int = None, payment_methods=None,
                      base_users: int = 0, extra_user_price: int = 0, max_users: int = 0,
-                     compare_price: int = 0, provision_ssh_node_id: int = None) -> int:
+                     compare_price: int = 0, provision_ssh_node_id: int = None,
+                     provision_ssh_protocol: str = "ssh") -> int:
         """payment_methods: None/[] یعنی «همه‌ی روش‌های پرداخت مجازند» (پیش‌فرض)،
         در غیر این صورت لیستی از کلیدهای مجاز - همان قراردادِ set_product_payment_methods.
 
@@ -272,11 +289,12 @@ class CatalogMixin:
             cur = conn.execute(
                 "INSERT INTO products (category_id, name, price, description, duration_days, "
                 "is_auto_provision, auto_provision_volume_gb, provision_server_id, provision_ssh_node_id, payment_methods, "
-                "base_users, extra_user_price, max_users, compare_price) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "base_users, extra_user_price, max_users, compare_price, provision_ssh_protocol) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (category_id, name, price, description, duration_days,
                  1 if is_auto_provision else 0, auto_provision_volume_gb, provision_server_id, provision_ssh_node_id, pm_value,
-                 base_users, extra_user_price, max_users, compare_price),
+                 base_users, extra_user_price, max_users, compare_price,
+                 _normalize_ssh_protocols(provision_ssh_protocol) if provision_ssh_node_id else "ssh"),
             )
             return cur.lastrowid
 
@@ -390,7 +408,7 @@ class CatalogMixin:
                       description: str = None, duration_days: int = None,
                       is_auto_provision=..., auto_provision_volume_gb=...,
                       provision_server_id=..., payment_methods=..., category_id: int = None,
-                      provision_ssh_node_id=...,
+                      provision_ssh_node_id=..., provision_ssh_protocol=...,
                       compare_price=..., discount_days=..., discount_max_uses=...):
         # نکته: is_auto_provision/auto_provision_volume_gb/provision_server_id از سنتینل
         # Ellipsis استفاده می‌کنند (مثل payment_methods) چون باید بتوان آن‌ها را عمداً
@@ -415,6 +433,8 @@ class CatalogMixin:
             fields.append("provision_server_id=?"); values.append(provision_server_id)
         if provision_ssh_node_id is not ...:
             fields.append("provision_ssh_node_id=?"); values.append(provision_ssh_node_id)
+        if provision_ssh_protocol is not ...:
+            fields.append("provision_ssh_protocol=?"); values.append(_normalize_ssh_protocols(provision_ssh_protocol))
         if payment_methods is not ...:
             fields.append("payment_methods=?")
             values.append(json.dumps(payment_methods, ensure_ascii=False) if payment_methods else None)
@@ -440,6 +460,8 @@ class CatalogMixin:
         values.append(product_id)
         with self._get_conn() as conn:
             conn.execute(f"UPDATE products SET {', '.join(fields)} WHERE id=?", values)
+            if provision_server_id is not ... or provision_ssh_node_id is not ...:
+                conn.execute("DELETE FROM product_extra_targets WHERE product_id=?", (product_id,))
 
 
     def set_product_user_limit(self, product_id: int, extra_user_price: int, max_users: int,
@@ -549,7 +571,6 @@ class CatalogMixin:
                 (product_id, int(limit)),
             ).fetchall()
         return [r["subscription_url"] for r in rows]
-
 
 
     def check_low_stock_alert_state(self, product_id: int, stock: int, threshold: int) -> bool:
@@ -689,7 +710,7 @@ class CatalogMixin:
     # ------------------------------------------------------- admin: کانفیگ‌های بانکیِ یک کاربر --
     # مدیریت کانفیگ‌های «بانک محصول» (جدول configs) که به یک کاربر خاص اختصاص
     # یافته‌اند، از سمت ادمین (مینی‌اپ ← مدیریت کاربران): مشاهده‌ی لینک‌ها،
-    # غیرفعال/فعال کردن نمایش لینک به کاربر، و حذف کامل - معادل قابلیت‌هایی که
+    # غیرفعال/فعال کردن نمایش لینک به کاربر، و حذف کامل - معادل قابلیت‌هایی که‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
     # پیش‌تر فقط برای «سرویس‌های مستقیم-پنل» (custom_configs) وجود داشت.
 
 
@@ -1323,7 +1344,7 @@ class CatalogMixin:
         sets, values = [], []
         if from_gb is not None:
             sets.append("from_gb=?"); values.append(from_gb)
-        if to_gb is not None or to_gb is None:  # اجازه‌ی ست‌کردن NULL برای «بی‌نهایت» را هم می‌دهیم
+        if to_gb is not None or to_gb is None:  # اجازه‌ی ست‌کردن NULL برای «بی‌نهایت» را هم می‌دهیم‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
             sets.append("to_gb=?"); values.append(to_gb)
         if price_per_gb is not None:
             sets.append("price_per_gb=?"); values.append(price_per_gb)
@@ -1841,3 +1862,5 @@ class CatalogMixin:
     # نمایندگی بر پایه‌ی استخر حجم (reseller credit)
     # -----------------------------------------------------------------------
 
+#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
+# 		   		 		  	 	 		 		   		  	 	 		 			  		 				 			  	 

@@ -111,6 +111,9 @@ UPSTREAM_FEATURE_MODULES = (
     "ssh_uri.py",
     "db/usage.py",
     "config_geo.py",
+    "multi_target.py",
+    "db/multi_target.py",
+    "ssh_hosts.py",
 )
 
 # Upstream keeps re-uploading these with a module-level `from i18n import tr`
@@ -479,6 +482,16 @@ def test_new_upstream_features_stay_wired():
     db_system = (ROOT / "db/system.py").read_text(encoding="utf-8")
     assert "def create_channel_post(" in db_system
     assert "def claim_channel_post(" in db_system
+
+    # Multi-target extra panels + SSH admin menu (upstream 4.21 batch).
+    assert "from multi_target import delete_linked_panel_users" in handlers_user
+    assert "class MultiTargetMixin" in (ROOT / "db/multi_target.py").read_text(encoding="utf-8")
+    assert "MultiTargetMixin," in (ROOT / "db/__init__.py").read_text(encoding="utf-8")
+    assert "import ssh_admin_bot" in handlers_admin
+    assert "ssh_admin_bot.register(router, db" in handlers_admin
+    assert '"adm_ssh_menu"' in keyboards
+    assert "import ssh_hosts" in (ROOT / "ssh_service.py").read_text(encoding="utf-8")
+    assert "def build_ssh_uri(" in (ROOT / "ssh_uri.py").read_text(encoding="utf-8")
 
 
 def test_payment_method_gate_is_wired_end_to_end():

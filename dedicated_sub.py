@@ -60,6 +60,8 @@ DSUB_DEFAULTS: Dict[str, str] = {
     "dsub_apps_hidden": "",             # «ios:Streisand,android:v2rayNG»
     "dsub_apps_rec": "",                # برنامه‌ی پیشنهادی هر سیستم‌عامل: «ios:Hiddify,android:v2rayNG»
     "dsub_custom_apps": "",             # هر خط: platform|name|توضیح|پیشوند-افزودن|لینک-دانلود
+    "dsub_custom_template_enabled": "0",  # استفاده از قالب HTML اختصاصی به‌جای قالب پیش‌فرض صفحه
+    "dsub_custom_template": "",         # کد کامل HTML قالب اختصاصی (باید شامل __DATA__ باشد)
 }
 
 PLATFORMS = ("ios", "android", "windows", "mac", "linux")
@@ -464,7 +466,6 @@ def ssh_uris_for_config(db, config_id, cc=None) -> List[str]:
             password = decrypt_credential(row.get("credential_enc"))
         except Exception:
             continue
-        host = str(row.get("host") or "")
         remark = str(row.get("node_name") or "").strip() or "SSH " + str(row.get("username") or "")
         # مثل بقیه کانفیگ‌ها: نام نود + نام کاربری سرویس
         svc = str(_row(cc, "username") or _row(cc, "display_name") or "").strip() if cc is not None else ""
@@ -472,11 +473,78 @@ def ssh_uris_for_config(db, config_id, cc=None) -> List[str]:
             remark += " " + svc
         if len(rows) > 1:
             remark += f" {n}"
+        import ssh_hosts
+        for ep in ssh_hosts.endpoints(row, "ssh", row.get("host"), int(row.get("port") or 22)):
+            try:
+                from ssh_uri import build_ssh_uri
+                out.append(build_ssh_uri(row.get("username"), password, ep["address"], ep["port"],
+                                         remark + (f" {ep['remark']}" if ep["remark"] else "")))
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def ovpn_files_for_config(db, config_id, cc=None) -> List[dict]:
+    """فایل‌های .ovpn حساب‌های فعالِ OpenVPN متصل به این سرویس؛ برای دانلود از لینک ساب اختصاصی."""
+    try:
+        rows = db.ssh_accounts_for_config(int(config_id), protocol="openvpn")
+    except Exception:
+        return []
+    if not rows:
+        return []
+    from ssh_credentials import decrypt_credential
+    svc = str(_row(cc, "username") or _row(cc, "display_name") or "").strip() if cc is not None else ""
+    out = []
+    for row in rows:
         try:
-            from ssh_uri import build_ssh_uri
-            out.append(build_ssh_uri(row.get("username"), password, host, int(row.get("port") or 22), remark))
-        except (TypeError, ValueError):
+            profile = decrypt_credential(row.get("credential_enc"))
+        except Exception:
             continue
+        if "<ca>" not in profile or "<key>" not in profile:
+            continue
+        username = re.sub(r"[^A-Za-z0-9_.-]", "", str(row.get("username") or "")) or "openvpn"
+        remark = str(row.get("node_name") or "").strip() or "OpenVPN"
+        if svc and svc not in remark:
+            remark += " " + svc
+        import ssh_hosts
+        eps = ssh_hosts.endpoints(row, "openvpn", row.get("host"), int(row.get("port") or 1194))
+        for pos, ep in enumerate(eps, start=1):
+            tag = f" {ep['remark']}" if ep["remark"] else (f" {pos}" if len(eps) > 1 else "")
+            out.append({"index": len(out) + 1, "remark": remark + tag + " (OpenVPN)",
+                        "filename": f"{username}{'-' + str(pos) if len(eps) > 1 else ''}.ovpn",
+                        "profile": ssh_hosts.rewrite_ovpn_profile(profile, ep["address"], ep["port"])})
+    return out
+
+
+def wg_files_for_config(db, config_id, cc=None) -> List[dict]:
+    """فایل‌های .conf حساب‌های فعالِ WireGuard متصل به این سرویس؛ برای دانلود از لینک ساب اختصاصی."""
+    try:
+        rows = db.ssh_accounts_for_config(int(config_id), protocol="wireguard")
+    except Exception:
+        return []
+    if not rows:
+        return []
+    from ssh_credentials import decrypt_credential
+    svc = str(_row(cc, "username") or _row(cc, "display_name") or "").strip() if cc is not None else ""
+    out = []
+    for row in rows:
+        try:
+            profile = decrypt_credential(row.get("credential_enc"))
+        except Exception:
+            continue
+        if "[Interface]" not in profile or "PrivateKey" not in profile:
+            continue
+        username = re.sub(r"[^A-Za-z0-9_.-]", "", str(row.get("username") or "")) or "wireguard"
+        remark = str(row.get("node_name") or "").strip() or "WireGuard"
+        if svc and svc not in remark:
+            remark += " " + svc
+        import ssh_hosts
+        eps = ssh_hosts.endpoints(row, "wireguard", row.get("host"), int(row.get("port") or 51820))
+        for pos, ep in enumerate(eps, start=1):
+            tag = f" {ep['remark']}" if ep["remark"] else (f" {pos}" if len(eps) > 1 else "")
+            out.append({"index": len(out) + 1, "remark": remark + tag + " (WireGuard)",
+                        "filename": f"{username}{'-' + str(pos) if len(eps) > 1 else ''}.conf",
+                        "profile": ssh_hosts.rewrite_wg_profile(profile, ep["address"], ep["port"])})
     return out
 
 
@@ -781,7 +849,8 @@ def build_series(points: List[tuple], now: Optional[int] = None) -> Optional[dic
 # داده‌ی صفحه‌ی وب
 # ---------------------------------------------------------------------------
 def build_page_data(cc, info: dict, uris: List[str], settings: Dict[str, str], brand: str,
-                    sub_link: str, series: Optional[dict], now: Optional[int] = None) -> dict:
+                    sub_link: str, series: Optional[dict], now: Optional[int] = None,
+                    ovpn: Optional[List[dict]] = None, wg: Optional[List[dict]] = None) -> dict:
     now = now or int(time.time())
     state = compute_state(cc, info, now)
     total = info.get("total") or 0
@@ -801,6 +870,8 @@ def build_page_data(cc, info: dict, uris: List[str], settings: Dict[str, str], b
     if not logo.lower().startswith("https://"):
         logo = ""
     theme = settings.get("dsub_theme") or "auto"
+    ovpn_items = [{"n": f["remark"], "f": f["filename"], "i": f["index"]} for f in (ovpn or [])[:20]]
+    wg_items = [{"n": f["remark"], "f": f["filename"], "i": f["index"]} for f in (wg or [])[:20]]
     return {
         "user": service_name(cc), "brand": brand, "logo": logo,
         "state": state, "online": False,
@@ -817,12 +888,58 @@ def build_page_data(cc, info: dict, uris: List[str], settings: Dict[str, str], b
             "qr": settings.get("dsub_show_qr") == "1",
             "apps": settings.get("dsub_show_apps") == "1",
             "faq": settings.get("dsub_show_faq") == "1",
+            "ovpn": bool(ovpn_items),
+            "wg": bool(wg_items),
         },
         "configs": configs,
+        "ovpn": ovpn_items,
+        "wg": wg_items,
         "apps": resolve_apps(settings),
         "faq": [list(x) for x in resolve_faq(settings)],
         "series": series,
     }
+
+
+# ---------------------------------------------------------------------------
+# قالب اختصاصی صفحه‌ی ساب
+# ---------------------------------------------------------------------------
+CUSTOM_TEMPLATE_MAX = 400_000  # بایت
+_TPL_TOKEN_RE = re.compile(r"__(NONCE|TITLE|THEME|DATA)__")
+_SCRIPT_NO_NONCE_RE = re.compile(r"<script\b(?![^>]*\bnonce\s*=)", re.I)
+
+
+def validate_custom_template(text: str) -> Optional[str]:
+    """None یعنی معتبر (یا خالی)؛ در غیر این‌صورت پیام خطا به فارسی."""
+    text = text or ""
+    if not text.strip():
+        return None
+    if len(text.encode("utf-8")) > CUSTOM_TEMPLATE_MAX:
+        return "حجم قالب بیش از حد مجاز است (حداکثر ۴۰۰ کیلوبایت)."
+    if "__DATA__" not in text:
+        return "قالب باید شامل __DATA__ باشد؛ مثلاً const D=__DATA__; داخل تگ script."
+    return None
+
+
+def pick_template(settings: Dict[str, str]) -> Optional[str]:
+    """اگر قالب اختصاصی روشن و معتبر بود متنش را می‌دهد، وگرنه None (= قالب پیش‌فرض)."""
+    if (settings.get("dsub_custom_template_enabled") or "").strip() != "1":
+        return None
+    text = settings.get("dsub_custom_template") or ""
+    if not text.strip() or validate_custom_template(text):
+        return None
+    return text
+
+
+def render_page_html(template: str, data: dict, title: str, nonce: str) -> str:
+    """جایگذاری __NONCE__ / __TITLE__ / __THEME__ / __DATA__ در یک گذر (مقادیر جایگزین‌شده دوباره اسکن نمی‌شوند).
+
+    به هر تگ <script> که nonce ندارد خودکار nonce اضافه می‌شود تا سازنده‌ی قالب لازم نباشد حواسش به CSP باشد.
+    """
+    import html as html_lib
+    theme = data.get("theme") if data.get("theme") in THEMES else "auto"
+    values = {"NONCE": nonce, "TITLE": html_lib.escape(title), "THEME": theme, "DATA": json_for_script(data)}
+    template = _SCRIPT_NO_NONCE_RE.sub('<script nonce="__NONCE__"', template)
+    return _TPL_TOKEN_RE.sub(lambda m: values[m.group(1)], template)
 
 
 def json_for_script(data) -> str:

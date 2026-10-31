@@ -36,6 +36,7 @@ from .seasons import SeasonsMixin
 from .engagement import EngagementMixin
 from .dedicated_sub import DedicatedSubMixin
 from .usage import UsageMixin
+from .multi_target import MultiTargetMixin
 
 class Database(
     DatabaseBase,
@@ -55,6 +56,7 @@ class Database(
     EngagementMixin,
     DedicatedSubMixin,
     UsageMixin,
+    MultiTargetMixin,
 ):
     pass
 

@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 """
 بک‌اند مینی‌اپ - چندمستأجر (Multi-tenant)
 
@@ -828,6 +829,8 @@ async def api_delete_custom_config(custom_config_id: int, auth=Depends(get_verif
                     "حذف کاربر «%s» از پنل سرور #%s ناموفق بود؛ در هر صورت از لیست کاربر حذف می‌شود.",
                     cc_row["username"], cc_row["panel_server_id"],
                 )
+    from multi_target import delete_linked_panel_users
+    await delete_linked_panel_users(db, custom_config_id)
     removed = db.delete_owned_custom_config(custom_config_id, tg_id, wallet_refund_amount(quote, panel_deleted))
     refunded = 0
     if removed:
@@ -1505,7 +1508,7 @@ async def api_test_config_claim(payload: TestConfigClaim, auth=Depends(require_j
         raise HTTPException(status_code=400, detail=tr("در حال حاضر هیچ پلن کانفیگ تستی تعریف نشده است."))
 
     # همین باگ برای مسیر قدیمی «بانک لینک دستی» هم صدق می‌کرد: قبلاً
-    # take_unused_test_config قبل از mark_test_used صدا زده می‌شد، پس چند
+    # take_unused_test_config قبل از mark_test_used صدا زده می‌شد، پس چند‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
     # ریکوئست همزمان می‌توانستند چند لینک از بانک بردارند. حالا سهمیه اول رزرو
     # می‌شود؛ اگر لینکی برای برداشتن نبود، سهمیه بلافاصله برمی‌گردد.
     if not db.try_reserve_test_slot(tg_id, MAX_TEST_PER_USER):
@@ -3311,6 +3314,24 @@ class SshNodeRenameIn(BaseModel):
     name: str
 
 
+class SshHostIn(BaseModel):
+    id: Optional[str] = None
+    protocol: str
+    remark: str = ""
+    address: str
+    port: Optional[int] = None
+    enabled: bool = True
+
+
+class SshNodeHostsIn(BaseModel):
+    hosts: List[SshHostIn] = []
+
+
+class SshPortRangeIn(BaseModel):
+    port_min: Optional[int] = None
+    port_max: Optional[int] = None
+
+
 class SshPoolIn(BaseModel):
     user_id: int
     limit_gb: float = 0
@@ -3334,6 +3355,7 @@ class SshAccountIn(BaseModel):
 
 class SshAccountActionIn(BaseModel):
     action: str
+    force: bool = False
 
 
 def _ssh_call(fn, *args, **kwargs):
@@ -3379,10 +3401,10 @@ def api_admin_ssh_install_job(job_id: str, auth=Depends(require_full_access_admi
 
 
 @app.delete("/api/admin/ssh/nodes/{node_id}")
-def api_admin_ssh_delete_node(node_id: int, auth=Depends(require_full_access_admin)):
+def api_admin_ssh_delete_node(node_id: int, force: bool = False, auth=Depends(require_full_access_admin)):
     import ssh_service
     admin_id, db, _ = auth
-    _ssh_call(ssh_service.delete_node, db, node_id)
+    _ssh_call(ssh_service.delete_node, db, node_id, force=force)
     db.log_admin_action(admin_id, "ssh_node_delete", f"SSH node #{node_id}", "ssh")
     return {"ok": True}
 
@@ -3394,6 +3416,32 @@ def api_admin_ssh_rename_node(node_id: int, body: SshNodeRenameIn, auth=Depends(
     _ssh_call(ssh_service.rename_node, db, node_id, body.name)
     db.log_admin_action(admin_id, "ssh_node_rename", f"SSH node #{node_id}: {body.name.strip()}", "ssh")
     return {"ok": True}
+
+
+@app.get("/api/admin/ssh/nodes/{node_id}/hosts")
+def api_admin_ssh_node_hosts(node_id: int, auth=Depends(require_full_access_admin)):
+    import ssh_service
+    _, db, _ = auth
+    return _ssh_call(ssh_service.get_node_hosts, db, node_id)
+
+
+@app.put("/api/admin/ssh/nodes/{node_id}/hosts")
+def api_admin_ssh_node_set_hosts(node_id: int, body: SshNodeHostsIn, auth=Depends(require_full_access_admin)):
+    import ssh_service
+    admin_id, db, _ = auth
+    hosts = _ssh_call(ssh_service.set_node_hosts, db, node_id,
+                      [h.model_dump() if hasattr(h, "model_dump") else h.dict() for h in body.hosts])
+    db.log_admin_action(admin_id, "ssh_node_hosts", f"SSH node #{node_id}: {len(hosts)} host(s)", "ssh")
+    return {"ok": True, "hosts": hosts}
+
+
+@app.put("/api/admin/ssh/nodes/{node_id}/ssh-port-range")
+async def api_admin_ssh_node_set_port_range(node_id: int, body: SshPortRangeIn, auth=Depends(require_full_access_admin)):
+    import ssh_service
+    admin_id, db, _ = auth
+    r = await _ssh_acall(ssh_service.set_ssh_port_range, db, node_id, body.port_min, body.port_max)
+    db.log_admin_action(admin_id, "ssh_node_port_range", f"SSH node #{node_id}: {r['ssh_port_min']}-{r['ssh_port_max']}", "ssh")
+    return {"ok": True, **r}
 
 
 @app.post("/api/admin/ssh/nodes/{node_id}/test")
@@ -3444,7 +3492,7 @@ async def api_admin_ssh_create_account(body: SshAccountIn, auth=Depends(require_
 async def api_admin_ssh_account_action(account_id: str, body: SshAccountActionIn, auth=Depends(require_full_access_admin)):
     import ssh_service
     admin_id, db, _ = auth
-    status = await _ssh_acall(ssh_service.account_action, db, account_id, body.action)
+    status = await _ssh_acall(ssh_service.account_action, db, account_id, body.action, force=bool(body.force))
     db.log_admin_action(admin_id, f"ssh_account_{body.action.strip().lower()}", f"SSH account {account_id}", "ssh")
     return {"ok": True, "account_id": account_id, "status": status}
 
@@ -3580,6 +3628,7 @@ def _clean_c2c_card_number(raw: str) -> str:
 def api_admin_list_c2c_cards(auth=Depends(require_admin)):
     _, db, _ = auth
     return [dict(r) for r in db.list_card_to_card_cards()]
+#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 
 
 @app.post("/api/admin/card-to-card/cards")
@@ -4400,7 +4449,7 @@ async def api_plisio_webhook(request: Request, tenant: Tenant = Depends(get_tena
 
 # ---------------------------------------------------------------------------
 # گردونه‌ی شانس
-# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 
 @app.get("/api/wheel")
 def api_wheel_status(auth=Depends(get_verified_user)):
@@ -7339,6 +7388,8 @@ async def api_admin_custom_config_delete(custom_config_id: int, auth=Depends(req
                     "حذف کاربر «%s» از پنل سرور #%s ناموفق بود؛ در هر صورت از دیتابیس حذف می‌شود.",
                     cc["username"], cc["panel_server_id"],
                 )
+    from multi_target import delete_linked_panel_users
+    await delete_linked_panel_users(db, custom_config_id)
     db.delete_owned_custom_config(custom_config_id, cc["user_id"])
     db.log_admin_action(
         admin_id, "custom_config_delete_admin",
@@ -7651,3 +7702,5 @@ def _verify_web_turnstile(request: Request) -> None:
 
 
 app.mount("/", NoCacheStaticFiles(directory=STATIC_DIR, html=True), name="static")
+#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
+# 		   		 		  	 	 		 		   		  	 	 		 			  		 				 			  	 

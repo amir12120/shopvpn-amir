@@ -69,10 +69,10 @@ async def api_web_catalog(tenant: Tenant = Depends(get_tenant)):
     store_name = render_stored_setting("store_name", tenant.db.get_setting("store_name", "⚡ SHOP VPN"))
     return {
         "store_name": store_name,
-        "logo": tenant.db.get_setting("web_store_logo", ""),
-        "tagline": tenant.db.get_setting("web_store_tagline", ""),
-        "primary_color": tenant.db.get_setting("web_store_primary_color", ""),
-        "support_url": tenant.db.get_setting("web_store_support_url", ""),
+        "logo": "",
+        "tagline": "",
+        "primary_color": "",
+        "support_url": "",
         "bot_url": f"https://t.me/{username}" if username else "",
         "categories": categories,
     }
@@ -375,10 +375,73 @@ def _seo_base(request: Request) -> str:
     return f"{proto}://{host}".rstrip("/")
 
 
+@router.get("/api/web/world-map")
+async def web_world_map():
+    """مسیر SVG خطوط ساحلی برای «نقشه زنده شبکه» صفحه اول (همان کش world_map.py پنل ادمین؛
+    مرورگر مشتری هیچ‌وقت مستقیم به CDN وصل نمی‌شود چون CSP اجازه‌اش را نمی‌دهد)."""
+    import world_map
+    return await world_map.get_world_map()
+
+
+@router.get("/api/web/world-countries")
+async def web_world_countries():
+    """مرز کشورها (برای رنگ‌کردن کشورهای دارای سرور روی «نقشه زنده شبکه»)؛ کش روی دیسک سرور."""
+    import world_map
+    return await world_map.get_countries()
 
 
 _NETMAP_TTL = 20
-_netmap_cache = {"at": 0.0, "data": None}
+_netmap_cache: dict = {"at": 0.0, "data": None}
+_NETMAP_HIST_STEP = 60      # حداقل فاصله‌ی دو نمونه‌ی تاریخچه (ثانیه)
+_NETMAP_HIST_MAX = 48       # تعداد نمونه‌ی نگه‌داری‌شده برای هر لوکیشن
+_netmap_hist: dict = {}     # id -> {"at": float, "pts": [ms|None, ...]}  (در حافظه؛ با ری‌استارت ریست می‌شود)
+
+
+def _netmap_overrides(db: Database) -> list:
+    """تنظیم اختیاری `netmap_locations` (JSON) برای اصلاح دستی مکان وقتی تشخیص خودکار
+    (مثلاً کانفیگ پشت CDN) غلط است. نمونه:
+    [{"product_ids":[3,4], "match":"آلمان", "cc":"de", "city":"Frankfurt", "city_fa":"فرانکفورت", "lat":50.11, "lon":8.68}]
+    هر محصولی که با product_ids یا match (زیررشته‌ی نام) بخورد فقط در همین مکان نمایش داده می‌شود."""
+    import json
+    try:
+        raw = db.get_setting("netmap_locations", "") or ""
+        data = json.loads(raw) if raw.strip() else []
+    except Exception:
+        return []
+    out = []
+    for o in data if isinstance(data, list) else []:
+        try:
+            out.append({
+                "ids": {int(x) for x in (o.get("product_ids") or [])},
+                "match": str(o.get("match") or "").strip().lower(),
+                "cc": str(o.get("cc") or "").lower()[:2],
+                "city": str(o.get("city") or ""),
+                "city_fa": str(o.get("city_fa") or ""),
+                "lat": float(o["lat"]), "lon": float(o["lon"]),
+            })
+        except Exception:
+            continue
+    return out
+
+
+def _apply_netmap_overrides(products: list, located: dict, overrides: list) -> None:
+    for p in products:
+        name = str(p.get("name") or "").lower()
+        for o in overrides:
+            if p["id"] in o["ids"] or (o["match"] and o["match"] in name):
+                key = (round(o["lat"], 1), round(o["lon"], 1))
+                located[p["id"]] = {key: {"cc": o["cc"], "city": o["city"], "city_fa": o["city_fa"],
+                                          "lat": o["lat"], "lon": o["lon"], "targets": []}}
+                break
+
+
+def _netmap_history(node_id: str, ms, now: float) -> list:
+    h = _netmap_hist.setdefault(node_id, {"at": 0.0, "pts": []})
+    if now - h["at"] >= _NETMAP_HIST_STEP or not h["pts"]:
+        h["at"] = now
+        h["pts"].append(ms)
+        del h["pts"][:-_NETMAP_HIST_MAX]
+    return list(h["pts"])
 
 
 def _network_map_products(db: Database) -> list:
@@ -401,25 +464,30 @@ async def _network_map_build(db: Database) -> dict:
     from datetime import datetime, timezone
     products = await asyncio.to_thread(_network_map_products, db)
     located = await config_geo.locate_products(db, products)
-    groups = {}
+    _apply_netmap_overrides(products, located, await asyncio.to_thread(_netmap_overrides, db))
+    groups: dict = {}
     for p in products:
         for key, loc in located.get(p["id"], {}).items():
             g = groups.setdefault(key, {
                 "id": "l%d_%d" % (round(loc["lat"] * 10), round(loc["lon"] * 10)),
-                "cc": loc["cc"], "city": loc["city"], "city_fa": "", "lat": loc["lat"], "lon": loc["lon"],
+                "cc": loc["cc"], "city": loc["city"], "city_fa": loc.get("city_fa", ""), "lat": loc["lat"], "lon": loc["lon"],
                 "targets": [], "products": [],
             })
-            for tgt in loc["targets"]:
-                if tgt not in g["targets"] and len(g["targets"]) < config_geo.TARGETS_PER_LOCATION:
-                    g["targets"].append(tgt)
-            g["products"].append(dict(p))
+            for t in loc["targets"]:
+                if t not in g["targets"] and len(g["targets"]) < config_geo.TARGETS_PER_LOCATION:
+                    g["targets"].append(t)
+            g["products"].append({k: v for k, v in p.items()})
     nodes = []
     checked = datetime.now(timezone.utc).isoformat()
     ordered = list(groups.values())
-    statuses = await asyncio.gather(*(config_geo.location_status(g["targets"]) for g in ordered))
-    for g, status in zip(ordered, statuses):
+    import time as _t
+    probes = await asyncio.gather(*(config_geo.location_probe(g["targets"]) for g in ordered))
+    mono = _t.monotonic()
+    for g, probe in zip(ordered, probes):
         g.pop("targets")
-        g["status"] = status
+        g["status"] = probe["status"]
+        g["latency_ms"] = probe["latency_ms"]
+        g["history"] = _netmap_history(g["id"], probe["latency_ms"] if probe["status"] == "up" else None, mono)
         g["last_check"] = checked
         g["products_total"] = len(g["products"])
         g["products_in_stock"] = sum(1 for x in g["products"] if x["in_stock"])
@@ -429,29 +497,30 @@ async def _network_map_build(db: Database) -> dict:
 
 
 @router.get("/api/web/network-map")
-async def web_network_map(tenant: Tenant = Depends(get_tenant)):
-    """Store locations derived from the config links of each product."""
+async def web_network_map(request: Request, tenant: Tenant = Depends(get_tenant)):
+    """Store locations derived from the config links of each product, with per-location products."""
     _web_main_only(tenant)
     import time
+    from datetime import datetime, timezone
     now = time.monotonic()
     if _netmap_cache["data"] is not None and now - _netmap_cache["at"] < _NETMAP_TTL:
-        return _netmap_cache["data"]
-    data = await _network_map_build(tenant.db)
-    from datetime import datetime, timezone
-    data["updated_at"] = datetime.now(timezone.utc).isoformat()
-    _netmap_cache["at"], _netmap_cache["data"] = now, data
-    return data
-
-
-@router.get("/api/web/world-map")
-async def web_world_map():
-    """مسیر SVG خطوط ساحلی برای «نقشه زنده شبکهٔ» صفحه اول.
-
-    مثل کش نقشهٔ پنل ادمین، از سرور خودمان سرو می‌شود تا مرورگر مشتری
-    مستقیم به CDN خارجی وصل نشود (CSP هم اجازه نمی‌دهد).
-    """
-    import world_map
-    return await world_map.get_world_map()
+        data = _netmap_cache["data"]
+    else:
+        data = await _network_map_build(tenant.db)
+        data["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _netmap_cache["at"], _netmap_cache["data"] = now, data
+    # مبدأ مسیرها: کشور بازدیدکننده از هدر CDN (کلودفلر و مشابه)؛ بدون هدر = تهران (پیش‌فرض کلاینت)
+    cc = (request.headers.get("cf-ipcountry") or request.headers.get("x-vercel-ip-country") or "").strip().upper()
+    origin = None
+    if len(cc) == 2 and cc.isalpha() and cc not in ("XX", "T1"):
+        try:
+            import geo_scan
+            info = geo_scan.COUNTRY_INFO.get(cc)
+            if info:
+                origin = {"cc": cc.lower(), "lat": info[1], "lon": info[2]}
+        except Exception:
+            origin = None
+    return {**data, "origin": origin}
 
 
 @router.get("/robots.txt", include_in_schema=False)
@@ -481,3 +550,6 @@ def seo_sitemap(request: Request):
     xml = ('<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" '
            'xmlns:xhtml="http://www.w3.org/1999/xhtml">' + urls + '</urlset>')
     return Response(content=xml, media_type="application/xml; charset=utf-8", headers={"Cache-Control": "public, max-age=3600"})
+
+
+

@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 """
 منطق مشترکِ اجرای واقعیِ «تمدید سرویس» از حساب کاربری، برای استفاده در همه‌ی
 مسیرهای تایید پرداخت (تایید دستی کارت‌به‌کارت در پنل ادمین، تایید خودکار
@@ -63,6 +64,16 @@ async def renew_pooled_service(db, provider, username, pool, mode, add_volume, a
         username, add_volume_gb=0, add_days=add_days, reset_usage=False,
         preserve_remaining=False, unlimited_volume=False, **(user_kwargs or {}),
     )
+    for link in db.panel_links_for_pool(pool["id"]):
+        try:
+            link_server = db.get_panel_server(link["panel_server_id"])
+            await get_provider(link_server).update_user(
+                link["username"], add_volume_gb=0, add_days=add_days, reset_usage=False,
+                preserve_remaining=False, unlimited_volume=False,
+            )
+        except Exception:
+            logger.exception("multi-panel renewal: extra panel renew failed (pool=%s, link=%s)",
+                             pool["id"], link["id"])
     new_limit_gb = _renew_quota_pool(db, pool, mode, add_volume, add_days, fresh=fresh)
     try:
         from quota_reconciler import QuotaReconciler
@@ -72,6 +83,7 @@ async def renew_pooled_service(db, provider, username, pool, mode, add_volume, a
     except Exception:
         logger.exception("combined renewal: post-renew pool sync failed (pool=%s)", pool["id"])
     return new_limit_gb
+#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 
 
 class RenewalError(Exception):
@@ -171,3 +183,5 @@ async def execute_renewal(db, order) -> str:
         return "✅ سرویس شما با موفقیت تمدید شد."
 
     raise RenewalError("نوع سرویس برای تمدید نامعتبر است.")
+#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
+# 		   		 		  	 	 		 		   		  	 	 		 			  		 				 			  	 

@@ -8,6 +8,8 @@
 مسیرها:
     GET /s/{token}              اپ VPN → ساب (با هدرها/کانفیگ نمایشی/خط اول)؛ مرورگر → صفحه‌ی وب
     GET /s/{token}/qr.png       کیوآر لینک ساب (یا ?i=N برای کانفیگ شماره‌ی N)
+    GET /s/{token}/ovpn/{n}     دانلود فایل OpenVPN شماره‌ی n (.ovpn) برای سرویس‌های دارای OpenVPN
+    GET /s/{token}/wg/{n}       دانلود فایل WireGuard شماره‌ی n (.conf) برای سرویس‌های دارای WireGuard
     GET /sub/smart/{token}      اشتراک هوشمند (ادغام چند سرویس/پنل در یک لینک)
     GET /healthz                سلامت سرویس
 
@@ -27,7 +29,7 @@ import time
 from collections import deque
 from contextlib import asynccontextmanager
 from io import BytesIO
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -184,14 +186,17 @@ def _load_template() -> str:
     return _page_template
 
 
-def render_page(data: dict, title: str) -> Response:
-    import html as html_lib
+def render_page(data: dict, title: str, settings: Optional[Dict[str, str]] = None) -> Response:
     nonce = secrets.token_urlsafe(12)
-    html = (_load_template()
-            .replace("__NONCE__", nonce)
-            .replace("__TITLE__", html_lib.escape(title))
-            .replace("__THEME__", data["theme"] if data["theme"] in ds.THEMES else "auto")
-            .replace("__DATA__", ds.json_for_script(data)))
+    html = None
+    custom = ds.pick_template(settings or {})
+    if custom:
+        try:
+            html = ds.render_page_html(custom, data, title, nonce)
+        except Exception:
+            log.exception("custom sub page template failed; falling back to default")
+    if html is None:
+        html = ds.render_page_html(_load_template(), data, title, nonce)
     csp = ("default-src 'none'; script-src 'nonce-%s'; style-src 'unsafe-inline' https://fonts.googleapis.com; "
            "font-src https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'none'; "
            "frame-ancestors 'none'; base-uri 'none'; form-action 'none'" % nonce)
@@ -216,6 +221,31 @@ def _forward_query(url: str, query: Dict[str, str]) -> str:
         return url
     from urllib.parse import urlencode
     return url + ("&" if "?" in url else "?") + urlencode(extra)
+
+
+async def _linked_panel_uris(cc, query: Dict[str, str], ua: str, ttl: int) -> List[str]:
+    """کانفیگ‌های پنل‌های اضافه‌ی همین سرویس (محصول چندپنلی)؛ فقط وقتی ساب اختصاصی روشن است."""
+    try:
+        links = await asyncio.to_thread(db.panel_links_for_config, cc["id"])
+    except Exception:
+        return []
+    if not links:
+        return []
+
+    async def one(link):
+        try:
+            up = await cache.get(_forward_query(link["subscription_url"], query), ua, ttl)
+        except Exception:
+            return []
+        return ds.extract_uris(up.body) if up.status == 200 and up.body else []
+
+    out, seen = [], set()
+    for part in await asyncio.gather(*[one(l) for l in links]):
+        for uri in part:
+            if uri not in seen:
+                seen.add(uri)
+                out.append(uri)
+    return out
 
 
 async def _log(config_id, request: Request, kind: str, status: int, settings: Dict[str, str]):
@@ -292,9 +322,18 @@ async def sub_endpoint(request: Request) -> Response:
         if pool_info:
             info = pool_info
         uris = ds.extract_uris(up.body) if ok else []
+        if not uris:
+            # تشخیص: چرا هیچ کانفیگی از پنل استخراج نشد؟ (وضعیت، نوع پاسخ و ابتدای بدنه)
+            log.warning("sub-diag: no uris cc=%s url=%s status=%s ok=%s fresh=%s stale=%s ctype=%s len=%s head=%r",
+                        cc["id"], str(cc["subscription_url"])[:80], up.status, ok, up.fresh, up.stale,
+                        (up.headers or {}).get("content-type"), len(up.body or b""),
+                        (up.body or b"")[:160])
+        ovpn_files = await asyncio.to_thread(ds.ovpn_files_for_config, db, cc["id"], cc)
+        wg_files = await asyncio.to_thread(ds.wg_files_for_config, db, cc["id"], cc)
         if ok:
-            # حساب‌های SSH متصل به همین سرویس را در صفحه‌ی اشتراک هم نشان بده.
+            # حساب‌های SSH و پنل‌های اضافه‌ی متصل به همین سرویس را در صفحه‌ی اشتراک هم نشان بده.
             uris.extend(await asyncio.to_thread(ds.ssh_uris_for_config, db, cc["id"], cc))
+            uris.extend(await _linked_panel_uris(cc, {}, PAGE_UA, ttl))
         if ok and up.fresh:
             await _snapshot_usage(cc, up.headers)
         series = None
@@ -303,10 +342,10 @@ async def sub_endpoint(request: Request) -> Response:
             points = await asyncio.to_thread(db.ds_usage_points, cc["id"], now - 31 * 86400)
             series = ds.build_series(points, now)
         data = ds.build_page_data(cc, info, uris, settings, brand, page_url or str(request.url).split("?")[0],
-                                  series)
+                                  series, ovpn=ovpn_files, wg=wg_files)
         data["live"] = ok
         await _log(cc["id"], request, "page", 200, settings)
-        return render_page(data, f"{brand} · اشتراک {ds.service_name(cc)}".strip(" ·"))
+        return render_page(data, f"{brand} · اشتراک {ds.service_name(cc)}".strip(" ·"), settings)
 
     # --- اپ VPN
     try:
@@ -325,6 +364,7 @@ async def sub_endpoint(request: Request) -> Response:
             for key in ("upload", "download", "total", "expire") if key in pool_info
         )
     extra_uris = await asyncio.to_thread(ds.ssh_uris_for_config, db, cc["id"], cc)
+    extra_uris = list(extra_uris) + await _linked_panel_uris(cc, query, ua, ttl)
     reply = ds.compose_client_reply(up.status, up.headers, up.body, cc, settings, brand, page_url,
                                     extra_uris=extra_uris)
     if reply is None:
@@ -386,6 +426,56 @@ async def qr_endpoint(request: Request) -> Response:
         log.exception("qr generation failed")
         return PlainTextResponse("QR unavailable", status_code=503)
     return Response(png, media_type="image/png", headers={"cache-control": "private, max-age=300"})
+
+
+# ---------------------------------------------------------------------------
+# /s/{token}/ovpn/{n}
+# ---------------------------------------------------------------------------
+async def ovpn_endpoint(request: Request) -> Response:
+    ip = client_ip(request)
+    if not limiter.allow("ok:" + ip, RATE_OK):
+        return PlainTextResponse("Too many requests", status_code=429, headers={"retry-after": "60"})
+    token = request.path_params["token"]
+    cc = await asyncio.to_thread(db.ds_get_config_by_token, token)
+    if cc is None or str(cc["status"] or "").lower() == "deleted" or not ds.is_enabled(db):
+        if not limiter.allow("miss:" + ip, RATE_MISS):
+            return PlainTextResponse("Too many requests", status_code=429)
+        return _not_found()
+    files = await asyncio.to_thread(ds.ovpn_files_for_config, db, cc["id"], cc)
+    item = next((f for f in files if f["index"] == request.path_params["n"]), None)
+    if item is None:
+        if not limiter.allow("miss:" + ip, RATE_MISS):
+            return PlainTextResponse("Too many requests", status_code=429)
+        return _not_found()
+    settings = await asyncio.to_thread(ds.all_settings, db)
+    await _log(cc["id"], request, "ovpn", 200, settings)
+    headers = {"cache-control": "no-store", "content-disposition": f'attachment; filename="{item["filename"]}"'}
+    return _raw(200, headers, "application/x-openvpn-profile", item["profile"].encode("utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# /s/{token}/wg/{n}
+# ---------------------------------------------------------------------------
+async def wg_endpoint(request: Request) -> Response:
+    ip = client_ip(request)
+    if not limiter.allow("ok:" + ip, RATE_OK):
+        return PlainTextResponse("Too many requests", status_code=429, headers={"retry-after": "60"})
+    token = request.path_params["token"]
+    cc = await asyncio.to_thread(db.ds_get_config_by_token, token)
+    if cc is None or str(cc["status"] or "").lower() == "deleted" or not ds.is_enabled(db):
+        if not limiter.allow("miss:" + ip, RATE_MISS):
+            return PlainTextResponse("Too many requests", status_code=429)
+        return _not_found()
+    files = await asyncio.to_thread(ds.wg_files_for_config, db, cc["id"], cc)
+    item = next((f for f in files if f["index"] == request.path_params["n"]), None)
+    if item is None:
+        if not limiter.allow("miss:" + ip, RATE_MISS):
+            return PlainTextResponse("Too many requests", status_code=429)
+        return _not_found()
+    settings = await asyncio.to_thread(ds.all_settings, db)
+    await _log(cc["id"], request, "wg", 200, settings)
+    headers = {"cache-control": "no-store", "content-disposition": f'attachment; filename="{item["filename"]}"'}
+    return _raw(200, headers, "application/x-wireguard-profile", item["profile"].encode("utf-8"))
 
 
 # ---------------------------------------------------------------------------
@@ -508,6 +598,8 @@ app = Starlette(
     routes=[
         Route("/s/{token}", sub_endpoint, methods=["GET", "HEAD"]),
         Route("/s/{token}/qr.png", qr_endpoint, methods=["GET"]),
+        Route("/s/{token}/ovpn/{n:int}", ovpn_endpoint, methods=["GET"]),
+        Route("/s/{token}/wg/{n:int}", wg_endpoint, methods=["GET"]),
         Route("/sub/smart/{token}", smart_endpoint, methods=["GET", "HEAD"]),
         Route("/healthz", healthz, methods=["GET"]),
         Route("/robots.txt", robots, methods=["GET"]),

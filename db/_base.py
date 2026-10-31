@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 from .constants import *
 
 class DatabaseBase:
@@ -1232,6 +1233,27 @@ class DatabaseBase:
                 );
                 CREATE INDEX IF NOT EXISTS idx_ssh_accounts_user ON ssh_accounts(user_id,status);
 
+                CREATE TABLE IF NOT EXISTS product_extra_targets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    product_id INTEGER NOT NULL,
+                    kind TEXT NOT NULL CHECK(kind IN ('panel','ssh')),
+                    target_id INTEGER NOT NULL,
+                    position INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(product_id,kind,target_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_product_extra_targets_product ON product_extra_targets(product_id);
+
+                CREATE TABLE IF NOT EXISTS config_panel_links (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    custom_config_id INTEGER NOT NULL,
+                    panel_server_id INTEGER NOT NULL,
+                    username TEXT NOT NULL,
+                    subscription_url TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_config_panel_links_cc ON config_panel_links(custom_config_id);
+
                 CREATE TABLE IF NOT EXISTS custom_config_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     custom_config_id INTEGER NOT NULL,
@@ -1614,7 +1636,7 @@ class DatabaseBase:
             # باقی مانده باشد (مثلاً ادمین موقع حذف نماینده گزینه‌ی «پاک نشود» را
             # زده، و یک نماینده‌ی تازه بعداً با همان یوزرنیم بات ثبت‌نام کرده - چون
             # مسیر فایل فقط از روی یوزرنیم بات ساخته می‌شود). قبلاً چون همه‌جا از
-            # CREATE TABLE IF NOT EXISTS استفاده شده، owner قدیمی در admins دست‌نخورده
+            # CREATE TABLE IF NOT EXISTS استفاده شده، owner قدیمی در admins دست‌نخورده‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
             # می‌ماند و INSERT OR IGNORE بالا owner جدید را فقط *اضافه* می‌کند - نتیجه
             # دو ردیف با role='owner' بود و get_owner_telegram_id() (که LIMIT 1 می‌زند)
             # می‌توانست owner قدیمی و غلط را برگرداند، یعنی کل اعتبار حجمی/تشخیص
@@ -1746,6 +1768,8 @@ class DatabaseBase:
             conn.execute("ALTER TABLE ssh_accounts ADD COLUMN credential_enc TEXT")
         if self._column_exists(conn, "ssh_accounts", "id") and not self._column_exists(conn, "ssh_accounts", "custom_config_id"):
             conn.execute("ALTER TABLE ssh_accounts ADD COLUMN custom_config_id INTEGER")
+        if self._column_exists(conn, "ssh_accounts", "id") and not self._column_exists(conn, "ssh_accounts", "protocol"):
+            conn.execute("ALTER TABLE ssh_accounts ADD COLUMN protocol TEXT NOT NULL DEFAULT 'ssh'")
 
         # Additive migration for unified quota counter epochs. Older DBs stored
         # only the provider's raw used_bytes, which could move backwards after a panel reset.
@@ -1907,6 +1931,12 @@ class DatabaseBase:
             ("location_change_log", "old_subscription_url", "TEXT"),
             ("panel_servers", "capacity_alert_sent", "INTEGER DEFAULT 0"),
             ("panel_servers", "used_for_reseller", "INTEGER DEFAULT 0"),
+            ("panel_servers", "geo_cc", "TEXT"),
+            ("panel_servers", "geo_city", "TEXT"),
+            ("panel_servers", "geo_city_fa", "TEXT"),
+            ("panel_servers", "geo_lat", "REAL"),
+            ("panel_servers", "geo_lon", "REAL"),
+            ("panel_servers", "geo_manual", "INTEGER DEFAULT 0"),
             ("panel_servers", "xui_inbound_id", "INTEGER"),
             ("panel_servers", "xui_sub_base_url", "TEXT"),
             ("panel_servers", "xui_sub_base_urls", "TEXT"),
@@ -1921,6 +1951,7 @@ class DatabaseBase:
             ("products", "auto_provision_volume_gb", "INTEGER"),
             ("products", "provision_server_id", "INTEGER"),
             ("products", "provision_ssh_node_id", "INTEGER"),
+            ("products", "provision_ssh_protocol", "TEXT DEFAULT 'ssh'"),
             ("products", "extra_user_price", "INTEGER DEFAULT 0"),
             ("products", "max_users", "INTEGER DEFAULT 0"),
             ("products", "base_users", "INTEGER DEFAULT 0"),
@@ -2002,7 +2033,7 @@ class DatabaseBase:
             ("admin_logs", "record_id", "TEXT"),
             # حذف کانفیگ/سفارش توسط خود کاربر (از منوی «سفارش‌های من» در بات یا
             # مینی‌اپ)؛ سفارش‌هایی که همه‌ی کانفیگ‌هایشان حذف شده به این صورت از
-            # لیست کاربر مخفی می‌شوند ولی برای گزارش‌های ادمین دست‌نخورده می‌مانند.
+            # لیست کاربر مخفی می‌شوند ولی برای گزارش‌های ادمین دست‌نخورده می‌مانند.‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
             ("orders", "user_deleted", "INTEGER DEFAULT 0"),
             ("users", "force_join_exempt", "INTEGER DEFAULT 0"),
             ("users", "terms_accepted_at", "TEXT"),
@@ -2217,3 +2248,5 @@ class DatabaseBase:
     # ادمین‌ها
     # -----------------------------------------------------------------------
 
+#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
+# 		   		 		  	 	 		 		   		  	 	 		 			  		 				 			  	 

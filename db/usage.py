@@ -104,10 +104,14 @@ class UsageMixin:
 
     def register_ssh_account(self, node_id: int, user_id: int, account_id: str, username: str,
                               host: str, port: int = 22, quota_pool_id: int = None,
-                              expires_at: str = None, credential_enc: str = None) -> int:
+                              expires_at: str = None, credential_enc: str = None,
+                              protocol: str = "ssh") -> int:
         """ذخیره حساب SSH پس از موفقیت ساخت واقعی روی Provider."""
         if int(user_id) <= 0 or not str(account_id or "").strip() or not str(username or "").strip():
             raise ValueError("اطلاعات حساب SSH ناقص است")
+        protocol = str(protocol or "ssh").strip().lower()
+        if protocol not in {"ssh", "openvpn", "wireguard"}:
+            raise ValueError("پروتکل حساب نامعتبر است")
         if expires_at:
             expires_at = _normalize_timestamp(expires_at)
         with self._get_conn() as conn:
@@ -120,10 +124,10 @@ class UsageMixin:
                     raise ValueError("استخر سهمیه متعلق به کاربر نیست یا فعال نیست")
             now = datetime.now(timezone.utc).isoformat()
             cur = conn.execute(
-                "INSERT INTO ssh_accounts (node_id,user_id,quota_pool_id,account_id,username,host,port,status,expires_at,credential_enc,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,?,?,'active',?,?,?,?)",
+                "INSERT INTO ssh_accounts (node_id,user_id,quota_pool_id,account_id,username,host,port,status,expires_at,credential_enc,protocol,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,'active',?,?,?,?,?)",
                 (int(node_id), int(user_id), int(quota_pool_id) if quota_pool_id is not None else None,
-                 str(account_id).strip(), str(username).strip(), str(host).strip(), int(port), expires_at, credential_enc, now, now),
+                 str(account_id).strip(), str(username).strip(), str(host).strip(), int(port), expires_at, credential_enc, protocol, now, now),
             )
             account_row_id = int(cur.lastrowid)
             if quota_pool_id is not None:
@@ -143,7 +147,7 @@ class UsageMixin:
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         with self._get_conn() as conn:
             rows = conn.execute(
-                "SELECT a.id,a.node_id,a.user_id,a.quota_pool_id,a.account_id,a.username,a.host,a.port,a.status,a.expires_at,a.created_at,a.updated_at,n.name AS node_name,n.node_type FROM ssh_accounts a "
+                "SELECT a.id,a.node_id,a.user_id,a.quota_pool_id,a.account_id,a.username,a.host,a.port,a.protocol,a.status,a.expires_at,a.created_at,a.updated_at,n.name AS node_name,n.node_type FROM ssh_accounts a "
                 "JOIN ssh_nodes n ON n.id=a.node_id" + where + " ORDER BY a.id DESC", params
             ).fetchall()
             return [dict(r) for r in rows]
@@ -169,11 +173,12 @@ class UsageMixin:
                                (int(custom_config_id), str(account_id)))
             return bool(cur.rowcount)
 
-    def ssh_accounts_for_config(self, custom_config_id: int) -> list:
+    def ssh_accounts_for_config(self, custom_config_id: int, protocol: str = "ssh") -> list:
         with self._get_conn() as conn:
             rows = conn.execute(
-                "SELECT a.account_id,a.username,a.host,a.port,a.credential_enc,n.name AS node_name FROM ssh_accounts a "
-                "JOIN ssh_nodes n ON n.id=a.node_id WHERE a.custom_config_id=? AND a.status='active' ORDER BY a.id", (int(custom_config_id),)
+                "SELECT a.account_id,a.username,a.host,a.port,a.credential_enc,n.name AS node_name,n.config_json AS node_config_json FROM ssh_accounts a "
+                "JOIN ssh_nodes n ON n.id=a.node_id WHERE a.custom_config_id=? AND a.status='active' AND a.protocol=? ORDER BY a.id",
+                (int(custom_config_id), str(protocol))
             ).fetchall()
             return [dict(r) for r in rows]
 
@@ -370,6 +375,28 @@ class UsageMixin:
             sql = "SELECT * FROM ssh_nodes" + (" WHERE status='active'" if active_only else "") + " ORDER BY id DESC"
             return [dict(r) for r in conn.execute(sql).fetchall()]
 
+    def get_ssh_node(self, node_id: int):
+        with self._get_conn() as conn:
+            row = conn.execute("SELECT * FROM ssh_nodes WHERE id=?", (int(node_id),)).fetchone()
+            return dict(row) if row else None
+
+    def replace_ssh_node_config_keys(self, node_id: int, updates: dict, remove: tuple = ()) -> bool:
+        """مثل merge_ssh_node_config ولی کلیدهای remove هم از config_json پاک می‌شوند."""
+        with self._get_conn() as conn:
+            row = conn.execute("SELECT config_json FROM ssh_nodes WHERE id=?", (int(node_id),)).fetchone()
+            if not row:
+                return False
+            try:
+                config = json.loads(row["config_json"] or "{}")
+            except (TypeError, ValueError):
+                config = {}
+            for key in remove:
+                config.pop(key, None)
+            config.update(updates or {})
+            cur = conn.execute("UPDATE ssh_nodes SET config_json=?,updated_at=? WHERE id=?",
+                               (json.dumps(config, ensure_ascii=False), datetime.now(timezone.utc).isoformat(), int(node_id)))
+            return bool(cur.rowcount)
+
     def update_ssh_node_name(self, node_id: int, name: str) -> bool:
         name = str(name or "").strip()
         if not name or len(name) > 80:
@@ -389,6 +416,21 @@ class UsageMixin:
             conn.execute("DELETE FROM ssh_accounts WHERE node_id=?", (int(node_id),))
             cur = conn.execute("DELETE FROM ssh_nodes WHERE id=?", (int(node_id),))
             return cur.rowcount > 0
+
+    def merge_ssh_node_config(self, node_id: int, updates: dict) -> bool:
+        """به‌روزرسانی بخشی از config_json نود بدون پاک شدن کلیدهای دیگر."""
+        with self._get_conn() as conn:
+            row = conn.execute("SELECT config_json FROM ssh_nodes WHERE id=?", (int(node_id),)).fetchone()
+            if not row:
+                return False
+            try:
+                config = json.loads(row["config_json"] or "{}")
+            except (TypeError, ValueError):
+                config = {}
+            config.update(updates or {})
+            cur = conn.execute("UPDATE ssh_nodes SET config_json=?,updated_at=? WHERE id=?",
+                               (json.dumps(config, ensure_ascii=False), datetime.now(timezone.utc).isoformat(), int(node_id)))
+            return bool(cur.rowcount)
 
     def update_ssh_node_status(self, node_id: int, status: str, last_error: str = None) -> bool:
         if status not in {"pending", "active", "degraded", "disabled", "error"}:

@@ -16,7 +16,11 @@ import aiohttp
 
 
 class SSHProviderError(RuntimeError):
-    pass
+    http_status = None
+
+
+class SSHAgentUnreachable(SSHProviderError):
+    """Agent پاسخ نداد (سرور خاموش/حذف‌شده، فایروال، DNS، timeout یا خطای TLS)؛ با خطای HTTP خود Agent فرق دارد."""
 
 
 @dataclass
@@ -50,8 +54,12 @@ class BaseSSHProvider(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def create_account(self, username: str, limit_bytes: int, expires_at: str = None) -> SSHAccountResult:
+    async def create_account(self, username: str, limit_bytes: int, expires_at: str = None,
+                             protocol: str = "ssh") -> SSHAccountResult:
         raise NotImplementedError
+
+    async def get_info(self) -> dict:
+        return {}
 
     @abstractmethod
     async def get_usage(self, account_id: str) -> dict:
@@ -112,7 +120,9 @@ class LinuxAgentSSHProvider(BaseSSHProvider):
                     raw = await response.text()
                     if response.status >= 400:
                         safe_detail = raw[:240].replace("\n", " ")
-                        raise SSHProviderError(f"Linux Agent HTTP {response.status}: {safe_detail}")
+                        err = SSHProviderError(f"Linux Agent HTTP {response.status}: {safe_detail}")
+                        err.http_status = response.status
+                        raise err
                     try:
                         return json.loads(raw) if raw else {}
                     except ValueError as exc:
@@ -120,23 +130,74 @@ class LinuxAgentSSHProvider(BaseSSHProvider):
         except SSHProviderError:
             raise
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            raise SSHProviderError(f"ارتباط با Linux Agent برقرار نشد: {type(exc).__name__}") from exc
+            raise SSHAgentUnreachable(f"ارتباط با Linux Agent برقرار نشد: {type(exc).__name__}") from exc
+        except OSError as exc:  # مثلاً ssl/socket خطاهایی که aiohttp بسته‌بندی نکرده
+            raise SSHAgentUnreachable(f"ارتباط با Linux Agent برقرار نشد: {type(exc).__name__}") from exc
 
     async def test_connection(self) -> bool:
         data = await self._request("GET", "/v1/accounts")
         return isinstance(data.get("accounts"), list)
 
-    async def create_account(self, username: str, limit_bytes: int, expires_at: str = None) -> SSHAccountResult:
-        # Password is generated here and returned once to the caller; never persisted by this provider.
+    async def get_info(self) -> dict:
+        data = await self._request("GET", "/v1/info")
+        return data if isinstance(data, dict) else {}
+
+    async def create_account(self, username: str, limit_bytes: int, expires_at: str = None,
+                             protocol: str = "ssh") -> SSHAccountResult:
+        protocol = str(protocol or "ssh").strip().lower()
+        if protocol == "openvpn":
+            account_id = str(uuid.uuid4())
+            data = await self._request("POST", "/v1/accounts", {
+                "account_id": account_id, "username": username, "protocol": "openvpn",
+                "remote_host": str(self.node.get("host") or ""), "expires_at": expires_at,
+                "limit_bytes": max(0, int(limit_bytes)),
+            })
+            profile = str(data.get("profile") or "")
+            if "<ca>" not in profile:
+                raise SSHProviderError("پاسخ Agent شامل پروفایل OpenVPN معتبر نیست")
+            return SSHAccountResult(account_id=account_id, username=data.get("username", username),
+                host=str(self.node.get("host") or ""), port=int(data.get("port") or 1194),
+                metadata={"profile": profile, "protocol": "openvpn", "transport": data.get("transport"),
+                          "limit_bytes_requested": int(limit_bytes), "accounting_ready": False})
+        if protocol == "wireguard":
+            account_id = str(uuid.uuid4())
+            data = await self._request("POST", "/v1/accounts", {
+                "account_id": account_id, "username": username, "protocol": "wireguard",
+                "remote_host": str(self.node.get("host") or ""), "expires_at": expires_at,
+                "limit_bytes": max(0, int(limit_bytes)),
+            })
+            profile = str(data.get("profile") or "")
+            if "[Interface]" not in profile or "PrivateKey" not in profile:
+                raise SSHProviderError("پاسخ Agent شامل پروفایل WireGuard معتبر نیست")
+            return SSHAccountResult(account_id=account_id, username=data.get("username", username),
+                host=str(self.node.get("host") or ""), port=int(data.get("port") or 51820),
+                metadata={"profile": profile, "protocol": "wireguard", "transport": data.get("transport"),
+                          "limit_bytes_requested": int(limit_bytes), "accounting_ready": False})
+        if protocol != "ssh":
+            raise SSHProviderError(f"پروتکل پشتیبانی‌نشده: {protocol}")
         alphabet = string.ascii_letters + string.digits + "-_"
         password = "".join(secrets.choice(alphabet) for _ in range(28))
         account_id = str(uuid.uuid4())
-        data = await self._request("POST", "/v1/accounts", {
-            "account_id": account_id, "username": username, "password": password,
-            "expires_at": expires_at, "limit_bytes": max(0, int(limit_bytes)),
-        })
+        payload = {"account_id": account_id, "username": username, "password": password,
+                   "expires_at": expires_at, "limit_bytes": max(0, int(limit_bytes))}
+        from ssh_hosts import ssh_port_range, ssh_port_range_is_custom
+        custom_range = ssh_port_range_is_custom(self.node)
+        low, high = ssh_port_range(self.node)
+        if custom_range:
+            payload["port_min"], payload["port_max"] = low, high
+        data = await self._request("POST", "/v1/accounts", payload)
+        port = int(data.get("port") or self.node.get("port") or 22)
+        if custom_range and not low <= port <= high:
+            # Agent قدیمی بازه را نادیده گرفته؛ حساب را برنگردان تا پورت خارج از بازه به کاربر نرسد.
+            try:
+                await self._request("POST", f"/v1/accounts/{account_id}/delete")
+            except Exception:
+                pass
+            raise SSHProviderError(
+                f"Agent این نود بازه‌ی پورت SSH را اعمال نکرد (پورت {port}، بازه‌ی تنظیم‌شده {low}-{high}). "
+                "فایل ssh_node_agent.py را روی نود به‌روز و سرویس shopvpn-ssh-agent را ری‌استارت کنید.")
         return SSHAccountResult(account_id=account_id, username=data.get("username", username),
-            host=str(self.node.get("host") or ""), port=int(data.get("port") or self.node.get("port") or 22),
+            host=str(self.node.get("host") or ""), port=port,
             metadata={"password": password, "limit_bytes_requested": int(limit_bytes),
                       "accounting_ready": False, "warning": "وضعیت شمارنده پس از اولین گزارش مصرف بررسی می‌شود"})
 
@@ -155,7 +216,12 @@ class LinuxAgentSSHProvider(BaseSSHProvider):
         return True
 
     async def delete_account(self, account_id: str) -> bool:
-        await self._request("POST", f"/v1/accounts/{account_id}/delete")
+        try:
+            await self._request("POST", f"/v1/accounts/{account_id}/delete")
+        except SSHProviderError as exc:
+            if getattr(exc, "http_status", None) == 404:
+                return True  # روی نود از قبل وجود ندارد؛ هدف (حذف) برقرار است.
+            raise
         return True
 
     async def update_account(self, account_id: str, limit_bytes: int = None, expires_at: str = None) -> bool:
@@ -176,7 +242,8 @@ class SSHPanelAPIProvider(BaseSSHProvider):
     async def test_connection(self) -> bool:
         await self._not_configured()
 
-    async def create_account(self, username: str, limit_bytes: int, expires_at: str = None) -> SSHAccountResult:
+    async def create_account(self, username: str, limit_bytes: int, expires_at: str = None,
+                             protocol: str = "ssh") -> SSHAccountResult:
         await self._not_configured()
 
     async def get_usage(self, account_id: str) -> dict:
