@@ -3525,6 +3525,8 @@ async def api_admin_custom_config_delete(custom_config_id: int, admin=Depends(re
                     "حذف کاربر «%s» از پنل سرور #%s ناموفق بود؛ در هر صورت از دیتابیس حذف می‌شود.",
                     cc["username"], cc["panel_server_id"],
                 )
+    from multi_target import delete_linked_panel_users
+    await delete_linked_panel_users(db, custom_config_id)
     (await asyncio.to_thread(db.delete_owned_custom_config, custom_config_id, cc["user_id"]))
     (await asyncio.to_thread(db.log_admin_action, admin["id"], "custom_config_delete_admin",
         f"سرویس «{cc['username']}» کاربر {cc['user_id']} حذف شد (پنل وب - {admin['username']})",
@@ -3798,6 +3800,8 @@ async def api_reseller_self_delete(config_id: int, admin=Depends(get_current_adm
             except Exception:
                 logger.exception("حذف کاربر «%s» از پنل سرور #%s ناموفق بود؛ در هر صورت از لیست نماینده حذف می‌شود.",
                                  cc["username"], cc["panel_server_id"])
+    from multi_target import delete_linked_panel_users
+    await delete_linked_panel_users(db, config_id)
     removed = await asyncio.to_thread(db.delete_owned_custom_config, config_id, owner_id)
     if not removed:
         raise HTTPException(404, tr("سرویس یافت نشد."))
@@ -3862,6 +3866,8 @@ class ProductBody(BaseModel):
     provision_server_id: Optional[int] = None
     provision_ssh_node_id: Optional[int] = None
     provision_ssh_protocol: Optional[str] = None
+    extra_panel_ids: Optional[List[int]] = None
+    extra_ssh_node_ids: Optional[List[int]] = None
     payment_methods: Optional[List[str]] = None
     compare_price: Optional[int] = None  # قیمت قبل از تخفیف (نمایشی)
     discount_days: Optional[int] = None  # مدت اعتبار تخفیف (روز)؛ 0 = بدون محدودیت زمانی
@@ -3873,7 +3879,17 @@ def api_products(admin=Depends(require_permission("catalog"))):
     products = rows_to_list(db.get_all_products())
     for p in products:
         p["stock"] = db.count_available_configs(p["id"])
+        extra = db.get_product_extra_targets(p["id"])
+        p["extra_panel_ids"] = extra["panels"]
+        p["extra_ssh_node_ids"] = extra["ssh"]
     return products
+
+
+@app.get("/api/products/multi-target-info")
+def api_products_multi_target_info(admin=Depends(require_permission("catalog"))):
+    """چند پنل/نود برای یک محصول (و ترکیب پنل+نود) فقط وقتی ساب اختصاصی فعال است ممکن است."""
+    import dedicated_sub
+    return {"dsub_enabled": bool(dedicated_sub.is_enabled(db))}
 
 
 @app.get("/api/panel-servers-lite")
@@ -3921,6 +3937,9 @@ def api_add_product(body: ProductBody, admin=Depends(require_permission("catalog
             raise HTTPException(400, "فقط نود Linux Agent فعال برای محصول SSH پشتیبانی می‌شود.")
     ssh_protocol = _checked_ssh_protocol(body.provision_ssh_protocol, body.provision_server_id, ssh_node)
     direct_target = bool(body.provision_server_id or body.provision_ssh_node_id)
+    extra_panels, extra_nodes = _checked_extra_targets(
+        body.provision_server_id, body.provision_ssh_node_id, body.extra_panel_ids, body.extra_ssh_node_ids,
+        ssh_protocol, admin)
     if body.duration_days == 0 and not direct_target:
         raise HTTPException(400, tr("مدت نامحدود فقط برای محصولات با اتصال مستقیم ممکن است."))
     if direct_target:
@@ -3942,6 +3961,8 @@ def api_add_product(body: ProductBody, admin=Depends(require_permission("catalog
         compare_price=max(int(body.compare_price or 0), 0),
         provision_ssh_node_id=body.provision_ssh_node_id, provision_ssh_protocol=ssh_protocol,
     )
+    if extra_panels or extra_nodes:
+        db.set_product_extra_targets(pid, extra_panels, extra_nodes)
     if int(body.compare_price or 0) > 0 and (body.discount_days is not None or body.discount_max_uses is not None):
         db.edit_product(pid, compare_price=int(body.compare_price),
                         discount_days=max(int(body.discount_days or 0), 0),
@@ -3949,6 +3970,40 @@ def api_add_product(body: ProductBody, admin=Depends(require_permission("catalog
     pm_log = "همه" if not body.payment_methods else "، ".join(body.payment_methods)
     db.log_admin_action(admin["id"], "product_add", f"{body.name} | پرداخت: {pm_log} (پنل وب - {admin['username']})", "product", pid)
     return {"id": pid}
+
+
+def _checked_extra_targets(server_id, node_id, extra_panels, extra_nodes, protocol, admin, changed=True):
+    """مقصدهای اضافه‌ی محصول را اعتبارسنجی و پاک‌سازی می‌کند و قفل «ساب اختصاصی» را اعمال می‌کند:
+    بیش از یک مقصد (چند پنل، چند نود، یا ترکیب پنل و نود) فقط با ساب اختصاصی فعال مجاز است.
+    changed=False یعنی ویرایش، مقصدها را تغییر نمی‌دهد و فقط وضعیت فعلی محاسبه می‌شود."""
+    import dedicated_sub
+    import ssh_service
+    panels = [int(x) for x in dict.fromkeys(extra_panels or []) if int(x) > 0 and int(x) != int(server_id or 0)]
+    nodes = [int(x) for x in dict.fromkeys(extra_nodes or []) if int(x) > 0 and int(x) != int(node_id or 0)]
+    total = (1 if server_id else 0) + (1 if node_id else 0) + len(panels) + len(nodes)
+    if total <= 1 or not changed:
+        return panels, nodes
+    if admin["tenant"]:
+        raise HTTPException(403, tr("اتصال مستقیم به پنل یا نود فقط برای بات اصلی مجاز است."))
+    if not dedicated_sub.is_enabled(db):
+        raise HTTPException(400, tr("اتصال چند پنل/نود یا ترکیب پنل و نود به یک محصول فقط وقتی ساب اختصاصی فعال است ممکن است؛ ابتدا ساب اختصاصی را فعال کنید."))
+    if not (server_id or node_id):
+        raise HTTPException(400, tr("ابتدا مقصد اصلی محصول را انتخاب کنید."))
+    for sid in panels:
+        server = db.get_panel_server(sid)
+        if not server or not server["is_active"]:
+            raise HTTPException(400, tr("پنل VPN فعال پیدا نشد."))
+    active_nodes = {int(n["id"]): n for n in db.list_ssh_nodes(active_only=True)}
+    wanted = str(protocol or "ssh").strip().lower()
+    for nid in ([int(node_id)] if node_id else []) + nodes:
+        node = active_nodes.get(int(nid))
+        if not node or node.get("node_type") != "linux":
+            raise HTTPException(400, "فقط نود Linux Agent فعال برای محصول SSH پشتیبانی می‌شود.")
+        if wanted not in ssh_service.node_protocols(node):
+            raise HTTPException(400, f"پروتکل {wanted} روی نود «{node.get('name')}» نصب نشده است.")
+    if wanted in ("openvpn", "wireguard") and not (server_id or panels):
+        raise HTTPException(400, "فایل OpenVPN/WireGuard حداقل یک پنل VPN در محصول لازم دارد.")
+    return panels, nodes
 
 
 def _checked_ssh_protocol(requested, server_id, node) -> str:
@@ -3979,6 +4034,8 @@ class ProductEditBody(BaseModel):
     provision_server_id: Optional[int] = None
     provision_ssh_node_id: Optional[int] = None
     provision_ssh_protocol: Optional[str] = None
+    extra_panel_ids: Optional[List[int]] = None
+    extra_ssh_node_ids: Optional[List[int]] = None
     auto_provision_volume_gb: Optional[int] = None
     compare_price: Optional[int] = None  # 0 یعنی حذف تخفیف
     discount_days: Optional[int] = None
@@ -4093,6 +4150,31 @@ def api_edit_product(product_id: int, body: ProductEditBody, admin=Depends(requi
         if body.duration_days == 0 and not (effective_server_id or effective_ssh_node_id):
             raise HTTPException(status_code=400, detail=tr("مدت نامحدود فقط برای محصولات با اتصال مستقیم ممکن است."))
 
+    old_extra = db.get_product_extra_targets(product_id)
+    effective_protocol = ssh_protocol if ssh_protocol is not ... else (old_product["provision_ssh_protocol"] or "ssh")
+    if body.source == "bank" or not (effective_server_id or effective_ssh_node_id):
+        final_extra_panels, final_extra_nodes, extras_changed = [], [], bool(old_extra["panels"] or old_extra["ssh"])
+    else:
+        primaries_replaced = provision_server_id is not ... or provision_ssh_node_id is not ...
+        requested_panels = body.extra_panel_ids if body.extra_panel_ids is not None else ([] if primaries_replaced else old_extra["panels"])
+        requested_nodes = body.extra_ssh_node_ids if body.extra_ssh_node_ids is not None else ([] if primaries_replaced else old_extra["ssh"])
+        final_extra_panels, final_extra_nodes = _checked_extra_targets(
+            effective_server_id, effective_ssh_node_id, requested_panels, requested_nodes,
+            effective_protocol, admin, changed=False)
+        extras_changed = (
+            sorted(final_extra_panels) != sorted(old_extra["panels"])
+            or sorted(final_extra_nodes) != sorted(old_extra["ssh"])
+        )
+        targets_changed = (
+            extras_changed
+            or int(effective_server_id or 0) != int(old_product["provision_server_id"] or 0)
+            or int(effective_ssh_node_id or 0) != int(old_product["provision_ssh_node_id"] or 0)
+        )
+        if targets_changed:
+            final_extra_panels, final_extra_nodes = _checked_extra_targets(
+                effective_server_id, effective_ssh_node_id, requested_panels, requested_nodes,
+                effective_protocol, admin, changed=True)
+
     db.edit_product(
         product_id, body.name, body.price, body.description, body.duration_days,
         is_auto_provision=is_auto_provision, provision_server_id=provision_server_id,
@@ -4102,6 +4184,8 @@ def api_edit_product(product_id: int, body: ProductEditBody, admin=Depends(requi
         discount_days=(max(int(body.discount_days), 0) if body.discount_days is not None else ...),
         discount_max_uses=(max(int(body.discount_max_uses), 0) if body.discount_max_uses is not None else ...),
     )
+    if extras_changed or body.source is not None or provision_server_id is not ... or provision_ssh_node_id is not ...:
+        db.set_product_extra_targets(product_id, final_extra_panels, final_extra_nodes)
     db.log_admin_action(admin["id"], "product_edit", f"#{product_id} (پنل وب - {admin['username']})", "product", product_id)
     return {"ok": True}
 
