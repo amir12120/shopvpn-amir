@@ -1747,6 +1747,8 @@ class DatabaseBase:
             conn.execute("ALTER TABLE ssh_accounts ADD COLUMN credential_enc TEXT")
         if self._column_exists(conn, "ssh_accounts", "id") and not self._column_exists(conn, "ssh_accounts", "custom_config_id"):
             conn.execute("ALTER TABLE ssh_accounts ADD COLUMN custom_config_id INTEGER")
+        if self._column_exists(conn, "ssh_accounts", "id") and not self._column_exists(conn, "ssh_accounts", "protocol"):
+            conn.execute("ALTER TABLE ssh_accounts ADD COLUMN protocol TEXT NOT NULL DEFAULT 'ssh'")
 
         # Additive migration for unified quota counter epochs. Older DBs stored
         # only the provider's raw used_bytes, which could move backwards after a panel reset.
@@ -1928,6 +1930,7 @@ class DatabaseBase:
             ("products", "auto_provision_volume_gb", "INTEGER"),
             ("products", "provision_server_id", "INTEGER"),
             ("products", "provision_ssh_node_id", "INTEGER"),
+            ("products", "provision_ssh_protocol", "TEXT DEFAULT 'ssh'"),
             ("products", "extra_user_price", "INTEGER DEFAULT 0"),
             ("products", "max_users", "INTEGER DEFAULT 0"),
             ("products", "base_users", "INTEGER DEFAULT 0"),

@@ -255,7 +255,8 @@ class CatalogMixin:
                      is_auto_provision: bool = False, auto_provision_volume_gb: int = None,
                      provision_server_id: int = None, payment_methods=None,
                      base_users: int = 0, extra_user_price: int = 0, max_users: int = 0,
-                     compare_price: int = 0, provision_ssh_node_id: int = None) -> int:
+                     compare_price: int = 0, provision_ssh_node_id: int = None,
+                     provision_ssh_protocol: str = "ssh") -> int:
         """payment_methods: None/[] یعنی «همه‌ی روش‌های پرداخت مجازند» (پیش‌فرض)،
         در غیر این صورت لیستی از کلیدهای مجاز - همان قراردادِ set_product_payment_methods.
 
@@ -273,11 +274,12 @@ class CatalogMixin:
             cur = conn.execute(
                 "INSERT INTO products (category_id, name, price, description, duration_days, "
                 "is_auto_provision, auto_provision_volume_gb, provision_server_id, provision_ssh_node_id, payment_methods, "
-                "base_users, extra_user_price, max_users, compare_price) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "base_users, extra_user_price, max_users, compare_price, provision_ssh_protocol) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (category_id, name, price, description, duration_days,
                  1 if is_auto_provision else 0, auto_provision_volume_gb, provision_server_id, provision_ssh_node_id, pm_value,
-                 base_users, extra_user_price, max_users, compare_price),
+                 base_users, extra_user_price, max_users, compare_price,
+                 "openvpn" if provision_ssh_node_id and str(provision_ssh_protocol).lower() == "openvpn" else "ssh"),
             )
             return cur.lastrowid
 
@@ -391,7 +393,7 @@ class CatalogMixin:
                       description: str = None, duration_days: int = None,
                       is_auto_provision=..., auto_provision_volume_gb=...,
                       provision_server_id=..., payment_methods=..., category_id: int = None,
-                      provision_ssh_node_id=...,
+                      provision_ssh_node_id=..., provision_ssh_protocol=...,
                       compare_price=..., discount_days=..., discount_max_uses=...):
         # نکته: is_auto_provision/auto_provision_volume_gb/provision_server_id از سنتینل
         # Ellipsis استفاده می‌کنند (مثل payment_methods) چون باید بتوان آن‌ها را عمداً
@@ -416,6 +418,8 @@ class CatalogMixin:
             fields.append("provision_server_id=?"); values.append(provision_server_id)
         if provision_ssh_node_id is not ...:
             fields.append("provision_ssh_node_id=?"); values.append(provision_ssh_node_id)
+        if provision_ssh_protocol is not ...:
+            fields.append("provision_ssh_protocol=?"); values.append("openvpn" if str(provision_ssh_protocol).lower() == "openvpn" else "ssh")
         if payment_methods is not ...:
             fields.append("payment_methods=?")
             values.append(json.dumps(payment_methods, ensure_ascii=False) if payment_methods else None)
