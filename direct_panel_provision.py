@@ -269,7 +269,7 @@ async def _provision_multi(db, product, targets: dict, quantity: int = 1, user_i
     if user_id is None or not isinstance(quantity, int) or quantity < 1:
         raise ProvisionError("شناسه کاربر یا تعداد برای ساخت محصول چندمقصدی نامعتبر است.")
     panel_ids, node_ids = list(targets["panels"]), list(targets["ssh"])
-    if not panel_ids and _product_ssh_protocol(product) in FILE_PROTOCOLS:
+    if not panel_ids and any(p in FILE_PROTOCOLS for p in _product_ssh_protocols(product)):
         raise ProvisionError("تحویل فایل OpenVPN/WireGuard حداقل یک پنل VPN در محصول لازم دارد.")
     for sid in panel_ids:
         server = db.get_panel_server(sid)
@@ -325,10 +325,20 @@ async def _provision_multi_unit(db, product, panel_ids, node_ids, user_id, order
         db.delete_quota_pool(pool_id)
 
     try:
+        from ssh_service import node_protocols
+        wanted_protocols = _product_ssh_protocols(product)
+        nodes_by_id = {int(n["id"]): n for n in db.list_ssh_nodes(active_only=True)}
         for node_id in node_ids:
-            ssh_items.extend(await provision_ssh_direct(
-                db, product, quantity=1, user_id=user_id, order_id=order_id,
-                allow_openvpn=bool(panel_ids), node_id=node_id, pool_id=pool_id))
+            node = nodes_by_id.get(int(node_id))
+            supported = node_protocols(node) if node else []
+            # هر نود فقط پروتکل‌هایی را می‌سازد که خودش دارد؛ نودِ بدون هیچ‌کدام خطا می‌دهد.
+            node_picks = [p for p in wanted_protocols if p in supported]
+            if not node_picks:
+                raise ProvisionError(f"هیچ‌یک از پروتکل‌های انتخابی محصول روی نود #{node_id} نصب نیست.")
+            for proto in node_picks:
+                ssh_items.extend(await provision_ssh_direct(
+                    db, product, quantity=1, user_id=user_id, order_id=order_id,
+                    allow_openvpn=bool(panel_ids), node_id=node_id, pool_id=pool_id, protocol=proto))
         for index, server_id in enumerate(panel_ids):
             built = await _provision_vpn(db, product, quantity=1, user_id=user_id, order_id=order_id,
                                          shared_pool=True, server_id=server_id, register=(index == 0))
@@ -360,16 +370,24 @@ async def _provision_multi_unit(db, product, panel_ids, node_ids, user_id, order
 FILE_PROTOCOLS = ("openvpn", "wireguard")
 
 
-def _product_ssh_protocol(product) -> str:
+def _product_ssh_protocols(product) -> list:
+    """لیست پروتکل‌های انتخاب‌شده‌ی محصول (ذخیره‌ی قدیمی تک‌مقداری هم پشتیبانی می‌شود)."""
     try:
-        value = str(product["provision_ssh_protocol"] or "ssh").strip().lower()
+        raw = str(product["provision_ssh_protocol"] or "ssh")
     except (KeyError, IndexError, TypeError):
-        value = "ssh"
-    return value if value in ("ssh", "openvpn", "wireguard") else "ssh"
+        raw = "ssh"
+    picked = {x.strip().lower() for x in raw.split(",")}
+    return [p for p in ("ssh", "openvpn", "wireguard") if p in picked] or ["ssh"]
+
+
+def _product_ssh_protocol(product) -> str:
+    """پروتکل اصلی (اولین)؛ برای مسیرهای تک‌پروتکلی (SSH تنها / ترکیبی VPN+SSH)."""
+    return _product_ssh_protocols(product)[0]
 
 
 async def provision_ssh_direct(db, product, quantity: int = 1, user_id: int = None, order_id: int = None,
-                               allow_openvpn: bool = False, node_id: int = None, pool_id: int = None) -> list:
+                               allow_openvpn: bool = False, node_id: int = None, pool_id: int = None,
+                               protocol: str = None) -> list:
     """Provision a paid SSH product on a Linux Agent and create one shared quota pool.
 
     Commercial delivery fails closed unless the Agent reports a valid per-account
@@ -383,7 +401,7 @@ async def provision_ssh_direct(db, product, quantity: int = 1, user_id: int = No
     if not node or node.get("node_type") != "linux":
         raise ProvisionError("نود Linux Agent فعال پیدا نشد؛ پنل SSH هنوز آداپتور عملیاتی ندارد.")
     from ssh_service import node_protocols
-    protocol = _product_ssh_protocol(product)
+    protocol = protocol or _product_ssh_protocol(product)
     if protocol in FILE_PROTOCOLS and not allow_openvpn:
         label = "WireGuard" if protocol == "wireguard" else "OpenVPN"
         raise ProvisionError(f"{label} فقط در محصول ترکیبی VPN + SSH پشتیبانی می‌شود (فایل آن داخل لینک ساب اختصاصی تحویل می‌شود).")
