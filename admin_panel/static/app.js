@@ -3477,7 +3477,7 @@ function productProvisionFieldsHtml(panelServers, sshNodes = [], prefill = null)
       <label class="field"><span>نوع مقصد</span><select class="input" id="prod-target-type"><option value="vpn" ${target === 'vpn' ? 'selected' : ''}>پنل VPN</option>${sshNodes.length || (prefill && prefill.provision_ssh_node_id) ? `<option value="ssh" ${target === 'ssh' ? 'selected' : ''}>نود SSH (Linux Agent)</option><option value="both" ${target === 'both' ? 'selected' : ''}>ترکیبی VPN + SSH (حجم و زمان مشترک)</option>` : ''}</select></label>
       <div id="prod-vpn-fields" style="display:${target === 'ssh' ? 'none' : ''}"><label class="field"><span>پنل VPN</span><select class="input" id="prod-server">${panelServers.map(s => `<option value="${s.id}" ${prefill && Number(prefill.provision_server_id) === Number(s.id) ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label></div>
       <div id="prod-ssh-fields" style="display:${(target === 'ssh' || target === 'both') ? '' : 'none'}"><label class="field"><span>نود SSH</span><select class="input" id="prod-ssh-node">${sshNodes.map(n => `<option value="${n.id}" data-protocols="${esc((n.protocols || ['ssh']).join(','))}" ${prefill && Number(prefill.provision_ssh_node_id) === Number(n.id) ? 'selected' : ''}>${esc(n.name)} · ${esc(n.host || '')}</option>`).join('')}</select><span class="card-sub">فقط Linux Agent فعال با حسابداری معتبر پشتیبانی می‌شود.</span></label>
-      <label class="field"><span>پروتکل حساب</span><select class="input" id="prod-ssh-protocol" data-prefill="${esc((prefill && prefill.provision_ssh_protocol) || 'ssh')}"><option value="ssh">SSH</option></select><span class="card-sub">OpenVPN فقط در محصول «ترکیبی» ممکن است و فایل آن داخل لینک ساب اختصاصی تحویل می‌شود (ساب اختصاصی باید فعال باشد).</span></label></div>
+      <label class="field"><span>پروتکل حساب</span><select class="input" id="prod-ssh-protocol" data-prefill="${esc((prefill && prefill.provision_ssh_protocol) || 'ssh')}"><option value="ssh">SSH</option></select><span class="card-sub">OpenVPN و WireGuard فقط در محصول «ترکیبی» ممکن‌اند و فایل آن‌ها داخل لینک ساب اختصاصی تحویل می‌شود (ساب اختصاصی باید فعال باشد).</span></label></div>
       <label class="field field-row"><span>♾ مدت اعتبار نامحدود</span><input type="checkbox" id="prod-duration-unlimited" ${durUnlimited ? 'checked' : ''}></label>
       <label class="field"><span>حجم (GB) — ۰ = نامحدود</span><input class="input" id="prod-volume" type="number" min="0" step="1" placeholder="حجم (گیگابایت)" value="${prefill && prefill.auto_provision_volume_gb != null ? prefill.auto_provision_volume_gb : ''}" ${volUnlimited ? 'disabled' : ''}></label>
       <label class="field field-row"><span>♾ حجم نامحدود</span><input type="checkbox" id="prod-volume-unlimited" ${volUnlimited ? 'checked' : ''}></label>
@@ -6707,23 +6707,29 @@ function wirePanelReorder(servers) {
 }
 
 let sshTab = 'nodes';
-const SSH_PROTO_LABELS = { ssh: 'SSH', openvpn: 'OpenVPN' };
+const SSH_PROTO_LABELS = { ssh: 'SSH', openvpn: 'OpenVPN', wireguard: 'WireGuard' };
 function sshProtoFieldsHtml(installed = []) {
   const box = (key, checked) => `<label style="display:flex;gap:6px;align-items:center"><input type="checkbox" data-ssh-proto="${key}" ${installed.includes(key) ? 'checked disabled' : (checked ? 'checked' : '')}> ${SSH_PROTO_LABELS[key]}${installed.includes(key) ? ' <span class="card-sub">(نصب شده)</span>' : ''}</label>`;
-  return `<div class="field"><span>پروتکل‌ها (تیک بزنید)</span>${box('ssh', !installed.length)}${box('openvpn', false)}</div>
+  return `<div class="field"><span>پروتکل‌ها (تیک بزنید)</span>${box('ssh', !installed.length)}${box('openvpn', false)}${box('wireguard', false)}</div>
     <div data-ssh-ovpn-opts style="display:none" class="form-grid">
       <label class="field"><span>پورت OpenVPN</span><input class="input" data-ssh-ovpn-port type="number" min="1" max="65535" value="1194" dir="ltr"></label>
       <label class="field"><span>انتقال OpenVPN</span><select class="input" data-ssh-ovpn-proto><option value="udp">UDP (سریع‌تر)</option><option value="tcp">TCP (عبور بهتر از فیلتر)</option></select></label>
+    </div>
+    <div data-ssh-wg-opts style="display:none" class="form-grid">
+      <label class="field"><span>پورت WireGuard (UDP)</span><input class="input" data-ssh-wg-port type="number" min="1" max="65535" value="51820" dir="ltr"></label>
     </div>`;
 }
 function sshBindProtoFields(el) {
-  const sync = () => { const on = el.querySelector('[data-ssh-proto="openvpn"]:not(:disabled)')?.checked; const o = el.querySelector('[data-ssh-ovpn-opts]'); if (o) o.style.display = on ? '' : 'none'; };
+  const sync = () => {
+    const on = el.querySelector('[data-ssh-proto="openvpn"]:not(:disabled)')?.checked; const o = el.querySelector('[data-ssh-ovpn-opts]'); if (o) o.style.display = on ? '' : 'none';
+    const wgOn = el.querySelector('[data-ssh-proto="wireguard"]:not(:disabled)')?.checked; const w = el.querySelector('[data-ssh-wg-opts]'); if (w) w.style.display = wgOn ? '' : 'none';
+  };
   el.querySelectorAll('[data-ssh-proto]').forEach(c => c.addEventListener('change', sync));
   sync();
 }
 function sshReadProtoFields(el) {
   const protocols = [...el.querySelectorAll('[data-ssh-proto]:not(:disabled)')].filter(c => c.checked).map(c => c.dataset.sshProto);
-  return { protocols, ovpn_port: Number(el.querySelector('[data-ssh-ovpn-port]')?.value) || 1194, ovpn_proto: el.querySelector('[data-ssh-ovpn-proto]')?.value || 'udp' };
+  return { protocols, ovpn_port: Number(el.querySelector('[data-ssh-ovpn-port]')?.value) || 1194, ovpn_proto: el.querySelector('[data-ssh-ovpn-proto]')?.value || 'udp', wg_port: Number(el.querySelector('[data-ssh-wg-port]')?.value) || 51820 };
 }
 async function sshRunInstallJob(el, btn, logEl, startRequest, onDone) {
   btn.disabled = true; logEl.style.display = ''; logEl.textContent = 'شروع نصب...';
@@ -6760,9 +6766,9 @@ async function renderSSHManagement() {
     <tbody>${nodes.map(n=>`<tr>
       <td>${esc(n.name)}</td>
       <td class="mono" style="direction:ltr;text-align:right">${esc(n.host)}:${Number(n.port)}</td>
-      <td>${(n.protocols||['ssh']).map(p=>`<span class="chip">${esc(SSH_PROTO_LABELS[p]||p)}${p==='openvpn'&&n.ovpn_port?` · ${Number(n.ovpn_port)}/${esc(n.ovpn_proto||'udp')}`:''}</span>`).join(' ')}</td>
+      <td>${(n.protocols||['ssh']).map(p=>`<span class="chip">${esc(SSH_PROTO_LABELS[p]||p)}${p==='openvpn'&&n.ovpn_port?` · ${Number(n.ovpn_port)}/${esc(n.ovpn_proto||'udp')}`:''}${p==='wireguard'&&n.wg_port?` · ${Number(n.wg_port)}/udp`:''}</span>`).join(' ')}</td>
       <td>${esc(statusFa(n.status))}${n.last_error ? `<div style="font-size:11px;color:#FB7185;margin-top:4px">${esc(n.last_error)}</div>` : ''}</td>
-      <td style="white-space:nowrap"><button class="btn btn-sm" data-ssh-test-node="${Number(n.id)}">تست اتصال</button> ${(n.protocols||['ssh']).length<2&&n.node_type==='linux'?`<button class="btn btn-sm" data-ssh-add-proto="${Number(n.id)}">+ پروتکل</button> `:''}<button class="btn btn-sm" data-ssh-rename-node="${Number(n.id)}" data-ssh-node-name="${esc(n.name)}">تغییر نام</button> <button class="btn btn-danger btn-sm" data-ssh-del-node="${Number(n.id)}">حذف</button></td>
+      <td style="white-space:nowrap"><button class="btn btn-sm" data-ssh-test-node="${Number(n.id)}">تست اتصال</button> ${(n.protocols||['ssh']).length<3&&n.node_type==='linux'?`<button class="btn btn-sm" data-ssh-add-proto="${Number(n.id)}">+ پروتکل</button> `:''}<button class="btn btn-sm" data-ssh-rename-node="${Number(n.id)}" data-ssh-node-name="${esc(n.name)}">تغییر نام</button> <button class="btn btn-danger btn-sm" data-ssh-del-node="${Number(n.id)}">حذف</button></td>
     </tr>`).join('') || '<tr><td colspan="5" class="empty-state">هنوز نودی ثبت نشده است.</td></tr>'}</tbody></table></div></div>`;
 
   const accountsHtml = `<div class="card"><div class="table-wrap"><table>
@@ -6800,7 +6806,7 @@ async function renderSSHManagement() {
       <button class="btn btn-primary" id="ssh-auto-install">نصب و راه‌اندازی خودکار</button>
     </div>
     <pre id="ssh-auto-log" class="mono" style="display:none;white-space:pre-wrap;margin-top:8px"></pre>
-    <p class="card-sub">سرور باید Ubuntu/Debian تازه باشد. می‌توانید فقط SSH، فقط OpenVPN یا هر دو را با هم نصب کنید. نصب Agent، گواهی TLS، توکن، فایروال و تست حسابداری حجم خودکار انجام می‌شود. رمز root فقط برای همین نصب استفاده می‌شود و ذخیره نمی‌شود.</p>`,(el,close)=>{
+    <p class="card-sub">سرور باید Ubuntu/Debian تازه باشد. می‌توانید هر ترکیبی از SSH، OpenVPN و WireGuard را نصب کنید. نصب Agent، گواهی TLS، توکن، فایروال و تست حسابداری حجم خودکار انجام می‌شود. رمز root فقط برای همین نصب استفاده می‌شود و ذخیره نمی‌شود.</p>`,(el,close)=>{
     sshBindProtoFields(el);
     el.querySelector('#ssh-auto-install').addEventListener('click', e => {
       const btn=e.currentTarget, logEl=el.querySelector('#ssh-auto-log');
@@ -6885,6 +6891,10 @@ async function renderSSHManagement() {
       const btn=e.currentTarget; btn.disabled=true;
       try { const poolVal=el.querySelector('#ssh-account-pool').value; const r=await apiPost('/ssh/accounts',{node_id:Number(el.querySelector('#ssh-account-node').value),user_id:Number(el.querySelector('#ssh-account-user').value),username:el.querySelector('#ssh-account-username').value.trim(),limit_gb:Number(el.querySelector('#ssh-account-limit').value),days:Number(el.querySelector('#ssh-account-days').value),quota_pool_id:poolVal?Number(poolVal):null,protocol:protoSel.value});
         close();
+        if(r.protocol==='wireguard'){
+          openModal('حساب WireGuard ساخته شد',`<p>نام کاربری: <b>${esc(r.username)}</b></p><p>سرور: <code>${esc(r.host)}:${Number(r.port)}</code></p><p class="card-sub">فایل .conf فقط همین بار نمایش داده می‌شود؛ آن را دانلود و به کاربر تحویل بده.</p><button class="btn btn-primary" id="ssh-download-wg">دانلود فایل .conf</button>`,(el2)=>{el2.querySelector('#ssh-download-wg')?.addEventListener('click',()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([r.profile||''],{type:'application/x-wireguard-profile'}));a.download=`${r.username}.conf`;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000);});});
+          await renderSSHManagement(); return;
+        }
         if(r.protocol==='openvpn'){
           openModal('حساب OpenVPN ساخته شد',`<p>نام کاربری: <b>${esc(r.username)}</b></p><p>سرور: <code>${esc(r.host)}:${Number(r.port)}</code></p><p class="card-sub">پروفایل .ovpn فقط همین بار نمایش داده می‌شود؛ آن را دانلود و به کاربر تحویل بده.</p><button class="btn btn-primary" id="ssh-download-ovpn">دانلود فایل .ovpn</button>`,(el2)=>{el2.querySelector('#ssh-download-ovpn')?.addEventListener('click',()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([r.profile||''],{type:'application/x-openvpn-profile'}));a.download=`${r.username}.ovpn`;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000);});});
           await renderSSHManagement(); return;
