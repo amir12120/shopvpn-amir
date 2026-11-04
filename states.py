@@ -150,12 +150,14 @@ class AdminAddProduct(StatesGroup):
     waiting_duration = State()
     waiting_provision_choice = State()
     waiting_provision_server = State()
+    waiting_provision_target = State()
     waiting_provision_duration_mode = State()
     waiting_auto_provision_volume_mode = State()
     waiting_auto_provision_volume = State()
     waiting_base_users = State()
     waiting_user_extra_price = State()
     waiting_user_max = State()
+    waiting_renew_rules = State()
     waiting_payment_methods = State()
 
 

@@ -130,6 +130,47 @@ class PasarguardProvider(BasePanelProvider):
             cleaned[proto] = settings
         return cleaned
 
+    async def list_groups(self) -> list:
+        """دریافت گروه‌های قابل انتخاب از API پاسارگارد.
+
+        پاسخ نسخه‌های مختلف ممکن است آرایه یا آبجکت حاوی groups باشد؛
+        خروجی نرمال‌شده همیشه شامل id و name است.
+        """
+        async with self._session() as session:
+            token = await self._get_token(session)
+            try:
+                async with session.get(
+                    f"{self._base_url()}/api/groups",
+                    headers={**self._auth(token), "accept": "application/json"},
+                    timeout=aiohttp.ClientTimeout(total=20),
+                ) as resp:
+                    if resp.status >= 400:
+                        body = await resp.text()
+                        raise PanelError(f"خطا در دریافت گروه‌های PasarGuard (کد {resp.status}): {body[:300]}")
+                    payload = await resp.json()
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                raise PanelError(f"خطا در اتصال برای دریافت گروه‌ها: {e}") from e
+        if isinstance(payload, dict):
+            items = payload.get("groups") or payload.get("items") or payload.get("data") or payload.get("results") or []
+        else:
+            items = payload if isinstance(payload, list) else []
+        normalized = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            gid = item.get("id", item.get("group_id"))
+            name = item.get("name") or item.get("remark") or item.get("title") or str(gid or "")
+            if gid is None:
+                continue
+            try:
+                gid = int(gid)
+            except (TypeError, ValueError):
+                continue
+            normalized.append({"id": gid, "name": str(name)})
+        if not normalized:
+            raise PanelError("فهرست گروه‌ها خالی است یا ساختار پاسخ API شناخته نشد. دسترسی API و نسخه PasarGuard را بررسی کن.")
+        return normalized
+
     async def fetch_template_from_user(self, sample_username: str) -> dict:
         """اطلاعات یک کاربر نمونه‌ی موجود روی پنل را می‌خواند و group_ids/proxy_settings
         (پاک‌شده از مقادیر حساس) را برای ذخیره به‌عنوان قالب برمی‌گرداند."""
@@ -402,6 +443,38 @@ class PasarguardProvider(BasePanelProvider):
                         raise PanelError(f"خطا در تغییر وضعیت کاربر (کد {resp.status}): {text[:300]}")
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 raise PanelError(f"خطا در اتصال به پنل: {e or 'پاسخی از سرور در زمان مقرر دریافت نشد (timeout)'}") from e
+
+    supports_template_resync = True
+
+    async def resync_user_template(self, username: str) -> bool:
+        """group_ids کاربر را با قالب فعلی پنل در ربات یکی می‌کند؛ برای کاربرانی که گروهشان بعد از تغییر نود/هاست بی‌اینباند شده."""
+        raw = self.server["group_ids"]
+        target = json.loads(raw) if isinstance(raw, str) else (raw or [])
+        target = sorted(int(g) for g in target)
+        if not target:
+            return False
+        async with self._session() as session:
+            token = await self._get_token(session)
+            headers = {**self._auth(token), "accept": "application/json", "Content-Type": "application/json"}
+            try:
+                async with session.get(f"{self._base_url()}/api/user/{username}", headers=headers,
+                                       timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                    if resp.status == 404:
+                        raise PanelError(f"کاربری با نام «{username}» روی پنل پیدا نشد.")
+                    if resp.status >= 400:
+                        raise PanelError(f"خطا در دریافت کاربر (کد {resp.status})")
+                    current = await resp.json()
+                have = sorted(int(g) for g in (current.get("group_ids") or []))
+                if have == target:
+                    return False
+                async with session.put(f"{self._base_url()}/api/user/{username}", json={"group_ids": target},
+                                       headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                    if resp.status >= 400:
+                        text = await resp.text()
+                        raise PanelError(f"خطا در هم‌گام‌سازی گروه کاربر (کد {resp.status}): {text[:300]}")
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                raise PanelError(f"خطا در اتصال به پنل: {e or 'timeout'}") from e
+        return True
 
     supports_data_limit_sync = True
 

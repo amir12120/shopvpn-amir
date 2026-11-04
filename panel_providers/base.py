@@ -75,6 +75,31 @@ class BasePanelProvider(ABC):
     def _build_connector(self, ssl: bool = False):
         return build_connector(self.server, ssl=ssl)
 
+    async def list_product_targets(self):
+        """فهرست مقصدهای قابل انتخاب برای یک محصول را با قرارداد مشترک برمی‌گرداند.
+
+        خروجی استاندارد: {field, kind, choices}. Providerهایی که API فهرست
+        مقصد دارند می‌توانند این متد را override کنند. برای Providerهای قدیمی
+        که list_groups/list_inbounds دارند، این adapter سازگاری را فراهم می‌کند.
+        """
+        list_groups = getattr(self, "list_groups", None)
+        if callable(list_groups):
+            rows = await list_groups()
+            choices = [
+                {"value": str(item["id"]), "label": str(item.get("name") or item["id"])}
+                for item in (rows or []) if isinstance(item, dict) and item.get("id") is not None
+            ]
+            return {"field": "group_ids", "kind": "list", "choices": choices} if choices else None
+        list_inbounds = getattr(self, "list_inbounds", None)
+        if callable(list_inbounds):
+            rows = await list_inbounds()
+            choices = [
+                {"value": str(item["id"]), "label": f'{item.get("remark") or item["id"]} · {item.get("protocol") or ""} · {item.get("port") or ""}'.strip(" ·")}
+                for item in (rows or []) if isinstance(item, dict) and item.get("id") is not None
+            ]
+            return {"field": "xui_inbound_ids", "kind": "list", "choices": choices} if choices else None
+        return None
+
     @abstractmethod
     async def create_user(self, username: str, volume_gb: int, duration_days: int, start_on_first_use: bool = False) -> PanelUserResult:
         """کاربر جدید روی پنل می‌سازد و لینک اشتراک را برمی‌گرداند."""
@@ -154,6 +179,42 @@ class BasePanelProvider(ABC):
         پیاده‌سازی پیش‌فرض: پشتیبانی نمی‌شود؛ provider هایی که این قابلیت را
         دارند این متد را override می‌کنند."""
         raise PanelError("این نوع پنل از فعال/غیرفعال کردن مستقیم کاربر پشتیبانی نمی‌کند.")
+
+    @staticmethod
+    def _norm_binding(value):
+        """شکل قابل‌مقایسه‌ی لیست/دیکشنریِ inbound، گروه یا سرویس."""
+        if isinstance(value, dict):
+            return {str(k): sorted(str(x) for x in (v or [])) for k, v in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return sorted(str(x) for x in value)
+        return [] if value in (None, "") else [str(value)]
+
+    async def _sync_binding(self, session, headers, path: str, field: str, target) -> bool:
+        """کاربر را GET می‌کند و اگر فیلد field با target فرق داشت با PUT یکی می‌کند (Marzban/Marzneshin)."""
+        url = f"{self._base_url()}{path}"
+        try:
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                if resp.status == 404:
+                    raise PanelError("کاربر روی پنل پیدا نشد.")
+                if resp.status >= 400:
+                    raise PanelError(f"خطا در دریافت کاربر (کد {resp.status})")
+                current = await resp.json()
+            if self._norm_binding(current.get(field)) == self._norm_binding(target):
+                return False
+            async with session.put(url, json={field: target}, headers=headers,
+                                   timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                if resp.status >= 400:
+                    text = await resp.text()
+                    raise PanelError(f"خطا در هم‌گام‌سازی کاربر (کد {resp.status}): {text[:300]}")
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            raise PanelError(f"خطا در اتصال به پنل: {e or 'timeout'}") from e
+        return True
+
+    supports_template_resync = False
+
+    async def resync_user_template(self, username: str) -> bool:
+        """گروه/قالب کاربر را با قالب فعلی سرور هم‌گام می‌کند؛ True یعنی تغییری اعمال شد."""
+        return False
 
     async def rename_user(self, username: str, new_username: str) -> str:
         """نام/شناسه‌ی کاربر را روی خودِ پنل عوض می‌کند. اگر تغییر نام باعث

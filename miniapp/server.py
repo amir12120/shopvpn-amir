@@ -105,7 +105,9 @@ from reseller_auto_provision import provision_auto_config, provision_test_config
 from test_config_provision import provision_test_plan, format_plan_amount, ProvisionError as TestPlanProvisionError
 from direct_panel_provision import provision_direct, ProvisionError as DirectProvisionError
 from renewal_engine import execute_renewal, RenewalError
+import renewal_rules
 from user_limit import price_for_users as _ul_price_for_users, renewal_users as _ul_renewal_users
+from panel_capabilities import all_panels_support, normalize_user_limit, USER_LIMIT
 from service_refund import (
     quote_service_refund, refund_quote_text, wallet_refund_amount, grant_service_refund_credit, refund_result_text,
 )
@@ -180,6 +182,7 @@ class Tenant:
     tenant_id: str  # "" برای بات اصلی، در غیر این صورت id عددی نماینده به‌صورت رشته
 
 
+logger = logging.getLogger("miniapp")
 _tenant_logger = logging.getLogger("miniapp.tenant")
 
 
@@ -1048,6 +1051,8 @@ def api_custom_config_renewal_full_plans(custom_config_id: int, auth=Depends(get
     cc = _owned_custom_config_or_404(db, custom_config_id, tg_id)
     all_products = [p for p in db.get_all_products() if p["is_auto_provision"] and p["is_active"]]
     products = [p for p in all_products if p["provision_server_id"] == cc["panel_server_id"]]
+    # قوانین «تمدید کامل» هر محصول (خاموش‌بودن تمدید / فقط-هم‌نوع)
+    products = renewal_rules.filter_products(products, cc)
     discount_percent = _early_renewal_discount_percent(db, cc)
     result = []
     for p in products:
@@ -1059,6 +1064,10 @@ def api_custom_config_renewal_full_plans(custom_config_id: int, auth=Depends(get
             "original_price": price if discount_percent else None,
             "discount_percent": discount_percent or None,
             "volume_gb": p["auto_provision_volume_gb"], "duration_days": p["duration_days"],
+            "renew_reset": not renewal_rules.product_rules(p)["renew_carry_volume"]
+                           and not renewal_rules.product_rules(p)["renew_carry_time"],
+            "carry_volume": bool(renewal_rules.product_rules(p)["renew_carry_volume"]),
+            "carry_time": bool(renewal_rules.product_rules(p)["renew_carry_time"]),
         })
     return result
 
@@ -1077,6 +1086,9 @@ async def api_custom_config_renew_full(custom_config_id: int, body: RenewFullBod
         raise HTTPException(status_code=400, detail=tr("این پلن یافت نشد."))
     if product["provision_server_id"] != cc["panel_server_id"]:
         raise HTTPException(status_code=400, detail=tr("این پلن روی پنل این سرویس تعریف نشده است."))
+    if not renewal_rules.is_renewable_for(product, cc):
+        raise HTTPException(status_code=400, detail=tr("این پلن برای تمدید کامل این سرویس مجاز نیست."))
+    carry_volume, carry_time = renewal_rules.order_flags(product)
 
     user_row = db.get_user(tg_id)
     if user_row and user_row["is_blocked"]:
@@ -1099,7 +1111,7 @@ async def api_custom_config_renew_full(custom_config_id: int, body: RenewFullBod
 
     order_id = db.create_renewal_order(
         tg_id, "custom", cc["id"], "full", add_volume, add_days, price, wallet_used,
-        user_limit=users or None,
+        user_limit=users or None, carry_volume=carry_volume, carry_time=carry_time,
     )
     order = db.get_order(order_id)
 
@@ -4915,10 +4927,17 @@ class ProductCreate(BaseModel):
     is_auto_provision: bool = False
     auto_provision_volume_gb: Optional[int] = None
     provision_server_id: Optional[int] = None
+    provision_target_values: Optional[List[str]] = None
+    extra_panel_ids: Optional[List[int]] = None
+    extra_panel_target_values: Optional[Dict[str, List[str]]] = None
     payment_methods: Optional[List[str]] = None
     compare_price: Optional[int] = None  # قیمت قبل از تخفیف (نمایشی)
     discount_days: Optional[int] = None
     discount_max_uses: Optional[int] = None
+    base_users: int = 0
+    extra_user_price: int = 0
+    max_users: int = 0
+    renew_rules: Optional[dict] = None  # قوانین تمدید کامل (renewal_rules.py)
 
 
 class ProductUpdate(BaseModel):
@@ -4928,10 +4947,15 @@ class ProductUpdate(BaseModel):
     duration_days: Optional[int] = None
     source: Optional[str] = None
     provision_server_id: Optional[int] = None
+    provision_target_values: Optional[List[str]] = None
     auto_provision_volume_gb: Optional[int] = None
     compare_price: Optional[int] = None  # 0 یعنی حذف تخفیف
     discount_days: Optional[int] = None
     discount_max_uses: Optional[int] = None
+    base_users: Optional[int] = None
+    extra_user_price: Optional[int] = None
+    max_users: Optional[int] = None
+    renew_rules: Optional[dict] = None
 
 
 class ConfigsAdd(BaseModel):
@@ -5384,7 +5408,10 @@ def api_admin_panel_servers_lite(auth=Depends(require_senior_admin)):
     _, db, tenant = auth
     if not db.is_full_access_bot(not bool(tenant.tenant_id)):
         raise HTTPException(status_code=403, detail=tr("این بخش فقط برای بات اصلی یا نمایندگی کامل در دسترس است."))
-    return [{"id": s["id"], "name": s["name"]} for s in db.get_panel_servers(active_only=True)]
+    from panel_capabilities import provider_capabilities, USER_LIMIT
+    return [{"id": s["id"], "name": s["name"], "panel_type": s["panel_type"],
+             "supports_user_limit": provider_capabilities(s["panel_type"])[USER_LIMIT]}
+            for s in db.get_panel_servers(active_only=True)]
 
 
 @app.get("/api/admin/catalog-capabilities")
@@ -5408,8 +5435,11 @@ def api_admin_list_products(cat_id: int, auth=Depends(require_senior_admin)):
             "is_active": bool(p["is_active"]),
             "is_auto_provision": bool(p["is_auto_provision"]),
             "provision_server_id": p["provision_server_id"],
+            "provision_target_config": p["provision_target_config"] if "provision_target_config" in p.keys() else None,
             "auto_provision_volume_gb": p["auto_provision_volume_gb"],
             "stock": None if p["is_auto_provision"] else db.count_available_configs(p["id"]),
+            "base_users": p["base_users"] or 0, "extra_user_price": p["extra_user_price"] or 0, "max_users": p["max_users"] or 0,
+            **renewal_rules.product_rules(p),
         }
         for p in products
     ]
@@ -5433,7 +5463,7 @@ def api_admin_list_all_products(auth=Depends(require_senior_admin)):
 
 
 @app.post("/api/admin/products")
-def api_admin_create_product(body: ProductCreate, auth=Depends(require_senior_admin)):
+async def api_admin_create_product(body: ProductCreate, auth=Depends(require_senior_admin)):
     _, db, tenant = auth
     if not db.get_category(body.category_id):
         raise HTTPException(status_code=404, detail=tr("دسته‌بندی یافت نشد."))
@@ -5459,17 +5489,106 @@ def api_admin_create_product(body: ProductCreate, auth=Depends(require_senior_ad
         if body.auto_provision_volume_gb == 0 and not provision_server_id:
             raise HTTPException(status_code=400, detail=tr("حجم نامحدود فقط برای محصولات با اتصال مستقیم به پنل ممکن است."))
 
+    panel_rows = [db.get_panel_server(provision_server_id)] if provision_server_id else []
+    supports_limit = all_panels_support(panel_rows, USER_LIMIT)
+    try:
+        base_users, extra_user_price, max_users = normalize_user_limit(
+            body.base_users, body.extra_user_price, body.max_users, supported=supports_limit
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    target_config = None
+    if provision_server_id:
+        server = db.get_panel_server(provision_server_id)
+        try:
+            from product_targets import list_product_targets, build_target_config
+            target_info = await list_product_targets(server)
+            choices = target_info.get("choices") or []
+            if choices:
+                if not body.provision_target_values:
+                    raise ValueError("برای این پنل باید حداقل یک گروه یا Inbound انتخاب کنید.")
+                target_config = build_target_config(server, body.provision_target_values, target_info)
+            elif body.provision_target_values:
+                raise ValueError("این پنل مقصد قابل انتخابی ارائه نمی‌کند؛ از قالب ذخیره‌شده پنل استفاده می‌شود.")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            logger.warning("product target validation failed for panel %s: %s", provision_server_id, exc)
+            raise HTTPException(status_code=400, detail=tr(f"بررسی مقصدهای پنل ناموفق بود: {str(exc)[:220]}"))
+
+    extra_panel_ids = []
+    extra_panel_target_configs = {}
+    if provision_server_id and body.extra_panel_ids:
+        if not is_full_access:
+            raise HTTPException(status_code=403, detail=tr("چندپنلی فقط برای بات اصلی مجاز است."))
+        import dedicated_sub
+        if not dedicated_sub.is_enabled(db):
+            raise HTTPException(status_code=400, detail="برای محصول چندپنلی باید ساب اختصاصی فعال باشد.")
+        from product_targets import list_product_targets, build_target_config
+        for raw_sid in body.extra_panel_ids:
+            sid = int(raw_sid)
+            if sid <= 0 or sid == int(provision_server_id) or sid in extra_panel_ids:
+                continue
+            extra_server = db.get_panel_server(sid)
+            if not extra_server or not extra_server["is_active"]:
+                raise HTTPException(status_code=400, detail=f"پنل اضافه #{sid} فعال نیست.")
+            extra_panel_ids.append(sid)
+            try:
+                info = await list_product_targets(extra_server)
+                values = (body.extra_panel_target_values or {}).get(str(sid))
+                choices = info.get("choices") or []
+                if choices and not values:
+                    raise ValueError(f"برای پنل {extra_server['name']} باید مقصد مستقل انتخاب کنید.")
+                if values:
+                    extra_panel_target_configs[sid] = build_target_config(extra_server, values, info)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=tr(f"دریافت مقصدهای پنل {sid} ناموفق بود: {str(exc)[:180]}"))
+
+    if extra_panel_ids and (base_users or extra_user_price or max_users):
+        from panel_capabilities import all_panels_support, USER_LIMIT
+        all_rows = [db.get_panel_server(sid) for sid in [provision_server_id] + extra_panel_ids]
+        try:
+            base_users, extra_user_price, max_users = normalize_user_limit(
+                base_users, extra_user_price, max_users,
+                supported=all_panels_support(all_rows, USER_LIMIT),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
     product_id = db.add_product(
         body.category_id, body.name.strip(), body.price, body.description, body.duration_days,
         is_auto_provision=is_auto_provision, auto_provision_volume_gb=body.auto_provision_volume_gb,
         provision_server_id=provision_server_id, payment_methods=body.payment_methods,
         compare_price=max(int(body.compare_price or 0), 0),
+        base_users=base_users, extra_user_price=extra_user_price, max_users=max_users,
+        provision_target_config=target_config, extra_panel_ids=extra_panel_ids,
+        extra_panel_target_configs=extra_panel_target_configs,
+        renew_rules=body.renew_rules,
     )
     if int(body.compare_price or 0) > 0 and (body.discount_days is not None or body.discount_max_uses is not None):
         db.edit_product(product_id, compare_price=int(body.compare_price),
                         discount_days=max(int(body.discount_days or 0), 0),
                         discount_max_uses=max(int(body.discount_max_uses or 0), 0))
     return {"id": product_id}
+
+
+@app.get("/api/admin/panel-servers/{server_id}/product-targets")
+async def api_admin_product_targets(server_id: int, auth=Depends(require_senior_admin)):
+    """Live target choices for product-scoped VPN destination selection."""
+    _, db, _ = auth
+    server = db.get_panel_server(server_id)
+    if not server or not server["is_active"]:
+        raise HTTPException(status_code=404, detail=tr("پنل فعال یافت نشد."))
+    try:
+        from product_targets import list_product_targets
+        info = await list_product_targets(server)
+    except Exception as exc:
+        logger.warning("product target discovery failed for panel %s: %s", server_id, exc)
+        raise HTTPException(status_code=400, detail=tr(f"دریافت فهرست مقصدهای پنل ناموفق بود: {str(exc)[:220]}"))
+    return info
 
 
 @app.get("/api/admin/payment-methods")
@@ -5480,7 +5599,7 @@ def api_admin_payment_methods(auth=Depends(require_senior_admin)):
 
 
 @app.patch("/api/admin/products/{product_id}")
-def api_admin_edit_product(product_id: int, body: ProductUpdate, auth=Depends(require_senior_admin)):
+async def api_admin_edit_product(product_id: int, body: ProductUpdate, auth=Depends(require_senior_admin)):
     admin_id, db, tenant = auth
     old_product = db.get_product(product_id)
     if not old_product:
@@ -5527,6 +5646,41 @@ def api_admin_edit_product(product_id: int, body: ProductUpdate, auth=Depends(re
     else:
         effective_server_id = provision_server_id if provision_server_id is not None else old_product["provision_server_id"]
 
+    target_config_update = ...
+    if body.source == "bank":
+        target_config_update = None
+    elif effective_server_id:
+        server_changed = int(effective_server_id or 0) != int(old_product["provision_server_id"] or 0)
+        if body.provision_target_values is not None:
+            server = db.get_panel_server(effective_server_id)
+            try:
+                from product_targets import list_product_targets, build_target_config
+                target_info = await list_product_targets(server)
+                choices = target_info.get("choices") or []
+                if choices:
+                    target_config_update = build_target_config(server, body.provision_target_values, target_info)
+                elif body.provision_target_values:
+                    raise ValueError("این پنل مقصد قابل انتخابی ارائه نمی‌کند.")
+                else:
+                    target_config_update = None
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=tr(f"بررسی مقصدهای پنل ناموفق بود: {str(exc)[:220]}"))
+        elif server_changed:
+            # A changed panel must not silently fall back when that provider exposes
+            # selectable destinations; require the UI to submit a fresh selection.
+            try:
+                from product_targets import list_product_targets
+                changed_target_info = await list_product_targets(db.get_panel_server(effective_server_id))
+                if changed_target_info.get("choices"):
+                    raise ValueError("پنل محصول تغییر کرده است؛ فهرست مقصدها را بارگذاری و حداقل یک گروه یا Inbound انتخاب کنید.")
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=tr(f"بررسی مقصدهای پنل جدید ناموفق بود: {str(exc)[:220]}"))
+            target_config_update = None
+
     if body.duration_days is not None:
         if body.duration_days < 0:
             raise HTTPException(status_code=400, detail=tr("مدت اعتبار نامعتبر است."))
@@ -5553,6 +5707,13 @@ def api_admin_edit_product(product_id: int, body: ProductUpdate, auth=Depends(re
         edit_kwargs["provision_server_id"] = provision_server_id
     if body.auto_provision_volume_gb is not None and body.source != "bank":
         edit_kwargs["auto_provision_volume_gb"] = body.auto_provision_volume_gb
+    if target_config_update is not ...:
+        edit_kwargs["provision_target_config"] = target_config_update
+    effective_product_server = provision_server_id if provision_server_id is not None else old_product["provision_server_id"]
+    desired_base = body.base_users if body.base_users is not None else old_product["base_users"]
+    desired_extra = body.extra_user_price if body.extra_user_price is not None else old_product["extra_user_price"]
+    desired_max = body.max_users if body.max_users is not None else old_product["max_users"]
+
     db.edit_product(
         product_id,
         name=body.name.strip() if body.name else None,
@@ -5561,6 +5722,19 @@ def api_admin_edit_product(product_id: int, body: ProductUpdate, auth=Depends(re
         duration_days=body.duration_days,
         **edit_kwargs,
     )
+    saved_product = db.get_product(product_id)
+    panel_rows = [db.get_panel_server(effective_product_server)] if effective_product_server else []
+    try:
+        bu, eup, mu = normalize_user_limit(
+            desired_base, desired_extra, desired_max,
+            supported=all_panels_support(panel_rows, USER_LIMIT),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    db.set_product_user_limit(product_id, eup, mu, bu)
+    if body.renew_rules is not None:
+        db.set_product_renew_rules(product_id, body.renew_rules)
+
     if body.price is not None and body.price != old_product["price"]:
         db.log_admin_action(
             admin_id, "product_price_edit",
@@ -6172,6 +6346,119 @@ def api_admin_set_extra_settings(body: ExtraSettingsUpdate, auth=Depends(require
     if changed:
         db.log_admin_action(auth[0], "setting_change", "extra settings updated (میناپ): " + ", ".join(changed), "setting", "extra")
     return {"ok": True, "changed": changed}
+
+
+# ---- رجیستری دکمه‌ها (button_registry.py): همان منطق تب «دکمه‌های ربات» پنل وب ----
+class ButtonItemIn(BaseModel):
+    group: str
+    key: str
+    text: Optional[str] = None
+    style: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
+class ButtonLayoutIn(BaseModel):
+    group: str
+    order: List[str]
+    breaks: List[str] = []
+
+
+class AdminItemCategoriesIn(BaseModel):
+    overrides: Dict[str, str]
+
+
+@app.get("/api/admin/buttons")
+def api_admin_buttons_registry(auth=Depends(require_senior_admin)):
+    import button_registry
+    _, db, _ = auth
+    return button_registry.build_registry(db)
+
+
+@app.post("/api/admin/buttons/item")
+def api_admin_buttons_item(body: ButtonItemIn, auth=Depends(require_senior_admin)):
+    import button_registry
+    admin_id, db, _ = auth
+    try:
+        button_registry.update_item(db, body.group, body.key, text=body.text, style=body.style, enabled=body.enabled)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.log_admin_action(admin_id, "button_customize",
+                        f"دکمه‌ی «{body.key}» در گروه «{body.group}» ویرایش شد (مینی‌اپ)",
+                        "setting", f"{body.group}:{body.key}")
+    return {"ok": True}
+
+
+@app.post("/api/admin/buttons/layout")
+def api_admin_buttons_layout(body: ButtonLayoutIn, auth=Depends(require_senior_admin)):
+    import button_registry
+    admin_id, db, _ = auth
+    try:
+        button_registry.update_layout(db, body.group, body.order, body.breaks)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.log_admin_action(admin_id, "button_reorder", f"چیدمان گروه «{body.group}» تغییر کرد (مینی‌اپ)",
+                        "setting", body.group)
+    return {"ok": True}
+
+
+@app.post("/api/admin/buttons/admin-item-categories")
+def api_admin_buttons_admin_item_categories(body: AdminItemCategoriesIn, auth=Depends(require_senior_admin)):
+    import button_registry
+    admin_id, db, _ = auth
+    try:
+        button_registry.set_admin_item_categories(db, body.overrides)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.log_admin_action(admin_id, "button_reorder", "دسته‌ی دکمه‌های پنل مدیریت جابجا شد (مینی‌اپ)",
+                        "setting", "admin_item_categories")
+    return {"ok": True}
+
+
+# ---- پس‌زمینه‌ی QR: فایل مشترک بات اصلی، پس فقط ادمین بات اصلی (نه نمایندگی‌ها) ----
+def _qr_bg_status(db):
+    import config_delivery as _cd
+    return {"has": _cd.has_qr_background(), "enabled": _cd.qr_background_enabled(db)}
+
+
+@app.get("/api/admin/settings/qr-background")
+def api_admin_get_qr_background(auth=Depends(require_main_admin)):
+    _, db, _ = auth
+    return _qr_bg_status(db)
+
+
+@app.get("/api/admin/settings/qr-background/preview")
+def api_admin_qr_background_preview(auth=Depends(require_main_admin)):
+    import config_delivery as _cd
+    _, db, _ = auth
+    if not _cd.has_qr_background():
+        raise HTTPException(status_code=404, detail=tr("هنوز تصویر پس‌زمینه‌ای آپلود نشده است."))
+    png = _cd.build_qr_bytes("https://t.me/", db=db)
+    return {"image": "data:image/png;base64," + base64.b64encode(png).decode("ascii")}
+
+
+@app.post("/api/admin/settings/qr-background")
+async def api_admin_set_qr_background(photo: UploadFile = File(...), auth=Depends(require_main_admin)):
+    import config_delivery as _cd
+    admin_id, db, _ = auth
+    if not photo.content_type or not photo.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail=tr("فقط فایل تصویری مجاز است."))
+    content = await photo.read(_cd.QR_BACKGROUND_MAX_BYTES + 1)
+    try:
+        await asyncio.to_thread(_cd.save_qr_background_bytes, content)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.set_setting("qr_background_enabled", "1")
+    db.log_admin_action(admin_id, "qr_background_change", "تصویر پس‌زمینه‌ی QR تغییر کرد (مینی‌اپ)")
+    return _qr_bg_status(db)
+
+
+@app.delete("/api/admin/settings/qr-background")
+def api_admin_delete_qr_background(auth=Depends(require_main_admin)):
+    import config_delivery as _cd
+    admin_id, db, _ = auth
+    _cd.remove_qr_background()
+    db.log_admin_action(admin_id, "qr_background_remove", "تصویر پس‌زمینه‌ی QR حذف شد (مینی‌اپ)")
+    return _qr_bg_status(db)
 
 
 @app.get("/api/admin/settings/referral")

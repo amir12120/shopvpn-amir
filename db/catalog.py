@@ -271,7 +271,8 @@ class CatalogMixin:
                      provision_server_id: int = None, payment_methods=None,
                      base_users: int = 0, extra_user_price: int = 0, max_users: int = 0,
                      compare_price: int = 0, provision_ssh_node_id: int = None,
-                     provision_ssh_protocol: str = "ssh") -> int:
+                     provision_ssh_protocol: str = "ssh",
+                     extra_panel_ids=(), extra_ssh_node_ids=(), provision_target_config=None, extra_panel_target_configs=None, renew_rules=None) -> int:
         """payment_methods: None/[] یعنی «همه‌ی روش‌های پرداخت مجازند» (پیش‌فرض)،
         در غیر این صورت لیستی از کلیدهای مجاز - همان قراردادِ set_product_payment_methods.
 
@@ -289,14 +290,40 @@ class CatalogMixin:
             cur = conn.execute(
                 "INSERT INTO products (category_id, name, price, description, duration_days, "
                 "is_auto_provision, auto_provision_volume_gb, provision_server_id, provision_ssh_node_id, payment_methods, "
-                "base_users, extra_user_price, max_users, compare_price, provision_ssh_protocol) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "base_users, extra_user_price, max_users, compare_price, provision_ssh_protocol, provision_target_config) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (category_id, name, price, description, duration_days,
                  1 if is_auto_provision else 0, auto_provision_volume_gb, provision_server_id, provision_ssh_node_id, pm_value,
                  base_users, extra_user_price, max_users, compare_price,
-                 _normalize_ssh_protocols(provision_ssh_protocol) if provision_ssh_node_id else "ssh"),
+                 _normalize_ssh_protocols(provision_ssh_protocol) if provision_ssh_node_id else "ssh",
+                 json.dumps(provision_target_config, ensure_ascii=False) if provision_target_config else None),
             )
-            return cur.lastrowid
+            product_id = cur.lastrowid
+            if renew_rules:
+                from renewal_rules import normalize, RULE_KEYS
+                rules = normalize(renew_rules)
+                conn.execute(
+                    "UPDATE products SET " + ", ".join(f"{k}=?" for k in RULE_KEYS) + " WHERE id=?",
+                    [rules[k] for k in RULE_KEYS] + [product_id],
+                )
+            position = 0
+            for kind, ids in (("panel", extra_panel_ids), ("ssh", extra_ssh_node_ids)):
+                seen = set()
+                for raw in ids or ():
+                    target = int(raw)
+                    if target <= 0 or target in seen:
+                        continue
+                    seen.add(target)
+                    target_config = None
+                    if kind == "panel" and extra_panel_target_configs:
+                        target_config = extra_panel_target_configs.get(target, extra_panel_target_configs.get(str(target)))
+                    conn.execute(
+                        "INSERT INTO product_extra_targets (product_id,kind,target_id,position,target_config) VALUES (?,?,?,?,?)",
+                        (product_id, kind, target, position,
+                         json.dumps(target_config, ensure_ascii=False) if target_config else None),
+                    )
+                    position += 1
+            return product_id
 
 
     def expire_product_discounts(self) -> int:
@@ -409,7 +436,7 @@ class CatalogMixin:
                       is_auto_provision=..., auto_provision_volume_gb=...,
                       provision_server_id=..., payment_methods=..., category_id: int = None,
                       provision_ssh_node_id=..., provision_ssh_protocol=...,
-                      compare_price=..., discount_days=..., discount_max_uses=...):
+                      compare_price=..., discount_days=..., discount_max_uses=..., provision_target_config=...):
         # نکته: is_auto_provision/auto_provision_volume_gb/provision_server_id از سنتینل
         # Ellipsis استفاده می‌کنند (مثل payment_methods) چون باید بتوان آن‌ها را عمداً
         # NULL/False کرد (مثلاً وقتی محصول از «اتصال مستقیم به پنل» به «بانک کانفیگ»
@@ -431,6 +458,9 @@ class CatalogMixin:
             fields.append("auto_provision_volume_gb=?"); values.append(auto_provision_volume_gb)
         if provision_server_id is not ...:
             fields.append("provision_server_id=?"); values.append(provision_server_id)
+        if provision_target_config is not ...:
+            fields.append("provision_target_config=?")
+            values.append(json.dumps(provision_target_config, ensure_ascii=False) if provision_target_config else None)
         if provision_ssh_node_id is not ...:
             fields.append("provision_ssh_node_id=?"); values.append(provision_ssh_node_id)
         if provision_ssh_protocol is not ...:
@@ -464,6 +494,63 @@ class CatalogMixin:
                 conn.execute("DELETE FROM product_extra_targets WHERE product_id=?", (product_id,))
 
 
+    def repair_product_capabilities(self) -> int:
+        """Normalize stored user-limit settings against the product's actual VPN targets.
+
+        SSH targets are intentionally ignored. This is a one-time/cheap consistency
+        repair used after schema migrations so old products cannot retain a user limit
+        that their current provider combination cannot enforce.
+        """
+        from panel_capabilities import all_panels_support, normalize_user_limit, USER_LIMIT
+
+        changed = 0
+        with self._get_conn() as conn:
+            products = conn.execute(
+                "SELECT id, provision_server_id, base_users, extra_user_price, max_users FROM products"
+            ).fetchall()
+            for product in products:
+                panel_ids = [int(product["provision_server_id"])] if product["provision_server_id"] else []
+                extras = conn.execute(
+                    "SELECT target_id FROM product_extra_targets WHERE product_id=? AND kind='panel' ORDER BY position,id",
+                    (int(product["id"]),),
+                ).fetchall()
+                panel_ids.extend(int(r["target_id"]) for r in extras)
+                panel_ids = list(dict.fromkeys(panel_ids))
+                rows = []
+                for pid in panel_ids:
+                    rows.append(conn.execute("SELECT id,panel_type,is_active FROM panel_servers WHERE id=?", (pid,)).fetchone())
+                supported = all_panels_support(rows, USER_LIMIT)
+                try:
+                    base, extra, maximum = normalize_user_limit(
+                        product["base_users"], product["extra_user_price"], product["max_users"],
+                        supported=supported,
+                    )
+                except ValueError:
+                    base, extra, maximum = 0, 0, 0
+                if (int(product["base_users"] or 0), int(product["extra_user_price"] or 0), int(product["max_users"] or 0)) != (base, extra, maximum):
+                    conn.execute(
+                        "UPDATE products SET base_users=?, extra_user_price=?, max_users=? WHERE id=?",
+                        (base, extra, maximum, int(product["id"])),
+                    )
+                    changed += 1
+        return changed
+
+
+    def set_product_renew_rules(self, product_id: int, rules: dict) -> dict:
+        """ذخیره‌ی «قوانین تمدید کامل» محصول. کلیدهای ارسال‌نشده مقدار فعلیِ محصول را نگه می‌دارند."""
+        from renewal_rules import normalize, RULE_KEYS
+        with self._get_conn() as conn:
+            row = conn.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
+            if not row:
+                return None
+            merged = {k: (rules[k] if k in (rules or {}) and rules[k] is not None else row[k]) for k in RULE_KEYS}
+            final = normalize(merged)
+            conn.execute(
+                "UPDATE products SET " + ", ".join(f"{k}=?" for k in RULE_KEYS) + " WHERE id=?",
+                [final[k] for k in RULE_KEYS] + [product_id],
+            )
+            return final
+
     def set_product_user_limit(self, product_id: int, extra_user_price: int, max_users: int,
                                base_users: int = None):
         """base_users=None: ستون base_users دست نمی‌خورد (رفتار قدیمی).
@@ -493,6 +580,7 @@ class CatalogMixin:
         with self._get_conn() as conn:
             conn.execute("DELETE FROM products WHERE id=?", (product_id,))
             conn.execute("DELETE FROM product_waitlist WHERE product_id=?", (product_id,))
+            conn.execute("DELETE FROM product_extra_targets WHERE product_id=?", (product_id,))
 
     # -----------------------------------------------------------------------
     # مخزن کانفیگ (بانک لینک)
@@ -1388,7 +1476,7 @@ class CatalogMixin:
                            volume_gb: int, duration_days: int, subscription_url: str,
                            order_id: int = None, expires_at: str = None, source: str = "custom_config",
                            product_id: int = None, start_on_first_use: bool = None,
-                           reseller_product_id: int = None, user_limit: int = None) -> int:
+                           reseller_product_id: int = None, user_limit: int = None, panel_target_config=None) -> int:
         """source: 'custom_config' (خرید شخصی)، 'test' (کانفیگ تست پنلی)، یا 'reseller'.
         duration_days=0 یعنی سرویس نامحدود/بدون انقضاست؛ در این حالت expires_at
         خالی (NULL) می‌ماند تا همه‌جا به‌صورت «نامحدود» نمایش داده شود. product_id
@@ -1405,9 +1493,10 @@ class CatalogMixin:
             cur = conn.execute(
                 "INSERT INTO custom_configs (order_id, user_id, panel_server_id, username, volume_gb, "
                 "duration_days, subscription_url, expires_at, source, product_id, start_on_first_use, reseller_product_id, "
-                "user_limit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "user_limit, panel_target_config) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (order_id, user_id, panel_server_id, username, volume_gb, duration_days, subscription_url,
-                 expires_at, source, product_id, int(bool(start_on_first_use)), reseller_product_id, user_limit),
+                 expires_at, source, product_id, int(bool(start_on_first_use)), reseller_product_id, user_limit,
+                 json.dumps(panel_target_config, ensure_ascii=False) if panel_target_config else None),
             )
             new_id = cur.lastrowid
         self.add_custom_config_history(new_id, "purchase", f"{volume_gb} گیگ / {duration_days} روز")
@@ -1525,7 +1614,8 @@ class CatalogMixin:
 
 
     def apply_custom_config_renewal(self, custom_config_id: int, add_volume_gb: int = 0, add_days: int = 0,
-                                     full_reset: bool = False, set_volume_gb: float = None) -> dict:
+                                     full_reset: bool = False, set_volume_gb: float = None,
+                                     reset_time: bool = False) -> dict:
         """بعد از موفقیت‌آمیز بودن به‌روزرسانی روی خودِ پنل (provider.update_user)،
         رکورد بوکینگ محلی (حجم/مدت/تاریخ انقضا) را هم‌سو با آن به‌روز می‌کند.
         set_volume_gb (اختیاری): اگر داده شود، همان مقدار دقیقاً به‌عنوان سقف جدید
@@ -1549,6 +1639,9 @@ class CatalogMixin:
                         base = current_dt
                 except ValueError:
                     pass
+            if reset_time and add_days:
+                # «ریست زمان»: زمان باقیمانده حذف می‌شود و بسته‌ی جدید از همین الان شروع می‌شود.
+                base = now
             new_expires_at = (base + timedelta(days=add_days)).isoformat() if add_days else current_expires_at
             if set_volume_gb is not None:
                 new_volume = set_volume_gb
@@ -1556,7 +1649,10 @@ class CatalogMixin:
                 new_volume = add_volume_gb if full_reset else (row["volume_gb"] or 0) + add_volume_gb
             else:
                 new_volume = row["volume_gb"]
-            new_duration = (row["duration_days"] or 0) + add_days if add_days else row["duration_days"]
+            if reset_time and add_days:
+                new_duration = add_days
+            else:
+                new_duration = (row["duration_days"] or 0) + add_days if add_days else row["duration_days"]
             rearm_time = bool(add_days) or full_reset
             rearm_volume = bool(add_volume_gb) or set_volume_gb is not None or full_reset
             conn.execute(

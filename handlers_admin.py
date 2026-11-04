@@ -7,6 +7,7 @@
 """
 from i18n import tr
 
+import renewal_rules
 import os
 import re
 import secrets
@@ -54,6 +55,7 @@ import ai_admin
 import admin_help
 import ai_media
 import admin_tools
+import admin_extra_settings
 import admin_dedicated_sub
 import admin_update
 import admin_campaign
@@ -1735,6 +1737,63 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
             return await message.answer(tr("با این درصد قیمت تغییری نمی‌کند. درصد بزرگ‌تری وارد کنید."))
         await _ask_discount_days(message, state, product, value, percent)
 
+    def _prod_renew_rules_view(product):
+        rules = renewal_rules.product_rules(product)
+        back_cb = f"adm_prod_cat:{product['category_id']}" if product["category_id"] is not None else "adm_products"
+        return (
+            tr("🔄 قوانین تمدید کامل «" + product["name"] + "»\n\nبا لمس هر گزینه، همان لحظه ذخیره می‌شود.\n"
+               "• «ریست کامل» روشن باشد، حجم و زمان باقیمانده حذف و فقط بسته‌ی جدید اعمال می‌شود.\n"
+               "• در غیر این صورت انتقال حجم و زمان باقیمانده را جداگانه تنظیم کنید."),
+            kb.admin_renew_rules_kb(rules, f"adm_prodrr_t:{product['id']}", f"adm_prodrr_close:{product['id']}", "✅ تمام", None),
+        )
+
+    @router.callback_query(F.data.startswith("adm_prodrr:"))
+    async def cb_admin_prod_renew_rules(call: CallbackQuery):
+        if not senior_admin_only(call.from_user.id):
+            return await deny_mid(call)
+        product_id = callback_id(call.data, "adm_prodrr")
+        product = (await asyncio.to_thread(db.get_product, product_id)) if product_id is not None else None
+        if not product or not product["is_auto_provision"]:
+            return await call.answer(db.get_text('handlers_admin.auto_d0d88ea3', '⚠️ این محصول خودکار نیست.'), show_alert=True)
+        text_rr, markup_rr = _prod_renew_rules_view(product)
+        await safe_edit(call, text_rr, reply_markup=markup_rr)
+        await call.answer()
+
+    @router.callback_query(F.data.startswith("adm_prodrr_t:"))
+    async def cb_admin_prod_renew_rules_toggle(call: CallbackQuery):
+        if not senior_admin_only(call.from_user.id):
+            return await deny_mid(call)
+        try:
+            _, pid_s, short = call.data.split(":")
+            product_id = int(pid_s)
+        except ValueError:
+            return await call.answer(db.get_text('handlers_admin.auto_524e296b', '❌ درخواست نامعتبر است.'), show_alert=True)
+        product = await asyncio.to_thread(db.get_product, product_id)
+        if not product or not product["is_auto_provision"]:
+            return await call.answer(db.get_text('handlers_admin.auto_d0d88ea3', '⚠️ این محصول خودکار نیست.'), show_alert=True)
+        rules, err = renewal_rules.toggle(renewal_rules.product_rules(product), short)
+        if err:
+            return await call.answer(tr(err), show_alert=True)
+        await asyncio.to_thread(db.set_product_renew_rules, product_id, rules)
+        await asyncio.to_thread(db.log_admin_action, call.from_user.id, "product_renew_rules",
+                                f"#{product_id}: " + ", ".join(f"{k}={v}" for k, v in rules.items()))
+        product = await asyncio.to_thread(db.get_product, product_id)
+        text_rr, markup_rr = _prod_renew_rules_view(product)
+        await safe_edit(call, text_rr, reply_markup=markup_rr)
+        await call.answer()
+
+    @router.callback_query(F.data.startswith("adm_prodrr_close:"))
+    async def cb_admin_prod_renew_rules_close(call: CallbackQuery):
+        if not senior_admin_only(call.from_user.id):
+            return await deny_mid(call)
+        product_id = callback_id(call.data, "adm_prodrr_close")
+        product = (await asyncio.to_thread(db.get_product, product_id)) if product_id is not None else None
+        if not product:
+            return await call.answer(db.get_text('handlers_admin.auto_524e296b', '❌ درخواست نامعتبر است.'), show_alert=True)
+        await call.answer(tr("✅ ذخیره شد."))
+        back_cb = f"adm_prod_cat:{product['category_id']}" if product["category_id"] is not None else "adm_products"
+        await safe_edit(call, tr("✅ قوانین تمدید کامل ذخیره شد."), reply_markup=kb.admin_back_kb(back_cb))
+
     @router.callback_query(F.data.startswith("adm_prod_users:"))
     async def cb_admin_prod_users(call: CallbackQuery, state: FSMContext):
         if not senior_admin_only(call.from_user.id):
@@ -1745,13 +1804,10 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
         product = (await asyncio.to_thread(db.get_product, product_id))
         if not product or not product["is_auto_provision"]:
             return await call.answer(db.get_text('handlers_admin.auto_d0d88ea3', '⚠️ این محصول خودکار نیست.'), show_alert=True)
-        if product["provision_ssh_node_id"]:
-            return await call.answer(tr("⚠️ محدودیت کاربر همزمان برای محصولات SSH پشتیبانی نمی‌شود."), show_alert=True)
-        if product["provision_server_id"]:
-            from user_limit import server_supports
-            server = await asyncio.to_thread(db.get_panel_server, product["provision_server_id"])
-            if server and not server_supports(server):
-                return await call.answer(tr("⚠️ پنل این محصول از محدودیت کاربر همزمان پشتیبانی نمی‌کند (فقط 3X-UI و علیرضا)."), show_alert=True)
+        from panel_capabilities import product_capabilities, USER_LIMIT
+        capabilities = await asyncio.to_thread(product_capabilities, db, product)
+        if not capabilities[USER_LIMIT]:
+            return await call.answer(tr("⚠️ همهٔ پنل‌های VPN این محصول از محدودیت کاربر همزمان پشتیبانی نمی‌کنند."), show_alert=True)
         await state.update_data(editing_product_id=product_id)
         await state.set_state(AdminEditProduct.waiting_user_base)
         back_cb = f"adm_prod_cat:{product['category_id']}" if product["category_id"] is not None else "adm_products"
@@ -1760,12 +1816,20 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
             f"👥 کاربر همزمان «{product['name']}»\n\n"
             "چند کاربر همزمان در قیمت این محصول گنجانده شده؟ (عدد بین ۱ تا ۲۰)\n"
             "این تعداد روی هر سرویسِ ساخته‌شده از این محصول اعمال می‌شود.\n"
-            "عدد 0 یعنی بدون محدودیت (فقط پنل‌های 3X-UI و علیرضا پشتیبانی می‌شوند):",
+            "عدد 0 یعنی بدون محدودیت.",
             reply_markup=kb.admin_back_kb(back_cb),
         )
         await call.answer()
 
     async def _finish_prod_user_limit(message: Message, state: FSMContext, product, base: int, extra_price: int, max_users: int):
+        from panel_capabilities import product_capabilities, normalize_user_limit, USER_LIMIT
+        try:
+            base, extra_price, max_users = normalize_user_limit(
+                base, extra_price, max_users,
+                supported=(await asyncio.to_thread(product_capabilities, db, product))[USER_LIMIT],
+            )
+        except ValueError as exc:
+            return await message.answer(str(exc))
         await asyncio.to_thread(db.set_product_user_limit, product["id"], extra_price, max_users, base)
         if not base:
             summary, done = "بدون محدودیت", "✅ محدودیت کاربر غیرفعال شد."
@@ -2247,14 +2311,79 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
         if server_id is None:
             await call.answer(db.get_text('handlers_admin.auto_524e296b', '❌ درخواست نامعتبر است.'), show_alert=True)
             return
-        await state.update_data(provision_server_id=server_id)
+        await state.update_data(provision_server_id=server_id, provision_target_config=None)
+        server = await asyncio.to_thread(db.get_panel_server, server_id)
+        try:
+            from product_targets import list_product_targets
+            target_info = await list_product_targets(server)
+        except Exception as exc:
+            logger.warning("product target discovery failed for panel %s: %s", server_id, exc)
+            await call.answer(tr(f"دریافت فهرست مقصدهای پنل ناموفق بود: {str(exc)[:220]}\nمحصول ساخته نشد؛ اتصال پنل را بررسی و دوباره تلاش کن."), show_alert=True)
+            return
+        choices = target_info.get("choices") or []
+        if choices:
+            await state.update_data(
+                provision_target_field=target_info.get("field", "group_ids"),
+                provision_target_kind=target_info.get("kind", "list"),
+                provision_target_choices=choices,
+                provision_target_info={"field": target_info.get("field", "group_ids"), "kind": target_info.get("kind", "list"), "choices": choices},
+                provision_target_selected=[],
+            )
+            await state.set_state(AdminAddProduct.waiting_provision_target)
+            await safe_edit(
+                call,
+                tr("🎯 مقصد ساخت سرویس این محصول را انتخاب کن.\nمی‌توانی یک یا چند گروه / Inbound را انتخاب کنی. این انتخاب فقط برای همین محصول ذخیره می‌شود."),
+                reply_markup=kb.admin_newprod_targets_kb(choices, []),
+            )
+            await call.answer()
+            return
+        # پنل‌هایی که انتخاب مستقل مقصد ندارند، بدون تغییر از قالب قدیمی سرور استفاده می‌کنند.
         data = await state.get_data()
         await state.set_state(AdminAddProduct.waiting_provision_duration_mode)
-        await safe_edit(call, 
+        await safe_edit(call,
             db.get_text('handlers_admin.auto_41f1c921', '⏳ مدت اعتبار این محصول چطور باشد؟\n\n«محدود» یعنی همان مدتی که قبلاً وارد کردید؛ «نامحدود» یعنی این سرویس هیچ\u200cوقت روی پنل منقضی نمی\u200cشود.'),
             reply_markup=kb.admin_newprod_duration_mode_kb(data.get("duration_days", 30)),
         )
         await call.answer()
+
+    @router.callback_query(AdminAddProduct.waiting_provision_target, F.data.startswith("adm_newprod_target_tgl:"))
+    async def cb_newprod_target_toggle(call: CallbackQuery, state: FSMContext):
+        value = call.data.split(":", 1)[1]
+        data = await state.get_data()
+        choices = data.get("provision_target_choices") or []
+        allowed = {str(item.get("value")) for item in choices}
+        if value not in allowed:
+            return await call.answer(tr("مقصد انتخاب‌شده معتبر نیست."), show_alert=True)
+        selected = set(str(x) for x in (data.get("provision_target_selected") or []))
+        if value in selected:
+            selected.remove(value)
+        else:
+            selected.add(value)
+        selected = sorted(selected, key=lambda x: next((i for i, c in enumerate(choices) if str(c.get("value")) == x), 999999))
+        await state.update_data(provision_target_selected=selected)
+        await safe_edit(call, tr("🎯 مقصد ساخت سرویس این محصول را انتخاب کن.\nمی‌توانی یک یا چند گروه / Inbound را انتخاب کنی."),
+                        reply_markup=kb.admin_newprod_targets_kb(choices, selected))
+        await call.answer()
+
+    @router.callback_query(AdminAddProduct.waiting_provision_target, F.data == "adm_newprod_target_done")
+    async def cb_newprod_target_done(call: CallbackQuery, state: FSMContext):
+        data = await state.get_data()
+        selected = data.get("provision_target_selected") or []
+        if not selected:
+            return await call.answer(tr("حداقل یک گروه یا Inbound انتخاب کن."), show_alert=True)
+        server = await asyncio.to_thread(db.get_panel_server, int(data["provision_server_id"]))
+        try:
+            from product_targets import build_target_config
+            target_cfg = build_target_config(server, selected, data.get("provision_target_info"))
+        except Exception as exc:
+            return await call.answer(tr(str(exc)), show_alert=True)
+        await state.update_data(provision_target_config=target_cfg)
+        await state.set_state(AdminAddProduct.waiting_provision_duration_mode)
+        await safe_edit(call,
+            db.get_text('handlers_admin.auto_41f1c921', '⏳ مدت اعتبار این محصول چطور باشد؟\n\n«محدود» یعنی همان مدتی که قبلاً وارد کردید؛ «نامحدود» یعنی این سرویس هیچ\u200cوقت روی پنل منقضی نمی\u200cشود.'),
+            reply_markup=kb.admin_newprod_duration_mode_kb(data.get("duration_days", 30)),
+        )
+        await call.answer(tr("مقصدهای این محصول ذخیره شد."))
 
     @router.callback_query(AdminAddProduct.waiting_provision_duration_mode, F.data.startswith("adm_newprod_durmode:"))
     async def cb_pick_provision_duration_mode(call: CallbackQuery, state: FSMContext):
@@ -2311,12 +2440,13 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
     async def _newprod_after_volume(state: FSMContext):
         """اگر پنل انتخاب‌شده از limitIp پشتیبانی کند، اول تعداد کاربر همزمان را می‌پرسد؛ وگرنه مستقیم روش‌های پرداخت."""
         data = await state.get_data()
-        ask_users = True
-        server_id = data.get("provision_server_id")
-        if server_id:
-            from user_limit import server_supports
-            server = await asyncio.to_thread(db.get_panel_server, server_id)
-            ask_users = bool(server and server_supports(server))
+        from panel_capabilities import all_panels_support, USER_LIMIT
+        panel_ids = []
+        if data.get("provision_server_id"):
+            panel_ids.append(int(data["provision_server_id"]))
+        panel_ids.extend(int(x) for x in (data.get("extra_panel_ids") or []))
+        panels = [await asyncio.to_thread(db.get_panel_server, sid) for sid in panel_ids]
+        ask_users = all_panels_support(panels, USER_LIMIT)
         await state.update_data(base_users=0, user_extra_price=0, user_max=0)
         if ask_users:
             await state.set_state(AdminAddProduct.waiting_base_users)
@@ -2324,17 +2454,45 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
                 tr(
                     "👥 چند کاربر همزمان (اتصال هم‌زمان) در قیمت این محصول گنجانده شود؟\n"
                     "عدد بین ۱ تا ۲۰ بفرستید؛ این تعداد روی هر سرویسِ ساخته‌شده اعمال می‌شود.\n"
-                    "عدد 0 یعنی بدون محدودیت (فقط پنل‌های 3X-UI و علیرضا پشتیبانی می‌شوند)."
+                    "عدد 0 یعنی بدون محدودیت؛ این گزینه فقط وقتی نمایش داده می‌شود که همهٔ پنل‌های VPN انتخاب‌شده پشتیبانی کنند."
                 ),
                 None,
             )
-        await state.set_state(AdminAddProduct.waiting_payment_methods)
-        return _newprod_payment_prompt()
+        await state.set_state(AdminAddProduct.waiting_renew_rules)
+        await state.update_data(renew_rules=dict(renewal_rules.DEFAULTS))
+        return _newprod_renew_prompt(dict(renewal_rules.DEFAULTS))
+
+    def _newprod_renew_prompt(rules):
+        return (
+            tr("🔄 قوانین تمدید کامل این محصول\n\nبا لمس هر گزینه، فعال/غیرفعال می‌شود.\n• «ریست کامل» روشن باشد، حجم و زمان باقیمانده حذف و فقط بسته‌ی جدید اعمال می‌شود.\n• در غیر این صورت می‌توانید انتقال حجم و زمان باقیمانده را جداگانه روشن/خاموش کنید."),
+            kb.admin_renew_rules_kb(rules, "newprodrr", "newprodrr_done", "➡️ ادامه (روش‌های پرداخت)"),
+        )
 
     async def _newprod_to_payment_methods(message: Message, state: FSMContext):
+        await state.set_state(AdminAddProduct.waiting_renew_rules)
+        await state.update_data(renew_rules=dict(renewal_rules.DEFAULTS))
+        text_rr, markup_rr = _newprod_renew_prompt(dict(renewal_rules.DEFAULTS))
+        await message.answer(text_rr, reply_markup=markup_rr)
+
+    @router.callback_query(AdminAddProduct.waiting_renew_rules, F.data.startswith("newprodrr:"))
+    async def cb_newprod_renew_toggle(call: CallbackQuery, state: FSMContext):
+        short = call.data.split(":", 1)[1]
+        data = await state.get_data()
+        rules, err = renewal_rules.toggle(data.get("renew_rules") or dict(renewal_rules.DEFAULTS), short)
+        if err:
+            return await call.answer(tr(err), show_alert=True)
+        await state.update_data(renew_rules=rules)
+        text_rr, markup_rr = _newprod_renew_prompt(rules)
+        await safe_edit(call, text_rr, reply_markup=markup_rr)
+        await call.answer()
+
+    @router.callback_query(AdminAddProduct.waiting_renew_rules, F.data == "newprodrr_done")
+    async def cb_newprod_renew_done(call: CallbackQuery, state: FSMContext):
+        await state.update_data(payment_methods=None)
         await state.set_state(AdminAddProduct.waiting_payment_methods)
         text_pm, markup_pm = _newprod_payment_prompt()
-        await message.answer(text_pm, reply_markup=markup_pm)
+        await safe_edit(call, text_pm, reply_markup=markup_pm)
+        await call.answer()
 
     @router.message(AdminAddProduct.waiting_base_users)
     async def process_newprod_base_users(message: Message, state: FSMContext):
@@ -2432,6 +2590,8 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
             base_users=int(data.get("base_users") or 0),
             extra_user_price=int(data.get("user_extra_price") or 0),
             max_users=int(data.get("user_max") or 0),
+            provision_target_config=data.get("provision_target_config"),
+            renew_rules=data.get("renew_rules"),
         ))
         pm_log = "همه" if payment_methods is None else "، ".join(payment_methods)
         if auto_provision_volume_gb is not None:
@@ -15447,6 +15607,7 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
         deny_support, deny_mid, safe_edit, replace_admin_view,
     )
 
+    admin_extra_settings.register(router, db, senior_admin_only, deny_mid, replace_admin_view)
     admin_campaign.register(router, db, senior_admin_only, deny_mid)
     admin_dedicated_sub.register(router, db, senior_admin_only, deny_mid, replace_admin_view)
     if is_main_bot:

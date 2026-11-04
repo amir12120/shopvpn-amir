@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 
 from panel_providers import get_provider, PanelError, PanelUsernameTakenError
 from user_limit import order_user_limit, provider_kwargs
+from panel_capabilities import product_capabilities, USER_LIMIT
 from ssh_uri import build_ssh_uri
 #‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 
@@ -84,7 +85,7 @@ async def provision_direct(db, product, quantity: int = 1, user_id: int = None, 
 
 
 async def _provision_vpn(db, product, quantity: int = 1, user_id: int = None, order_id: int = None,
-                         shared_pool: bool = False, server_id: int = None, register: bool = True) -> list:
+                         shared_pool: bool = False, server_id: int = None, register: bool = True, target_config_override=...) -> list:
     """ساخت کاربر روی پنل VPN. با shared_pool=True حجم روی خود پنل نامحدود ساخته می‌شود
     (سقف حجم را استخر مشترک VPN+SSH اعمال می‌کند) ولی حجم محصول در custom_configs ثبت می‌شود."""
     if not isinstance(quantity, int) or quantity < 1:
@@ -97,6 +98,14 @@ async def _provision_vpn(db, product, quantity: int = 1, user_id: int = None, or
     server = db.get_panel_server(server_id)
     if not server or not server["is_active"]:
         raise ProvisionError("پنل متصل به این محصول یافت نشد یا غیرفعال است؛ با پشتیبانی تماس بگیرید.")
+    # مقصد گروه/اینباند در سطح محصول ذخیره می‌شود؛ NULL برای محصولات قدیمی
+    # عمداً یعنی ادامه‌ی استفاده از قالب قدیمی سرور (سازگاری کامل پس از آپدیت).
+    from product_targets import apply_product_target
+    effective_product = product
+    if target_config_override is not ...:
+        effective_product = dict(product)
+        effective_product["provision_target_config"] = target_config_override
+    server = apply_product_target(server, effective_product)
 
     if not db.panel_has_capacity(server_id, quantity):
         info = db.get_panel_capacity_info(server_id) or {}
@@ -109,6 +118,10 @@ async def _provision_vpn(db, product, quantity: int = 1, user_id: int = None, or
         raise ProvisionError("حجم این محصول تنظیم نشده است.")
     # 0 یعنی نامحدود (هم برای حجم و هم برای مدت) - نباید با مقدار پیش‌فرض جایگزین شود
     duration_days = product["duration_days"] if product["duration_days"] is not None else 30
+
+    configured_user_limit = any(int(product[key] or 0) > 0 for key in ("base_users", "extra_user_price", "max_users"))
+    if configured_user_limit and not product_capabilities(db, product)[USER_LIMIT]:
+        raise ProvisionError("این محصول محدودیت کاربر دارد اما یکی از پنل‌های مقصد دیگر از آن پشتیبانی نمی‌کند؛ تنظیمات محصول را اصلاح کنید.")
 
     provider = get_provider(server)
     prefix = db.get_custom_config_prefix()
@@ -181,6 +194,7 @@ async def _provision_vpn(db, product, quantity: int = 1, user_id: int = None, or
                     user_id, server["id"], item["username"], item["volume_gb"], item["duration_days"],
                     item["subscription_url"], order_id=order_id, source="direct_product",
                     user_limit=item.get("user_limit"),
+                    panel_target_config=(effective_product["provision_target_config"] if "provision_target_config" in effective_product.keys() else None),
                 )
             except Exception:
                 # مسیر خودِ ساخت روی پنل قبلاً موفق شده (والا اصلاً به این بلوک
@@ -272,6 +286,9 @@ async def _provision_multi(db, product, targets: dict, quantity: int = 1, user_i
     if user_id is None or not isinstance(quantity, int) or quantity < 1:
         raise ProvisionError("شناسه کاربر یا تعداد برای ساخت محصول چندمقصدی نامعتبر است.")
     panel_ids, node_ids = list(targets["panels"]), list(targets["ssh"])
+    configured_user_limit = any(int(product[key] or 0) > 0 for key in ("base_users", "extra_user_price", "max_users"))
+    if configured_user_limit and not product_capabilities(db, product)[USER_LIMIT]:
+        raise ProvisionError("محدودیت کاربر این محصول با یکی از پنل‌های مقصد سازگار نیست؛ تنظیمات محصول را اصلاح کنید.")
     if not panel_ids and any(p in FILE_PROTOCOLS for p in _product_ssh_protocols(product)):
         raise ProvisionError("تحویل فایل OpenVPN/WireGuard حداقل یک پنل VPN در محصول لازم دارد.")
     for sid in panel_ids:
@@ -328,6 +345,8 @@ async def _provision_multi_unit(db, product, panel_ids, node_ids, user_id, order
         db.delete_quota_pool(pool_id)
 
     try:
+        extra_target_data = db.get_product_extra_targets(int(product["id"]))
+        panel_target_configs = extra_target_data.get("panel_target_configs") or {}
         from ssh_service import node_protocols
         wanted_protocols = _product_ssh_protocols(product)
         nodes_by_id = {int(n["id"]): n for n in db.list_ssh_nodes(active_only=True)}
@@ -345,8 +364,16 @@ async def _provision_multi_unit(db, product, panel_ids, node_ids, user_id, order
                     db, product, quantity=1, user_id=user_id, order_id=order_id,
                     allow_openvpn=bool(panel_ids), node_id=node_id, pool_id=pool_id, protocol=proto))
         for index, server_id in enumerate(panel_ids):
-            built = await _provision_vpn(db, product, quantity=1, user_id=user_id, order_id=order_id,
-                                         shared_pool=True, server_id=server_id, register=(index == 0))
+            # هر پنل مقصد مستقل محصول را می‌گیرد؛ پنل اصلی از provision_target_config
+            # و پنل‌های اضافه از product_extra_targets.target_config استفاده می‌کنند.
+            per_panel_config = None
+            if index > 0:
+                per_panel_config = panel_target_configs.get(int(server_id))
+            built = await _provision_vpn(
+                db, product, quantity=1, user_id=user_id, order_id=order_id,
+                shared_pool=True, server_id=server_id, register=(index == 0),
+                target_config_override=(per_panel_config if index > 0 else ...),
+            )
             vpn_items.extend(built)
             if index == 0:
                 primary_cc_id = built[0].get("custom_config_id")
@@ -356,8 +383,10 @@ async def _provision_multi_unit(db, product, panel_ids, node_ids, user_id, order
                 for ssh_item in ssh_items:
                     db.link_ssh_account_to_config(ssh_item["account_id"], primary_cc_id)
             else:
-                link_id = db.add_config_panel_link(primary_cc_id, server_id, built[0]["username"],
-                                                   built[0]["subscription_url"])
+                link_id = db.add_config_panel_link(
+                    primary_cc_id, server_id, built[0]["username"], built[0]["subscription_url"],
+                    target_config=panel_target_configs.get(int(server_id)),
+                )
                 db.attach_quota_service(pool_id, "vpn", f"panel_link:{link_id}", node_id=server_id)
     except Exception as exc:
         await rollback()

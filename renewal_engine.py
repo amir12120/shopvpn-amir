@@ -21,6 +21,38 @@ logger = logging.getLogger(__name__)
 _GB = 1024 ** 3
 
 
+async def _update_panel_links_user_limit(db, custom_config_id: int, user_limit: int):
+    """Apply a user-limit change to every VPN panel belonging to a multi-panel service."""
+    for link in db.panel_links_for_config(custom_config_id, active_only=True):
+        link_server = db.get_panel_server(link["panel_server_id"])
+        if not link_server:
+            raise RenewalError("یکی از پنل‌های سرویس چندمقصدی دیگر در دسترس نیست.")
+        link_provider = get_provider(link_server)
+        if not getattr(link_provider, "supports_user_limit", False):
+            raise RenewalError("یکی از پنل‌های سرویس چندمقصدی از محدودیت کاربر پشتیبانی نمی‌کند.")
+        await link_provider.update_user(link["username"], **provider_kwargs(link_provider, user_limit))
+
+
+def _report_failed_link_renewals(db, pool, failed_links, add_days):
+    lines = []
+    for link, exc in failed_links:
+        try:
+            db.add_custom_config_history(
+                link["custom_config_id"], "extra_panel_renew_failed",
+                f"تمدید {add_days} روزه پنل #{link['panel_server_id']} ({link['username']}) ناموفق بود: {str(exc)[:200]}",
+            )
+        except Exception:
+            logger.exception("history write failed for link %s", link["id"])
+        lines.append(f"سرویس #{link['custom_config_id']} | پنل #{link['panel_server_id']} | {link['username']}")
+    text = ("⚠️ تمدید ناقص سرویس چندپنلی\n\n"
+            f"پرداخت و پنل اصلی تمدید شد ولی تمدید {add_days} روزه این پنل‌ها شکست خورد "
+            "و با تاریخ قبلی منقضی می‌شوند؛ دستی تمدید کنید:\n" + "\n".join(lines))
+    try:
+        renewal_log.alert(db, text)
+    except Exception:
+        logger.exception("failed-renewal alert could not be scheduled (pool=%s)", pool["id"])
+
+
 def _renew_quota_pool(db, pool, mode, add_volume, add_days, fresh=False):
     """تمدید استخر سهمیه‌ی مشترک VPN+SSH. برای سرویس ترکیبی، حجم و انقضای واقعی در
     استخر نگهداری می‌شود (پنل VPN با سقف نامحدود ساخته شده و reconciler سقف آن را از
@@ -64,16 +96,22 @@ async def renew_pooled_service(db, provider, username, pool, mode, add_volume, a
         username, add_volume_gb=0, add_days=add_days, reset_usage=False,
         preserve_remaining=False, unlimited_volume=False, **(user_kwargs or {}),
     )
+    failed_links = []
     for link in db.panel_links_for_pool(pool["id"]):
         try:
             link_server = db.get_panel_server(link["panel_server_id"])
-            await get_provider(link_server).update_user(
+            link_provider = get_provider(link_server)
+            await link_provider.update_user(
                 link["username"], add_volume_gb=0, add_days=add_days, reset_usage=False,
                 preserve_remaining=False, unlimited_volume=False,
+                **(user_kwargs or {}),
             )
-        except Exception:
+        except Exception as exc:
             logger.exception("multi-panel renewal: extra panel renew failed (pool=%s, link=%s)",
                              pool["id"], link["id"])
+            failed_links.append((link, exc))
+    if failed_links:
+        _report_failed_link_renewals(db, pool, failed_links, add_days)
     new_limit_gb = _renew_quota_pool(db, pool, mode, add_volume, add_days, fresh=fresh)
     try:
         from quota_reconciler import QuotaReconciler
@@ -89,6 +127,15 @@ async def renew_pooled_service(db, provider, username, pool, mode, add_volume, a
 class RenewalError(Exception):
     """خطای قابل‌نمایش به کاربر/ادمین در فرایند تمدید سرویس."""
     pass
+
+
+def _carry_flags(order):
+    """(carry_volume, carry_time) از snapshot سفارش؛ NULL یعنی رفتار قدیمی (انتقال)."""
+    keys = order.keys() if hasattr(order, "keys") else ()
+    def flag(name):
+        value = order[name] if name in keys else None
+        return True if value is None else bool(value)
+    return flag("renewal_carry_volume"), flag("renewal_carry_time")
 
 
 async def execute_renewal(db, order) -> str:
@@ -107,6 +154,14 @@ async def execute_renewal(db, order) -> str:
         server = db.get_panel_server(cc["panel_server_id"])
         if not server or not server["is_active"]:
             raise RenewalError("سرور پنل مربوط به این سرویس یافت نشد یا غیرفعال است.")
+        # مقصد اختصاصیِ محصول در زمان ساخت سرویس روی خود رکورد سرویس snapshot شده؛
+        # برای تمدید همان مقصد اعمال می‌شود. سرویس‌های قدیمی مقدار NULL دارند و
+        # دقیقاً مثل قبل از تنظیمات سراسری پنل استفاده می‌کنند.
+        try:
+            from product_targets import apply_target_config
+            server = apply_target_config(server, cc["panel_target_config"])
+        except (KeyError, IndexError, TypeError):
+            pass
         set_volume_gb = None
         renewal_users = order["renewal_user_limit"] if "renewal_user_limit" in order.keys() else None
         if mode == "users":
@@ -117,6 +172,7 @@ async def execute_renewal(db, order) -> str:
                 if not getattr(provider, "supports_user_limit", False):
                     raise RenewalError("پنل این سرویس از محدودیت کاربر پشتیبانی نمی‌کند.")
                 await provider.update_user(cc["username"], **provider_kwargs(provider, renewal_users))
+                await _update_panel_links_user_limit(db, cc["id"], renewal_users)
             except PanelError as e:
                 raise RenewalError(str(e)) from e
             db.set_custom_config_user_limit(cc["id"], renewal_users)
@@ -132,9 +188,24 @@ async def execute_renewal(db, order) -> str:
             # فقط وقتی سقف فعلی مشخص و محدود نباشد (سرویس نامحدود/وضعیت نامعلوم)، رفتار قبلی حفظ می‌شود.
             reset_usage = (mode == "full")
             preserve_remaining = (mode == "full")
-            if mode == "full" and add_volume and before.get("total_bytes"):
+            # قوانین «تمدید کامل» محصول (snapshot روی سفارش)؛ NULL = رفتار قدیمی (انتقال هر دو).
+            carry_volume, carry_time = _carry_flags(order)
+            if mode == "full" and add_volume and before.get("total_bytes") and carry_volume:
                 reset_usage = False
                 preserve_remaining = False
+            if mode == "full" and not carry_volume:
+                # بدون انتقال حجم: مصرف صفر و سقف دقیقاً بسته‌ی جدید (حجم باقیمانده حذف می‌شود).
+                reset_usage = True
+                preserve_remaining = False
+            panel_add_days = add_days
+            time_reset_applied = False
+            if mode == "full" and not carry_time and add_days:
+                seconds_left = before.get("seconds_left")
+                if seconds_left is not None and seconds_left > 0:
+                    # پروایدرها روی زمان باقیمانده «جمع» می‌کنند؛ برای ریست زمان، مقدار باقیمانده
+                    # از روزهای بسته‌ی جدید کم می‌شود تا انقضا ≈ اکنون + روزهای بسته‌ی جدید شود.
+                    panel_add_days = int(round(add_days - seconds_left / 86400.0))
+                    time_reset_applied = True
             # پلن با حجم ۰ یعنی «نامحدود»: در تمدید کامل/حجم باید سقف حجم سرویس هم نامحدود شود
             # (قبلاً add_volume=0 فقط «بدون تغییر حجم» تلقی می‌شد و فقط زمان اضافه می‌شد).
             unlimited_volume = mode in ("full", "volume") and not add_volume
@@ -151,7 +222,7 @@ async def execute_renewal(db, order) -> str:
                 set_volume_gb = new_pool_limit_gb
             else:
                 await provider.update_user(
-                    cc["username"], add_volume_gb=add_volume, add_days=add_days, reset_usage=reset_usage,
+                    cc["username"], add_volume_gb=add_volume, add_days=panel_add_days, reset_usage=reset_usage,
                     preserve_remaining=preserve_remaining, unlimited_volume=unlimited_volume,
                     **provider_kwargs(provider, renewal_users),
                 )
@@ -159,6 +230,9 @@ async def execute_renewal(db, order) -> str:
                 pass
             elif unlimited_volume:
                 set_volume_gb = 0
+            elif mode == "full" and add_volume and not carry_volume:
+                # بدون انتقال حجم: سقف جدید دقیقاً بسته‌ی محصول است.
+                set_volume_gb = add_volume
             elif mode == "full" and add_volume:
                 # سقف واقعیِ بعد از preserve_remaining را از خود پنل می‌خوانیم تا رکورد‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
                 # محلی دقیقاً هم‌سو با پنل بماند (نه با محاسبه‌ی جداگانه و احتمالاً ناهم‌خوان).‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
@@ -168,6 +242,7 @@ async def execute_renewal(db, order) -> str:
             raise RenewalError(str(e)) from e
         db.apply_custom_config_renewal(
             cc["id"], add_volume, add_days, full_reset=(mode == "full"), set_volume_gb=set_volume_gb,
+            reset_time=(time_reset_applied and not pool),
         )
         if renewal_users and getattr(provider, "supports_user_limit", False):
             db.set_custom_config_user_limit(cc["id"], renewal_users)

@@ -114,6 +114,15 @@ UPSTREAM_FEATURE_MODULES = (
     "multi_target.py",
     "db/multi_target.py",
     "ssh_hosts.py",
+    # --- upstream batch: product targets, panel capabilities, panel resync,
+    # --- per-product renewal rules, extra-settings editor in the bot ---
+    "product_targets.py",
+    "panel_capabilities.py",
+    "panel_resync.py",
+    "renewal_rules.py",
+    "admin_extra_settings.py",
+    "check_settings_sync.py",
+    "settings_parity_baseline.json",
 )
 
 # Upstream keeps re-uploading these with a module-level `from i18n import tr`
@@ -890,3 +899,60 @@ def test_storefront_network_map_stays_wired():
     routes = (ROOT / "web_store/routes.py").read_text(encoding="utf-8")
     assert '@router.get("/api/web/world-map")' in routes
     assert "world_map.get_world_map()" in routes
+
+
+def test_product_targets_capabilities_resync_and_renewal_rules_are_wired():
+    """Upstream's product targets, panel capabilities, panel resync and per-product
+    renewal rules must stay reachable from the bot, the admin panel and the mini app.
+    File existence alone is not enough: each module needs a real caller."""
+    handlers_admin = (ROOT / "handlers_admin.py").read_text(encoding="utf-8")
+    assert "import renewal_rules" in handlers_admin
+    assert "import admin_extra_settings" in handlers_admin
+    assert "admin_extra_settings.register(router, db" in handlers_admin
+    assert "from product_targets import build_target_config" in handlers_admin
+    assert "from panel_capabilities import all_panels_support" in handlers_admin
+
+    # Capability source of truth replaced the per-module provider lookups.
+    user_limit = (ROOT / "user_limit.py").read_text(encoding="utf-8")
+    assert "from panel_capabilities import product_capabilities" in user_limit
+    provision = (ROOT / "direct_panel_provision.py").read_text(encoding="utf-8")
+    assert "panel_capabilities" in provision
+    # The startup repair keeps older products in sync with real panel capabilities.
+    base = (ROOT / "db/_base.py").read_text(encoding="utf-8")
+    assert "repair_product_capabilities()" in base
+    assert "ADD COLUMN target_config TEXT" in base
+
+    # Product-scoped destinations are exposed by both web surfaces.
+    admin_panel = (ROOT / "admin_panel/server.py").read_text(encoding="utf-8")
+    assert '@app.get("/api/panel-servers/{server_id}/product-targets")' in admin_panel
+    assert "from product_targets import list_product_targets" in admin_panel
+    miniapp = (ROOT / "miniapp/server.py").read_text(encoding="utf-8")
+    assert '/api/admin/panel-servers/{server_id}/product-targets' in miniapp
+    assert "build_target_config" in miniapp
+    assert "from panel_capabilities import all_panels_support" in miniapp
+
+    # Panel resync repairs configs that lost their template/groups on the panel.
+    sub_server = (ROOT / "sub_server/server.py").read_text(encoding="utf-8")
+    assert "import panel_resync" in sub_server
+    assert "panel_resync.heal_config(db, cc)" in sub_server
+
+    # Per-product renewal rules reach the DB, the bot menu and the web forms.
+    catalog = (ROOT / "db/catalog.py").read_text(encoding="utf-8")
+    assert "from renewal_rules import normalize, RULE_KEYS" in catalog
+    handlers_user = (ROOT / "handlers_user.py").read_text(encoding="utf-8")
+    assert "renewal_rules.filter_products(" in handlers_user
+    assert "renewal_rules.order_flags(" in handlers_user
+    keyboards = (ROOT / "keyboards.py").read_text(encoding="utf-8")
+    assert "def admin_renew_rules_kb(" in keyboards
+    assert '"adm_prodrr:' in keyboards
+    assert "waiting_renew_rules = State()" in (ROOT / "states.py").read_text(encoding="utf-8")
+    assert "renew_rules: Optional[dict] = None" in admin_panel
+
+    # The bot's extra-settings editor drives the same schema as web and mini app.
+    assert 'SURFACE = "bot"' in (ROOT / "admin_extra_settings.py").read_text(encoding="utf-8")
+    schema = (ROOT / "extra_settings_schema.py").read_text(encoding="utf-8")
+    assert '"bot": True' in schema
+
+    # check_settings_sync.py demands the two settings_schema.py copies stay identical.
+    assert (ROOT / "settings_schema.py").read_text(encoding="utf-8") == (
+        ROOT / "admin_panel/static/settings_schema.py").read_text(encoding="utf-8")

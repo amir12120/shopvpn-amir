@@ -1436,6 +1436,7 @@ async function openRenewFullOverlay(customConfigId, onChanged) {
           <button class="btn outline renew-full-plan-btn" data-plan-id="${p.id}">
             ${escHtml(p.name)} — ${fmt(p.volume_gb)} گیگ / ${fmt(p.duration_days)} روز —
             ${p.discount_percent ? `<s class="hint-text">${fmt(p.original_price)}</s> ${fmt(p.price)} تومان (🎁 ${p.discount_percent}٪ تخفیف)` : `${fmt(p.price)} تومان`}
+            ${p.carry_volume && p.carry_time ? "" : `<div class="hint-text" style="font-size:11px;margin-top:4px">${p.renew_reset ? "ریست کامل: حجم و زمان باقی‌مانده حذف می‌شود" : (p.carry_volume ? "زمان باقی‌مانده منتقل نمی‌شود" : "حجم باقی‌مانده منتقل نمی‌شود")}</div>`}
           </button>
         `).join("")}
       </div>
@@ -2943,6 +2944,7 @@ const ADMIN_TABS = [
   { key: "tickets", label: "🎫 تیکت‌ها", fullOnly: false },
   { key: "settings", label: "⚙️ تنظیمات", fullOnly: true, seniorOnly: true, mainBotOnly: true },
   { key: "menu", label: "🧩 چیدمان منو", fullOnly: true, seniorOnly: true },
+  { key: "buttons", label: "🔘 دکمه‌های بات", fullOnly: true, seniorOnly: true },
   { key: "branding", label: "🎨 برندینگ", fullOnly: true, seniorOnly: true },
   { key: "banners", label: "🖼 بنرها", fullOnly: true, seniorOnly: true },
   { key: "adminlog", label: "📜 لاگ ادمین", fullOnly: true, seniorOnly: true },
@@ -2958,7 +2960,7 @@ const ADMIN_TAB_GROUPS = [
   { key: "catalog_panels", label: "📦 محصولات و پنل‌ها", tabs: ["catalog", "panels", "ssh"] },
   { key: "people", label: "👥 کاربران و نمایندگی", tabs: ["users", "resellers"] },
   { key: "support", label: "💬 پشتیبانی", tabs: ["livechat", "tickets"] },
-  { key: "appearance", label: "🎨 منو و برندینگ", tabs: ["menu", "branding", "banners"] },
+  { key: "appearance", label: "🎨 منو و برندینگ", tabs: ["menu", "buttons", "branding", "banners"] },
   { key: "settings_group", label: "⚙️ تنظیمات", tabs: ["settings"] },
   { key: "system", label: "🗂 سیستم", tabs: ["adminlog", "backup"] },
 ];
@@ -3060,6 +3062,7 @@ async function renderAdmin() {
   adminPresenceTimer = setInterval(() => { api("/api/admin/check").catch(() => {}); }, 20000);
   if (adminSection === "stats") await renderAdminStatsSection();
   else if (adminSection === "menu") await renderAdminMenuSection();
+  else if (adminSection === "buttons") await renderAdminButtonsSection();
   else if (adminSection === "branding") await renderAdminBrandingSection();
   else if (adminSection === "banners") await renderAdminBannersSection();
   else if (adminSection === "catalog") await renderAdminCatalogSection();
@@ -3079,6 +3082,150 @@ async function renderAdmin() {
 // ---------------------------------------------------------------------------
 // تب مدیریت > تنظیمات (تنظیمات تکمیلی؛ اسکیما از extra_settings_schema.py)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// تب مدیریت > دکمه‌های بات (همان رجیستری تب «دکمه‌های ربات» پنل وب؛ button_registry.py)
+// ---------------------------------------------------------------------------
+let adminBtnOpenGroup = null;
+
+async function renderAdminButtonsSection() {
+  const body = document.getElementById("admin-section-body");
+  body.innerHTML = skeleton(4);
+  let data;
+  try {
+    data = await api("/api/admin/buttons");
+  } catch (e) {
+    body.innerHTML = `<div class="card"><p class="field-error">${escHtml(e.message)}</p></div>`;
+    return;
+  }
+  const groups = data.groups || [];
+  const styles = data.style_options || [];
+  const cats = data.admin_categories || [];
+  if (adminBtnOpenGroup === null && groups.length) adminBtnOpenGroup = groups[0].key;
+
+  const itemHtml = (g, it, idx, breakBefore) => {
+    const k = escHtml(it.key);
+    const parts = [];
+    if (it.has_text) {
+      parts.push(`<input class="input bi-text" type="text" maxlength="64" value="${escHtml(it.text || "")}" data-orig="${escHtml(it.text || "")}" />`);
+    } else {
+      parts.push(`<div class="hint-text" style="margin:0">${escHtml(it.label || it.key)}</div>`);
+    }
+    const ctl = [];
+    if (it.has_style) {
+      ctl.push(`<select class="input bi-style" style="flex:1;min-width:110px" data-orig="${escHtml(it.style || "")}">${styles.map((s) => `<option value="${escHtml(s.value)}" ${s.value === (it.style || "") ? "selected" : ""}>${escHtml(s.label)}</option>`).join("")}</select>`);
+    }
+    if (it.togglable) {
+      ctl.push(`<label class="switch" title="فعال"><input type="checkbox" class="bi-enabled" ${it.enabled ? "checked" : ""} data-orig="${it.enabled ? "1" : "0"}" /><span class="switch-slider"></span></label>`);
+    }
+    if (g.reorderable) {
+      ctl.push(`<button class="btn bi-up" type="button" style="padding:6px 10px">▲</button><button class="btn bi-down" type="button" style="padding:6px 10px">▼</button>`);
+    }
+    if (g.rows) {
+      ctl.push(`<label class="hint-text" style="margin:0;display:flex;align-items:center;gap:4px"><input type="checkbox" class="bi-break" ${breakBefore ? "checked" : ""} data-orig="${breakBefore ? "1" : "0"}" /> ردیف تازه</label>`);
+    }
+    if (it.default_category !== undefined && it.default_category !== null) {
+      ctl.push(`<select class="input bi-cat" style="flex:1;min-width:130px" data-default="${escHtml(it.default_category)}" data-orig="${escHtml(g.category || "")}">${cats.map((c) => `<option value="${escHtml(c.key)}" ${c.key === g.category ? "selected" : ""}>${escHtml(c.label)}</option>`).join("")}</select>`);
+    }
+    return `<div class="bi-item" data-key="${k}" data-has-text="${it.has_text ? 1 : 0}" data-has-style="${it.has_style ? 1 : 0}" data-togglable="${it.togglable ? 1 : 0}" style="padding:8px 0;border-bottom:1px solid var(--glass-brd)">
+      ${parts.join("")}
+      <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px">${ctl.join("")}</div>
+    </div>`;
+  };
+
+  const groupHtml = (g) => {
+    const firstOfRow = new Set();
+    (g.rows || []).forEach((row, ri) => { if (ri > 0 && row.length) firstOfRow.add(row[0]); });
+    const open = adminBtnOpenGroup === g.key;
+    return `<div class="card bi-group" data-gkey="${escHtml(g.key)}">
+      <div class="bi-head" data-gkey="${escHtml(g.key)}" style="display:flex;justify-content:space-between;align-items:center;gap:8px;cursor:pointer">
+        <div class="eyebrow" style="margin:0">${escHtml(g.label)}</div>
+        <span class="bi-arrow">${open ? "▾" : "◂"}</span>
+      </div>
+      <div class="bi-body" style="${open ? "" : "display:none"};margin-top:8px">
+        ${g.note ? `<p class="hint-text" style="margin:0 0 6px">${escHtml(g.note)}</p>` : ""}
+        <div class="bi-list">${(g.items || []).map((it, i) => itemHtml(g, it, i, firstOfRow.has(it.key))).join("") || '<p class="hint-text">موردی نیست.</p>'}</div>
+        <div class="field-error bi-error"></div>
+        <button class="btn bi-save" data-gkey="${escHtml(g.key)}" style="margin-top:8px">💾 ذخیره</button>
+      </div>
+    </div>`;
+  };
+
+  body.innerHTML = `<div class="card" style="padding:10px"><p class="hint-text" style="margin:0">متن، رنگ، ترتیب و ردیف دکمه‌های پنل مدیریت، مسیر خرید، حساب کاربری و روش‌های پرداخت. منوی اصلی از تب «چیدمان منو» تنظیم می‌شود.</p></div>${groups.map(groupHtml).join("")}`;
+
+  body.querySelectorAll(".bi-head").forEach((h) => {
+    h.onclick = () => {
+      adminBtnOpenGroup = adminBtnOpenGroup === h.dataset.gkey ? null : h.dataset.gkey;
+      body.querySelectorAll(".bi-group").forEach((card) => {
+        const open = adminBtnOpenGroup === card.dataset.gkey;
+        card.querySelector(".bi-body").style.display = open ? "" : "none";
+        card.querySelector(".bi-arrow").textContent = open ? "▾" : "◂";
+      });
+    };
+  });
+
+  body.querySelectorAll(".bi-group").forEach((card) => {
+    card.dataset.dirty = "0";
+    card.querySelectorAll(".bi-up, .bi-down").forEach((btn) => {
+      btn.onclick = () => {
+        const row = btn.closest(".bi-item");
+        const sib = btn.classList.contains("bi-up") ? row.previousElementSibling : row.nextElementSibling;
+        if (!sib || !sib.classList.contains("bi-item")) return;
+        if (btn.classList.contains("bi-up")) row.parentNode.insertBefore(row, sib);
+        else row.parentNode.insertBefore(sib, row);
+        card.dataset.dirty = "1";
+      };
+    });
+    card.querySelectorAll(".bi-break").forEach((cb) => { cb.onchange = () => { card.dataset.dirty = "1"; }; });
+  });
+
+  body.querySelectorAll(".bi-save").forEach((btn) => {
+    btn.onclick = async () => {
+      const card = btn.closest(".bi-group");
+      const gk = card.dataset.gkey;
+      const g = groups.find((x) => x.key === gk);
+      const errBox = card.querySelector(".bi-error");
+      errBox.textContent = "";
+      const rows = Array.from(card.querySelectorAll(".bi-item"));
+      btn.disabled = true;
+      try {
+        const catSel = Array.from(body.querySelectorAll(".bi-cat"));
+        if (catSel.some((s) => s.value !== s.dataset.orig)) {
+          const overrides = {};
+          catSel.forEach((s) => { if (s.value !== s.dataset.default) overrides[s.closest(".bi-item").dataset.key] = s.value; });
+          await api("/api/admin/buttons/admin-item-categories", { method: "POST", body: JSON.stringify({ overrides }) });
+          tg.HapticFeedback.notificationOccurred("success");
+          notify("جابجایی دسته ذخیره شد.");
+          await renderAdminButtonsSection();
+          return;
+        }
+        if (g.reorderable && (card.dataset.dirty === "1" || rows.some((r) => { const b = r.querySelector(".bi-break"); return b && b.checked !== (b.dataset.orig === "1"); }))) {
+          const order = rows.map((r) => r.dataset.key);
+          const breaks = g.rows ? rows.filter((r, i) => i > 0 && r.querySelector(".bi-break") && r.querySelector(".bi-break").checked).map((r) => r.dataset.key) : [];
+          await api("/api/admin/buttons/layout", { method: "POST", body: JSON.stringify({ group: gk, order, breaks }) });
+        }
+        for (const r of rows) {
+          const payload = { group: gk, key: r.dataset.key };
+          let changed = false;
+          const tx = r.querySelector(".bi-text");
+          if (tx && tx.value !== tx.dataset.orig) { payload.text = tx.value; changed = true; }
+          const st = r.querySelector(".bi-style");
+          if (st && st.value !== st.dataset.orig) { payload.style = st.value; changed = true; }
+          const en = r.querySelector(".bi-enabled");
+          if (en && (en.checked ? "1" : "0") !== en.dataset.orig) { payload.enabled = en.checked; changed = true; }
+          if (changed) await api("/api/admin/buttons/item", { method: "POST", body: JSON.stringify(payload) });
+        }
+        tg.HapticFeedback.notificationOccurred("success");
+        notify("دکمه‌ها ذخیره شد.");
+        await renderAdminButtonsSection();
+      } catch (e) {
+        errBox.textContent = e.message;
+        try { tg.HapticFeedback.notificationOccurred("error"); } catch (_) {}
+        btn.disabled = false;
+      }
+    };
+  });
+}
 
 let adminExtraOpenGroup = null;
 let adminExtraQuery = "";
@@ -3125,6 +3272,21 @@ async function renderAdminExtraSettingsSection() {
       <label class="field-label" style="line-height:1.6">${escHtml(f.label)}</label>${ctl}${hint}</div>`;
   };
 
+  // تصویر پس‌زمینه‌ی QR (فایل مشترک بات اصلی؛ فقط برای ادمین بات اصلی)
+  const qrBgBlockHtml = `<div class="xs-qrbg" style="padding:8px 0;border-bottom:1px solid var(--glass-brd)">
+    <label class="field-label" style="line-height:1.6">🖼 تصویر پس‌زمینه‌ی QR</label>
+    <p class="hint-text" id="xs-qrbg-status" style="margin:4px 0 8px">در حال بررسی...</p>
+    <img id="xs-qrbg-preview" alt="" style="display:none;max-width:160px;border-radius:12px;margin:0 0 8px" />
+    <input class="input" id="xs-qrbg-file" type="file" accept="image/*" />
+    <p class="hint-text" style="margin:4px 0 0">حداقل ۳۰۰×۳۰۰ و حداکثر ۸ مگابایت؛ ۵۰۰×۵۰۰ یا بزرگ‌تر پیشنهاد می‌شود.</p>
+    <div class="field-error" id="xs-qrbg-error"></div>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button class="btn" id="xs-qrbg-upload" type="button">⬆️ آپلود</button>
+      <button class="btn" id="xs-qrbg-remove" type="button" style="display:none">🗑 حذف</button>
+    </div>
+  </div>`;
+  let refreshQrBg = null;
+
   body.innerHTML = `
     <div class="card" style="padding:10px">
       <input class="input" id="xs-search" type="search" placeholder="🔍 جستجو در تنظیمات..." value="${escHtml(adminExtraQuery)}" />
@@ -3138,6 +3300,7 @@ async function renderAdminExtraSettingsSection() {
         </div>
         <div class="xs-body" style="${adminExtraOpenGroup === g.id ? "" : "display:none"};margin-top:8px">
           ${g.fields.map(fieldHtml).join("")}
+          ${g.id === "post_tools" ? qrBgBlockHtml : ""}
           <div class="field-error xs-error"></div>
           <button class="btn xs-save" data-gid="${escHtml(g.id)}" style="margin-top:8px">💾 ذخیره</button>
         </div>
@@ -3181,6 +3344,64 @@ async function renderAdminExtraSettingsSection() {
     };
   });
 
+  const qrStatusEl = document.getElementById("xs-qrbg-status");
+  if (qrStatusEl) {
+    const qrErr = document.getElementById("xs-qrbg-error");
+    const qrImg = document.getElementById("xs-qrbg-preview");
+    const qrRemove = document.getElementById("xs-qrbg-remove");
+    const qrUpload = document.getElementById("xs-qrbg-upload");
+    refreshQrBg = async () => {
+      try {
+        const st = await api("/api/admin/settings/qr-background");
+        qrStatusEl.textContent = st.has
+          ? (st.enabled ? "✅ تصویر آپلود شده و فعال است." : "⏸ تصویر آپلود شده ولی غیرفعال است.")
+          : "تصویری آپلود نشده؛ QR ساده‌ی سیاه/سفید ارسال می‌شود.";
+        qrRemove.style.display = st.has ? "" : "none";
+        if (st.has) {
+          const pv = await api("/api/admin/settings/qr-background/preview");
+          qrImg.src = pv.image;
+          qrImg.style.display = "";
+        } else {
+          qrImg.style.display = "none";
+        }
+      } catch (e) {
+        qrStatusEl.textContent = "این بخش فقط برای ادمین بات اصلی در دسترس است.";
+        qrUpload.disabled = true;
+        qrRemove.style.display = "none";
+      }
+    };
+    qrUpload.onclick = async () => {
+      qrErr.textContent = "";
+      const file = document.getElementById("xs-qrbg-file").files[0];
+      if (!file) { qrErr.textContent = "ابتدا یک عکس انتخاب کن."; return; }
+      const fd = new FormData();
+      fd.append("photo", file);
+      qrUpload.disabled = true;
+      try {
+        await apiUpload("/api/admin/settings/qr-background", fd);
+        tg.HapticFeedback.notificationOccurred("success");
+        document.getElementById("xs-qrbg-file").value = "";
+        notify("تصویر پس‌زمینه ذخیره و فعال شد.");
+        await refreshQrBg();
+      } catch (e) {
+        qrErr.textContent = e.message;
+      } finally {
+        qrUpload.disabled = false;
+      }
+    };
+    qrRemove.onclick = async () => {
+      qrErr.textContent = "";
+      try {
+        await api("/api/admin/settings/qr-background", { method: "DELETE" });
+        notify("تصویر پس‌زمینه حذف شد.");
+        await refreshQrBg();
+      } catch (e) {
+        qrErr.textContent = e.message;
+      }
+    };
+    refreshQrBg();
+  }
+
   body.querySelectorAll(".xs-save").forEach((btn) => {
     btn.onclick = async () => {
       const card = btn.closest(".xs-group");
@@ -3198,6 +3419,7 @@ async function renderAdminExtraSettingsSection() {
         tg.HapticFeedback.notificationOccurred("success");
         card.querySelectorAll('input[type="password"]').forEach((el) => { el.value = ""; });
         notify(res.changed && res.changed.length ? "تنظیمات ذخیره شد." : "تغییری برای ذخیره وجود نداشت.");
+        if (refreshQrBg && card.dataset.gid === "post_tools") refreshQrBg();
       } catch (e) {
         errBox.textContent = e.message;
         try { tg.HapticFeedback.notificationOccurred("error"); } catch (_) {}
@@ -5152,7 +5374,81 @@ async function renderAdminCategories(body) {
   };
 }
 
+async function loadMiniExtraPanelTargets() {
+  const host = document.getElementById("new-prod-extra-target-pickers");
+  if (!host) return;
+  host.innerHTML = "";
+  const primary = Number(document.getElementById("new-prod-server")?.value || 0);
+  const selected = Array.from(document.querySelectorAll("[data-new-extra-panel]:checked"))
+    .map(el => Number(el.getAttribute("data-new-extra-panel"))).filter(id => id && id !== primary);
+  for (const sid of selected) {
+    const panel = (window.__adminPanelServers || []).find(x => Number(x.id) === sid);
+    const section = document.createElement("div");
+    section.dataset.extraPanelId = String(sid);
+    section.dataset.hasChoices = "loading";
+    section.style.cssText = "border:1px solid var(--border-color,#ddd);border-radius:10px;padding:10px";
+    section.innerHTML = `<p class="hint-text">⏳ دریافت مقصدهای ${escHtml(panel?.name || `پنل #${sid}`)}...</p>`;
+    host.appendChild(section);
+    try {
+      const info = await api(`/api/admin/panel-servers/${sid}/product-targets`);
+      const choices = Array.isArray(info.choices) ? info.choices : [];
+      if (!choices.length) {
+        section.dataset.hasChoices = "0";
+        section.innerHTML = `<p class="hint-text">${escHtml(panel?.name || sid)}: مقصد زنده ندارد؛ قالب پنل استفاده می‌شود.</p>`;
+      } else {
+        section.dataset.hasChoices = "1";
+        section.innerHTML = `<div class="field-label">🎯 مقصد اختصاصی ${escHtml(panel?.name || sid)}</div><div style="display:flex;flex-direction:column;gap:7px;max-height:180px;overflow:auto">${choices.map(c => `<label style="display:flex;align-items:center;gap:8px"><input type="checkbox" data-extra-target-value="${escHtml(String(c.value))}"><span>${escHtml(String(c.label || c.value))}</span></label>`).join("")}</div>`;
+      }
+    } catch (e) {
+      section.dataset.hasChoices = "error";
+      section.innerHTML = `<p class="field-error">دریافت مقصدهای پنل ${sid} ناموفق بود: ${escHtml(e.message || "خطا")}</p>`;
+    }
+  }
+}
+// «قوانین تمدید کامل» هر محصول (renewal_rules.py در بک‌اند)؛ پیش‌فرض‌ها رفتار قبلی را حفظ می‌کنند.
+function miniRenewRulesHtml(prefix, p) {
+  const v = (k, d) => (p && p[k] != null ? Number(p[k]) : d);
+  const reset = v("renew_reset", 0) === 1;
+  const row = (id, label, hint, on, disabled, extra = "") => `
+    <label style="display:flex;align-items:flex-start;gap:8px;margin-bottom:8px">
+      <input type="checkbox" id="${prefix}-${id}" ${on ? "checked" : ""} ${disabled ? "disabled" : ""} ${extra} style="margin-top:3px" />
+      <span>${label}<br><small class="hint-text">${hint}</small></span>
+    </label>`;
+  return `<div id="${prefix}-renew-rules" style="margin-bottom:10px;border-top:1px dashed var(--border, #8884);padding-top:10px">
+    <label class="field-label">🔄 قوانین تمدید کامل</label>
+    ${row("renew-enabled", "قابل تمدید کامل باشد", "اگر خاموش باشد در لیست تمدید کامل نمایش داده نمی‌شود.", v("renew_full_enabled", 1) === 1, false)}
+    ${row("renew-same-type", "فقط برای سرویس‌های هم‌نوع", "نامحدود فقط به سرویس نامحدود و حجمی فقط به سرویس حجمی نمایش داده می‌شود.", v("renew_same_type_only", 1) === 1, false)}
+    ${row("renew-reset", "ریست کامل بعد از تمدید", "حجم و زمان باقیمانده حذف و فقط بسته‌ی جدید اعمال می‌شود.", reset, false, `data-renew-reset="${prefix}"`)}
+    ${row("renew-carry-volume", "انتقال حجم باقیمانده", "حجم باقیمانده به محصول جدید اضافه می‌شود.", !reset && v("renew_carry_volume", 1) === 1, reset)}
+    ${row("renew-carry-time", "انتقال زمان باقیمانده", "روزهای باقیمانده به محصول جدید اضافه می‌شود.", !reset && v("renew_carry_time", 1) === 1, reset)}
+  </div>`;
+}
+function collectMiniRenewRules(prefix) {
+  const en = document.getElementById(`${prefix}-renew-enabled`);
+  if (!en) return undefined;
+  const g = (id) => document.getElementById(`${prefix}-${id}`)?.checked;
+  const reset = !!g("renew-reset");
+  return {
+    renew_full_enabled: en.checked ? 1 : 0,
+    renew_same_type_only: g("renew-same-type") ? 1 : 0,
+    renew_reset: reset ? 1 : 0,
+    renew_carry_volume: !reset && g("renew-carry-volume") ? 1 : 0,
+    renew_carry_time: !reset && g("renew-carry-time") ? 1 : 0,
+  };
+}
+// ریست کامل → دو گزینه‌ی انتقال خاموش و غیرفعال می‌شوند (delegation تا ترتیب رندر مهم نباشد).
+document.addEventListener("change", (e) => {
+  const prefix = e.target && e.target.dataset ? e.target.dataset.renewReset : null;
+  if (!prefix) return;
+  const cv = document.getElementById(`${prefix}-renew-carry-volume`);
+  const ct = document.getElementById(`${prefix}-renew-carry-time`);
+  if (!cv || !ct) return;
+  if (e.target.checked) { cv.checked = false; ct.checked = false; }
+  cv.disabled = ct.disabled = e.target.checked;
+});
+
 function productProvisionFieldsHtml(panelServers, bankAllowed = true) {
+  window.__adminPanelServers = panelServers || [];
   if (!bankAllowed) {
     return `
     <label class="field-label">محصول از اعتبار حجمی شما ساخته می‌شود</label>
@@ -5168,6 +5464,7 @@ function productProvisionFieldsHtml(panelServers, bankAllowed = true) {
     </div>
     <div id="new-prod-direct-fields" style="display:none;margin-bottom:8px">
       <select class="input" id="new-prod-server" style="margin-bottom:8px">${panelServers.map((s) => `<option value="${s.id}">${s.name}</option>`).join("")}</select>
+      <div id="new-prod-target-picker"></div>
       <label style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
         <input type="checkbox" id="new-prod-duration-unlimited" /> ♾ مدت اعتبار نامحدود (هیچ‌وقت روی پنل منقضی نمی‌شود)
       </label>
@@ -5198,6 +5495,55 @@ function readProductPaymentMethodsFields(body) {
   if (!boxes.length) return null;
   const checked = boxes.filter((i) => i.checked).map((i) => i.dataset.newProdPm);
   return (checked.length === 0 || checked.length === boxes.length) ? null : checked;
+}
+
+async function loadAdminProductTargets(serverId, hostId, selectedValues = []) {
+  const host = document.getElementById(hostId);
+  if (!host) return { choices: [] };
+  if (!serverId) { host.innerHTML = ""; return { choices: [] }; }
+  host.innerHTML = `<p class="hint-text">⏳ در حال دریافت گروه‌ها / Inboundهای پنل...</p>`;
+  try {
+    const info = await api(`/api/admin/panel-servers/${Number(serverId)}/product-targets`);
+    const choices = Array.isArray(info.choices) ? info.choices : [];
+    if (!choices.length) {
+      host.innerHTML = `<p class="hint-text">ℹ️ این پنل مقصد قابل انتخاب زنده ندارد؛ از قالب فعلی پنل استفاده می‌شود.</p>`;
+      host.dataset.hasChoices = "0";
+      return info;
+    }
+    const selected = new Set((selectedValues || []).map(String));
+    host.innerHTML = `
+      <div class="field-label" style="margin:8px 0 6px">🎯 مقصد ساخت سرویس این محصول</div>
+      <div style="display:flex;flex-direction:column;gap:7px;max-height:220px;overflow:auto;padding:8px;border:1px solid var(--border-color, #ddd);border-radius:10px">
+        ${choices.map((c) => `<label style="display:flex;align-items:center;gap:8px"><input type="checkbox" data-product-target-value="${escHtml(String(c.value))}" ${selected.has(String(c.value)) ? "checked" : ""}><span>${escHtml(String(c.label || c.value))}</span></label>`).join("")}
+      </div>
+      <p class="hint-text">انتخاب فقط برای همین محصول ذخیره می‌شود؛ تنظیمات اتصال پنل و محصولات دیگر تغییر نمی‌کند.</p>`;
+    host.dataset.hasChoices = "1";
+    host.dataset.kind = String(info.kind || "list");
+    return info;
+  } catch (e) {
+    host.innerHTML = `<p class="field-error">❌ دریافت فهرست مقصدها ناموفق بود: ${escHtml(e.message || "خطای اتصال")}</p>`;
+    host.dataset.hasChoices = "error";
+    throw e;
+  }
+}
+
+function readAdminProductTargetValues(hostId) {
+  const host = document.getElementById(hostId);
+  if (!host || host.dataset.hasChoices !== "1") return null;
+  return Array.from(host.querySelectorAll("[data-product-target-value]:checked"))
+    .map((el) => el.getAttribute("data-product-target-value"));
+}
+
+function productTargetValuesFromConfig(raw, serverId = null) {
+  let cfg = raw;
+  if (typeof cfg === "string") { try { cfg = JSON.parse(cfg); } catch (_) { cfg = null; } }
+  if (!cfg || !cfg.value || !cfg.field) return [];
+  if (serverId && cfg.panel_server_id != null && Number(cfg.panel_server_id) !== Number(serverId)) return [];
+  if (cfg.field === "xui_inbound_ids") return (Array.isArray(cfg.value) ? cfg.value : [cfg.value]).map(String);
+  if (cfg.field === "group_ids" && cfg.value && typeof cfg.value === "object" && !Array.isArray(cfg.value)) {
+    return Object.entries(cfg.value).flatMap(([proto, items]) => (items || []).map((item) => `${proto}::${item}`));
+  }
+  return (Array.isArray(cfg.value) ? cfg.value : [cfg.value]).map(String);
 }
 
 async function renderAdminProducts(body) {
@@ -5232,6 +5578,14 @@ async function renderAdminProducts(body) {
       <input class="input" id="new-prod-duration" type="number" placeholder="مدت اعتبار (روز)" value="30" style="margin-bottom:8px" />
       <input class="input" id="new-prod-desc" type="text" placeholder="توضیحات (اختیاری)" style="direction:rtl;text-align:right;font-family:var(--font-body);margin-bottom:8px" />
       ${productProvisionFieldsHtml(panelServers, bankAllowed)}
+      <div id="new-prod-user-limit" style="display:none;margin-bottom:10px">
+        <label class="field-label">👥 محدودیت کاربر همزمان</label>
+        <input class="input" id="new-prod-base-users" type="number" min="0" max="20" value="0" placeholder="تعداد پایه (۰ = بدون محدودیت)" style="margin-bottom:6px" />
+        <input class="input" id="new-prod-extra-user-price" type="number" min="0" value="0" placeholder="قیمت هر کاربر اضافه" style="margin-bottom:6px" />
+        <input class="input" id="new-prod-max-users" type="number" min="0" max="20" value="0" placeholder="سقف کاربران" />
+        <p class="hint-text">این بخش فقط وقتی نمایش داده می‌شود که پنل VPN انتخاب‌شده این قابلیت را پشتیبانی کند.</p>
+      </div>
+      ${miniRenewRulesHtml("new-prod", null)}
       ${productPaymentMethodsFieldsHtml(paymentMethods)}
       <div class="field-error" id="new-prod-error"></div>
       <button class="btn" id="new-prod-save">➕ افزودن محصول</button>
@@ -5285,6 +5639,29 @@ async function renderAdminProducts(body) {
       document.getElementById("new-prod-duration").disabled = newDurUnlimitedCb.checked;
     });
   }
+  const syncNewProdUserLimit = () => {
+    const wrap = document.getElementById("new-prod-user-limit");
+    const direct = body.querySelector('input[name="new-prod-source"]:checked')?.value === "direct";
+    const sid = Number(document.getElementById("new-prod-server")?.value || 0);
+    const panel = panelServers.find((x) => Number(x.id) === sid);
+    const show = direct && !!panel?.supports_user_limit;
+    if (wrap) wrap.style.display = show ? "" : "none";
+    if (!show) ["new-prod-base-users","new-prod-extra-user-price","new-prod-max-users"].forEach((id) => { const el = document.getElementById(id); if (el) el.value = 0; });
+  };
+  document.getElementById("new-prod-server")?.addEventListener("change", async () => {
+    syncNewProdUserLimit();
+    try { await loadAdminProductTargets(document.getElementById("new-prod-server").value, "new-prod-target-picker"); await loadMiniExtraPanelTargets(); }
+    catch (e) { document.getElementById("new-prod-error").textContent = e.message; }
+  });
+  document.querySelectorAll("[data-new-extra-panel]").forEach(el => el.addEventListener("change", () => {
+    loadMiniExtraPanelTargets().catch(e => { document.getElementById("new-prod-error").textContent = e.message; });
+  }));
+  sourceRadios.forEach((r) => r.addEventListener("change", syncNewProdUserLimit));
+  syncNewProdUserLimit();
+  if (document.getElementById("new-prod-server")) {
+    loadAdminProductTargets(document.getElementById("new-prod-server").value, "new-prod-target-picker").then(() => loadMiniExtraPanelTargets()).catch(() => {});
+  }
+
   const newVolUnlimitedCb = document.getElementById("new-prod-volume-unlimited");
   if (newVolUnlimitedCb) {
     newVolUnlimitedCb.addEventListener("change", () => {
@@ -5304,7 +5681,11 @@ async function renderAdminProducts(body) {
     const duration = durationUnlimited ? 0 : (Number(document.getElementById("new-prod-duration").value) || 30);
     const disc = readProductDiscount("new-prod", price, errBox);
     if (!disc) return;
-    const payload = { category_id: categoryId, name, price: disc.price, duration_days: duration, description: desc, compare_price: disc.compare_price, discount_days: disc.discount_days, discount_max_uses: disc.discount_max_uses };
+    const payload = { category_id: categoryId, name, price: disc.price, duration_days: duration, description: desc, compare_price: disc.compare_price, discount_days: disc.discount_days, discount_max_uses: disc.discount_max_uses,
+      base_users: Number(document.getElementById("new-prod-base-users")?.value || 0),
+      extra_user_price: Number(document.getElementById("new-prod-extra-user-price")?.value || 0),
+      max_users: Number(document.getElementById("new-prod-max-users")?.value || 0) };
+    if (isDirect) payload.renew_rules = collectMiniRenewRules("new-prod");
     if (isDirect) {
       const provision_server_id = Number(document.getElementById("new-prod-server").value);
       const volumeUnlimited = newVolUnlimitedCb && newVolUnlimitedCb.checked;
@@ -5315,6 +5696,27 @@ async function renderAdminProducts(body) {
       }
       payload.provision_server_id = provision_server_id;
       payload.auto_provision_volume_gb = auto_provision_volume_gb;
+      const targetValues = readAdminProductTargetValues("new-prod-target-picker");
+      if (targetValues !== null) {
+        if (!targetValues.length) { errBox.textContent = "حداقل یک گروه یا Inbound انتخاب کنید."; return; }
+        payload.provision_target_values = targetValues;
+      }
+      const extraPanelIds = Array.from(document.querySelectorAll("[data-new-extra-panel]:checked"))
+        .map(el => Number(el.getAttribute("data-new-extra-panel"))).filter(id => id && id !== provision_server_id);
+      const extraTargetValues = {};
+      for (const section of document.querySelectorAll("#new-prod-extra-target-pickers [data-extra-panel-id]")) {
+        const sid = section.dataset.extraPanelId;
+        if (section.dataset.hasChoices === "error" || section.dataset.hasChoices === "loading") {
+          errBox.textContent = `دریافت مقصدهای پنل ${sid} کامل نشده است.`; return;
+        }
+        if (section.dataset.hasChoices === "1") {
+          const values = Array.from(section.querySelectorAll("[data-extra-target-value]:checked")).map(el => el.getAttribute("data-extra-target-value"));
+          if (!values.length) { errBox.textContent = `برای پنل ${sid} حداقل یک مقصد انتخاب کنید.`; return; }
+          extraTargetValues[sid] = values;
+        }
+      }
+      payload.extra_panel_ids = extraPanelIds;
+      payload.extra_panel_target_values = extraTargetValues;
     }
     const creditVolEl = document.getElementById("new-prod-credit-volume");
     if (creditVolEl) {
@@ -5369,10 +5771,18 @@ async function renderAdminEditProduct(body) {
       <select class="input" id="edit-prod-server" style="margin-bottom:8px">
         ${panelServers.map((s) => `<option value="${s.id}" ${s.id === p.provision_server_id ? "selected" : ""}>${s.name}</option>`).join("")}
       </select>
+      <div id="edit-prod-target-picker"></div>
       <input class="input" id="edit-prod-volume" type="number" placeholder="حجم (گیگابایت)" value="${p.auto_provision_volume_gb || ""}" style="margin-bottom:4px" ${volumeIsUnlimited ? "disabled" : ""} />
       <label style="display:flex;align-items:center;gap:6px;margin-bottom:10px">
         <input type="checkbox" id="edit-prod-volume-unlimited" ${volumeIsUnlimited ? "checked" : ""} /> ♾ حجم نامحدود
       </label>
+      <div id="edit-prod-user-limit" style="display:${startDirect && panelServers.find((x) => Number(x.id) === Number(p.provision_server_id))?.supports_user_limit ? "" : "none"};margin-bottom:10px">
+        <label class="field-label">👥 محدودیت کاربر همزمان</label>
+        <input class="input" id="edit-prod-base-users" type="number" min="0" max="20" value="${Number(p.base_users || 0)}" placeholder="تعداد پایه" style="margin-bottom:6px" />
+        <input class="input" id="edit-prod-extra-user-price" type="number" min="0" value="${Number(p.extra_user_price || 0)}" placeholder="قیمت هر کاربر اضافه" style="margin-bottom:6px" />
+        <input class="input" id="edit-prod-max-users" type="number" min="0" max="20" value="${Number(p.max_users || 0)}" placeholder="سقف کاربران" />
+      </div>
+      ${miniRenewRulesHtml("edit-prod", p)}
       <p class="hint-text">🔌 با تغییر پنل یا منبع، ساخت‌های بعدیِ همین محصول طبق تنظیم جدید انجام می‌شود؛ سرویس‌های قبلاً ساخته‌شده و کانفیگ‌های باقی‌مانده در بانک تغییر نمی‌کنند.</p>
       </div>
       ` : (isCreditAuto ? `<p class="hint-text">🔌 این محصول به‌صورت خودکار (${p.auto_provision_volume_gb ? p.auto_provision_volume_gb + " گیگ" : "نامحدود"}) ساخته می‌شود. برای تغییر پنل/اینباند باید نمایندگی باشی.</p>` : "")}
@@ -5401,6 +5811,26 @@ async function renderAdminEditProduct(body) {
     document.getElementById("edit-prod-dur-unl-wrap").style.display = direct ? "flex" : "none";
     document.getElementById("edit-prod-duration").disabled = direct && editDurUnlimitedCb && editDurUnlimitedCb.checked;
   }));
+  const syncEditProdUserLimit = () => {
+    const wrap = document.getElementById("edit-prod-user-limit");
+    const direct = body.querySelector('input[name="edit-prod-source"]:checked')?.value === "direct" || !!p.provision_server_id;
+    const sid = Number(document.getElementById("edit-prod-server")?.value || 0);
+    const panel = panelServers.find((x) => Number(x.id) === sid);
+    const show = direct && !!panel?.supports_user_limit;
+    if (wrap) wrap.style.display = show ? "" : "none";
+    if (!show) ["edit-prod-base-users","edit-prod-extra-user-price","edit-prod-max-users"].forEach((id) => { const el = document.getElementById(id); if (el) el.value = 0; });
+  };
+  document.getElementById("edit-prod-server")?.addEventListener("change", async () => {
+    syncEditProdUserLimit();
+    try { await loadAdminProductTargets(document.getElementById("edit-prod-server").value, "edit-prod-target-picker", []); }
+    catch (e) { document.getElementById("edit-prod-error").textContent = e.message; }
+  });
+  body.querySelectorAll('input[name="edit-prod-source"]').forEach((r) => r.addEventListener("change", syncEditProdUserLimit));
+  syncEditProdUserLimit();
+  if (document.getElementById("edit-prod-server")) {
+    loadAdminProductTargets(document.getElementById("edit-prod-server").value, "edit-prod-target-picker", productTargetValuesFromConfig(p.provision_target_config, document.getElementById("edit-prod-server").value)).catch(() => {});
+  }
+
   const editVolUnlimitedCb = document.getElementById("edit-prod-volume-unlimited");
   if (editVolUnlimitedCb) {
     editVolUnlimitedCb.addEventListener("change", () => {
@@ -5420,7 +5850,12 @@ async function renderAdminEditProduct(body) {
     if (!name || !price || (!durationUnlimited && !duration)) { errBox.textContent = "نام، قیمت و مدت اعتبار الزامی هستند."; return; }
     const disc = readProductDiscount("edit-prod", price, errBox);
     if (!disc) return;
-    const payload = { name, price: disc.price, duration_days: duration, description, compare_price: disc.compare_price, discount_days: disc.discount_days, discount_max_uses: disc.discount_max_uses };
+    const payload = { name, price: disc.price, duration_days: duration, description, compare_price: disc.compare_price, discount_days: disc.discount_days, discount_max_uses: disc.discount_max_uses,
+      base_users: Number(document.getElementById("edit-prod-base-users")?.value || 0),
+      extra_user_price: Number(document.getElementById("edit-prod-extra-user-price")?.value || 0),
+      max_users: Number(document.getElementById("edit-prod-max-users")?.value || 0) };
+    const editRenewRules = collectMiniRenewRules("edit-prod");
+    if (editRenewRules) payload.renew_rules = editRenewRules;
     const serverSel = document.getElementById("edit-prod-server");
     if (editSourceEl) payload.source = editIsDirect ? "direct" : "bank";
     if (serverSel && editIsDirect) {
@@ -5433,6 +5868,11 @@ async function renderAdminEditProduct(body) {
       }
       payload.provision_server_id = provision_server_id;
       payload.auto_provision_volume_gb = auto_provision_volume_gb;
+      const targetValues = readAdminProductTargetValues("edit-prod-target-picker");
+      if (targetValues !== null) {
+        if (!targetValues.length) { errBox.textContent = "حداقل یک گروه یا Inbound انتخاب کنید."; return; }
+        payload.provision_target_values = targetValues;
+      }
     }
     try {
       await api(`/api/admin/products/${p.id}`, { method: "PATCH", body: JSON.stringify(payload) });

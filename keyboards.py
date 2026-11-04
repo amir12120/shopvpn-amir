@@ -1693,6 +1693,7 @@ ADMIN_PANEL_ITEMS = [
     ("adm_season_quiz", "🏆 فصل رقابتی و کوییز", "ssq_adm"),
     ("adm_engage", "🎁 صندوق شانس و پیشرفت", "eng_adm"),
     ("adm_spam_settings", "🛡 ضداسپم کاربران", "adm_spam_settings"),
+    ("adm_extra_settings", "🧩 تنظیمات تکمیلی (متن‌ها و گزینه‌ها)", "adm_xs"),
     ("adm_gswitch", "🔌 سوئیچ سراسری ربات (خاموش/روشن)", "adm_gswitch"),
     ("adm_update", "🔄 آپدیت پروژه", "adm_update"),
     ("adm_dsub", "🔗 ساب اختصاصی (دامنه، صفحه‌ی وب، اپ‌ها)", "adm_dsub"),
@@ -1831,6 +1832,7 @@ ADMIN_PANEL_CATEGORIES = [
         "adm_backup_menu",
         "adm_report_group",
         "adm_spam_settings",
+        "adm_extra_settings",
     ]),
 ]
 
@@ -2922,6 +2924,7 @@ def admin_products_list_kb(db, products) -> InlineKeyboardMarkup:
             if p["provision_server_id"]:
                 edit_row.insert(0, InlineKeyboardButton(text=tr("🔌 تغییر پنل/اینباند"), callback_data=f"adm_prod_srv:{p['id']}"))
             rows.append(edit_row)
+            rows.append([InlineKeyboardButton(text=tr("🔄 قوانین تمدید کامل"), callback_data=f"adm_prodrr:{p['id']}")])
             extra = p["extra_user_price"] if "extra_user_price" in p.keys() else 0
             max_users = p["max_users"] if "max_users" in p.keys() else 0
             base_users = p["base_users"] if "base_users" in p.keys() and p["base_users"] else 0
@@ -3004,6 +3007,26 @@ def admin_product_src_duration_kb(product_id: int, server_id: int, volume_gb: in
         [InlineKeyboardButton(text=tr("♾ نامحدود"), callback_data=f"adm_prod_src_dur:{product_id}:{server_id}:{volume_gb}:unlimited")],
         [InlineKeyboardButton(text=tr("⬅️ بازگشت"), callback_data=f"adm_prod_src:{product_id}")],
     ])
+
+
+def admin_renew_rules_kb(rules, tgl_prefix: str, done_cb: str, done_text: str, back_cb: str = None) -> InlineKeyboardMarkup:
+    """صفحه‌ی «قوانین تمدید کامل» محصول: هر قانون یک سوییچ فعال/غیرفعال.
+    tgl_prefix + ':' + کلید کوتاه = callback هر سوییچ (renewal_rules.SHORT_KEYS)."""
+    import renewal_rules
+    r = renewal_rules.normalize(rules)
+    items = (
+        ("enabled", "قابل تمدید کامل باشد", r["renew_full_enabled"]),
+        ("same", "فقط برای سرویس‌های هم‌نوع (نامحدود/حجمی)", r["renew_same_type_only"]),
+        ("reset", "ریست کامل بعد از تمدید", r["renew_reset"]),
+        ("cv", "انتقال حجم باقیمانده", r["renew_carry_volume"]),
+        ("ct", "انتقال زمان باقیمانده", r["renew_carry_time"]),
+    )
+    rows = [[InlineKeyboardButton(text=tr(f"{'✅' if on else '⬜️'} {label}"), callback_data=f"{tgl_prefix}:{short}")]
+            for short, label, on in items]
+    rows.append([InlineKeyboardButton(text=tr(done_text), callback_data=done_cb)])
+    if back_cb:
+        rows.append([InlineKeyboardButton(text=tr("⬅️ بازگشت"), callback_data=back_cb)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def admin_new_product_payment_methods_kb(db, selected) -> InlineKeyboardMarkup:
@@ -3160,6 +3183,22 @@ def admin_pick_provision_server_kb(servers) -> InlineKeyboardMarkup:
     rows = []
     for s in servers:
         rows.append([InlineKeyboardButton(text=f"🖥 {s['name']}", callback_data=f"adm_newprod_srv:{s['id']}")])
+    rows.append([InlineKeyboardButton(text=tr("⬅️ بازگشت"), callback_data="adm_cat:products")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_newprod_targets_kb(choices, selected=None) -> InlineKeyboardMarkup:
+    """انتخاب چند مقصد گروه/اینباند برای یک محصول؛ انتخاب‌ها در FSM ذخیره می‌شوند."""
+    selected = {str(x) for x in (selected or [])}
+    rows = []
+    for item in choices or []:
+        value = str(item.get("value", ""))
+        if not value:
+            continue
+        mark = "✅" if value in selected else "▫️"
+        label = str(item.get("label") or value)
+        rows.append([InlineKeyboardButton(text=f"{mark} {label}"[:60], callback_data=f"adm_newprod_target_tgl:{value}")])
+    rows.append([InlineKeyboardButton(text=tr("✅ تأیید مقصدهای انتخاب‌شده"), callback_data="adm_newprod_target_done")])
     rows.append([InlineKeyboardButton(text=tr("⬅️ بازگشت"), callback_data="adm_cat:products")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

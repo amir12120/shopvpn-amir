@@ -2679,3 +2679,46 @@ EXTRA_PHRASES.update({
 EXTRA_DYNAMIC_PHRASES += [
     ('👤 حساب\u200cهای SSH ({x}) — ۲۵ مورد آخر:', '👤 SSH accounts ({x}) — last 25:'),
 ]
+
+EXTRA_PHRASES.update({
+    '🧩 تنظیمات تکمیلی\n\nیک گروه را انتخاب کن. همین گزینه\u200cها در مینی\u200cاپ هم هستند.': '🧩 Extra settings\n\nPick a group. The same options are also in the mini app.',
+    '✅ به پیش\u200cفرض برگشت.': '✅ Restored to default.',
+    'این گزینه دیگر وجود ندارد.': 'This option no longer exists.',
+    '↩️ بازگشت به پیش\u200cفرض': '↩️ Restore default',
+})
+
+EXTRA_PHRASES.update({
+    'فایلی ارسال نشد.': 'No file was sent.',
+    'حجم تصویر نباید بیشتر از ۸ مگابایت باشد.': 'The image must not be larger than 8 MB.',
+    'ابعاد تصویر خیلی کوچک است (حداقل ۳۰۰×۳۰۰؛ ۵۰۰×۵۰۰ یا بیشتر پیشنهاد می\u200cشود).': 'The image is too small (minimum 300×300; 500×500 or larger is recommended).',
+    'فایل تصویر سالم نیست؛ یک JPG یا PNG بفرستید.': 'The image file is not valid; send a JPG or PNG.',
+    'هنوز تصویر پس\u200cزمینه\u200cای آپلود نشده است.': 'No background image has been uploaded yet.',
+})
+
+
+# --- product targets, renewal rules and panel capabilities (upstream 85bc6b8) ---
+EXTRA_PHRASES.update({
+    '🔄 قوانین تمدید کامل این محصول\n\nبا لمس هر گزینه، فعال/غیرفعال می\u200cشود.\n• «ریست کامل» روشن باشد، حجم و زمان باقیمانده حذف و فقط بسته\u200cی جدید اعمال می\u200cشود.\n• در غیر این صورت می\u200cتوانید انتقال حجم و زمان باقیمانده را جداگانه روشن/خاموش کنید.': '🔄 Full-renewal rules for this product\n\nTap an option to toggle it.\n• When «full reset» is on, the remaining volume and time are removed and only the new package is applied.\n• Otherwise you can switch carrying the remaining volume and time on or off separately.',
+    '✅ قوانین تمدید کامل ذخیره شد.': '✅ Full-renewal rules saved.',
+    '🎯 مقصد ساخت سرویس این محصول را انتخاب کن.\nمی\u200cتوانی یک یا چند گروه / Inbound را انتخاب کنی.': '🎯 Choose where this service is created for this product.\nYou can pick one or more groups / inbounds.',
+    'مقصدهای این محصول ذخیره شد.': 'This product\'s destinations were saved.',
+    '👥 چند کاربر همزمان (اتصال هم\u200cزمان) در قیمت این محصول گنجانده شود؟\nعدد بین ۱ تا ۲۰ بفرستید؛ این تعداد روی هر سرویسِ ساخته\u200cشده اعمال می\u200cشود.\nعدد 0 یعنی بدون محدودیت؛ این گزینه فقط وقتی نمایش داده می\u200cشود که همهٔ پنل\u200cهای VPN انتخاب\u200cشده پشتیبانی کنند.': '👥 How many concurrent users (simultaneous connections) are included in this product\'s price?\nSend a number between 1 and 20; this count is applied to every service created.\n0 means no limit; this option is only shown when all the selected VPN panels support it.',
+    '⚠️ همهٔ پنل\u200cهای VPN این محصول از محدودیت کاربر همزمان پشتیبانی نمی\u200cکنند.': '⚠️ Not all the VPN panels of this product support concurrent-user limits.',
+    '🎯 مقصد ساخت سرویس این محصول را انتخاب کن.\nمی\u200cتوانی یک یا چند گروه / Inbound را انتخاب کنی. این انتخاب فقط برای همین محصول ذخیره می\u200cشود.': '🎯 Choose where this service is created for this product.\nYou can pick one or more groups / inbounds. This choice is stored for this product only.',
+    'مقصد انتخاب\u200cشده معتبر نیست.': 'The selected destination is not valid.',
+    'حداقل یک گروه یا Inbound انتخاب کن.': 'Select at least one group or inbound.',
+    'برای نوع این سرویس پلنی برای تمدید کامل در دسترس نیست.': 'No plan is available for a full renewal of this service type.',
+    'این پلن برای تمدید کامل این سرویس مجاز نیست.': 'This plan is not allowed for a full renewal of this service.',
+    '✅ تأیید مقصدهای انتخاب\u200cشده': '✅ Confirm the selected destinations',
+    '🔄 قوانین تمدید کامل': '🔄 Full-renewal rules',
+    'پنل فعال یافت نشد.': 'No active panel was found.',
+    'چندپنلی فقط برای بات اصلی مجاز است.': 'Multi-panel is only allowed for the main bot.',
+})
+
+EXTRA_DYNAMIC_PHRASES += [
+    ('دریافت فهرست مقصدهای پنل ناموفق بود: {x}\nمحصول ساخته نشد؛ اتصال پنل را بررسی و دوباره تلاش کن.', 'Could not fetch the panel destination list: {x}\nThe product was not created; check the panel connection and try again.'),
+    ('دریافت فهرست مقصدهای پنل ناموفق بود: {x}', 'Could not fetch the panel destination list: {x}'),
+    ('بررسی مقصدهای پنل ناموفق بود: {x}', 'Could not validate the panel destinations: {x}'),
+    ('دریافت مقصدهای پنل {x} ناموفق بود: {x}', 'Could not fetch the panel {x} destinations: {x}'),
+    ('بررسی مقصدهای پنل جدید ناموفق بود: {x}', 'Could not validate the new panel destinations: {x}'),
+]

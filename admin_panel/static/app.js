@@ -3464,7 +3464,87 @@ async function openCustomConfigPaymentMethodsModal() {
 
 let catalogDsubEnabled = false;
 
+async function loadProductPanelTargetPicker(b, serverId, selectedValues = []) {
+  const host = $('#prod-target-picker', b);
+  if (!host) return { choices: [] };
+  if (!serverId) { host.innerHTML = ''; host.dataset.hasChoices = '0'; return { choices: [] }; }
+  host.innerHTML = '<div class="card-sub">در حال دریافت گروه‌ها / Inboundهای پنل...</div>';
+  try {
+    const info = await apiGet(`/panel-servers/${Number(serverId)}/product-targets`);
+    const choices = Array.isArray(info.choices) ? info.choices : [];
+    if (!choices.length) {
+      host.innerHTML = '<div class="card-sub">این پنل مقصد قابل انتخاب زنده ندارد؛ قالب ذخیره‌شده پنل استفاده می‌شود.</div>';
+      host.dataset.hasChoices = '0'; return info;
+    }
+    const selected = new Set((selectedValues || []).map(String));
+    host.innerHTML = `<div class="field" style="margin-top:8px"><span>🎯 گروه / Inbound مخصوص این محصول</span><div style="display:grid;gap:7px;max-height:220px;overflow:auto;padding:9px;border:1px solid var(--border);border-radius:10px">${choices.map(c => `<label class="field-row"><span>${esc(String(c.label || c.value))}</span><input type="checkbox" data-product-target-value="${esc(String(c.value))}" ${selected.has(String(c.value)) ? 'checked' : ''}></label>`).join('')}</div><span class="card-sub">این مقصد فقط برای همین محصول ذخیره می‌شود و تنظیمات مشترک پنل تغییر نمی‌کند.</span></div>`;
+    host.dataset.hasChoices = '1'; return info;
+  } catch (e) {
+    host.dataset.hasChoices = 'error';
+    host.innerHTML = `<div class="form-error">دریافت مقصدهای پنل ناموفق بود: ${esc(e.message || 'خطا')}</div>`;
+    throw e;
+  }
+}
+async function loadMultiPanelTargetPickers(b, prefillConfigs = {}) {
+  const host = $('#prod-multi-target-pickers', b);
+  if (!host) return;
+  const ids = $$('.prod-multi-panel:checked', b).map(el => Number(el.value));
+  host.innerHTML = '';
+  for (const sid of ids) {
+    const panel = (window.__productPanelServers || []).find(x => Number(x.id) === sid);
+    const section = document.createElement('div');
+    section.className = 'card';
+    section.dataset.multiPanelId = String(sid);
+    section.dataset.hasChoices = 'loading';
+    section.innerHTML = `<div class="card-sub">در حال دریافت مقصدهای ${esc(panel?.name || `پنل #${sid}`)}...</div>`;
+    host.appendChild(section);
+    try {
+      const info = await apiGet(`/panel-servers/${sid}/product-targets`);
+      const choices = Array.isArray(info.choices) ? info.choices : [];
+      const cfg = prefillConfigs[sid] || prefillConfigs[String(sid)] || window.__productPrefillTargetConfig || null;
+      const selected = new Set(productTargetValuesFromConfig(cfg, sid));
+      if (!choices.length) {
+        section.dataset.hasChoices = '0';
+        section.innerHTML = `<div class="card-sub">${esc(panel?.name || `پنل #${sid}`)}: مقصد زنده ندارد؛ قالب پنل استفاده می‌شود.</div>`;
+      } else {
+        section.dataset.hasChoices = '1';
+        section.innerHTML = `<div class="field"><span>🎯 مقصد اختصاصی ${esc(panel?.name || `پنل #${sid}`)}</span><div style="display:grid;gap:7px;max-height:190px;overflow:auto;padding:9px;border:1px solid var(--border);border-radius:10px">${choices.map(c => `<label class="field-row"><span>${esc(String(c.label || c.value))}</span><input type="checkbox" data-multi-target-value="${esc(String(c.value))}" ${selected.has(String(c.value)) ? 'checked' : ''}></label>`).join('')}</div></div>`;
+      }
+    } catch (e) {
+      section.dataset.hasChoices = 'error';
+      section.innerHTML = `<div class="form-error">دریافت مقصدهای ${esc(panel?.name || sid)} ناموفق بود: ${esc(e.message || 'خطا')}</div>`;
+    }
+  }
+}
+function readMultiPanelTargetConfigs(b) {
+  const out = {};
+  $$('#prod-multi-target-pickers [data-multi-panel-id]', b).forEach(section => {
+    const sid = section.dataset.multiPanelId;
+    if (section.dataset.hasChoices === '1') {
+      out[sid] = $$('[data-multi-target-value]:checked', section).map(el => el.getAttribute('data-multi-target-value'));
+    }
+  });
+  return out;
+}
+function productTargetValuesFromConfig(raw, serverId = null) {
+  let cfg = raw;
+  if (typeof cfg === 'string') { try { cfg = JSON.parse(cfg); } catch (_) { cfg = null; } }
+  if (!cfg || !cfg.field) return [];
+  if (serverId && cfg.panel_server_id != null && Number(cfg.panel_server_id) !== Number(serverId)) return [];
+  const value = cfg.value;
+  if (cfg.field === 'xui_inbound_ids') return (Array.isArray(value) ? value : [value]).map(String);
+  if (value && typeof value === 'object' && !Array.isArray(value)) return Object.entries(value).flatMap(([proto, items]) => (items || []).map(item => `${proto}::${item}`));
+  return (Array.isArray(value) ? value : [value]).filter(x => x != null).map(String);
+}
+function readProductTargetValues(b) {
+  const host = $('#prod-target-picker', b);
+  if (!host || host.dataset.hasChoices !== '1') return null;
+  return $$('[data-product-target-value]:checked', host).map(el => el.getAttribute('data-product-target-value'));
+}
+
 function productProvisionFieldsHtml(panelServers, sshNodes = [], prefill = null) {
+  window.__productPanelServers = panelServers || [];
+  window.__productPrefillExtraTargetConfigs = (prefill && prefill.extra_panel_target_configs) || {};
   panelServers = panelServers || []; sshNodes = sshNodes || [];
   const isDirect = !!(prefill && (prefill.provision_server_id || prefill.provision_ssh_node_id));
   const extraPanels = ((prefill && prefill.extra_panel_ids) || []).map(Number);
@@ -3486,11 +3566,12 @@ function productProvisionFieldsHtml(panelServers, sshNodes = [], prefill = null)
       <div id="prod-multi-fields" style="display:${target === 'multi' ? '' : 'none'}">
         <div class="card-sub">پنل‌های VPN (هر تعداد)</div>
         ${panelServers.map(s2 => `<label class="field field-row"><span>${esc(s2.name)}</span><input type="checkbox" class="prod-multi-panel" value="${s2.id}" ${selPanels.includes(Number(s2.id)) ? 'checked' : ''}></label>`).join('') || '<div class="card-sub">پنلی نیست</div>'}
+        <div id="prod-multi-target-pickers" style="display:grid;gap:8px"></div>
         <div class="card-sub">نودهای SSH (هر تعداد)</div>
         ${sshNodes.map(n2 => `<label class="field field-row"><span>${esc(n2.name)} · ${esc(n2.host || '')}</span><input type="checkbox" class="prod-multi-node" value="${n2.id}" data-protocols="${esc((n2.protocols || ['ssh']).join(','))}" ${selNodes.includes(Number(n2.id)) ? 'checked' : ''}></label>`).join('') || '<div class="card-sub">نودی نیست</div>'}
         <span class="card-sub">حجم و زمان بین همه‌ی مقصدها مشترک است و خروجی همه در یک لینک ساب اختصاصی ادغام می‌شود.</span>
       </div>
-      <div id="prod-vpn-fields" style="display:${(target === 'ssh' || target === 'multi') ? 'none' : ''}"><label class="field"><span>پنل VPN</span><select class="input" id="prod-server">${panelServers.map(s => `<option value="${s.id}" ${prefill && Number(prefill.provision_server_id) === Number(s.id) ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label></div>
+      <div id="prod-vpn-fields" style="display:${(target === 'ssh' || target === 'multi') ? 'none' : ''}"><label class="field"><span>پنل VPN</span><select class="input" id="prod-server">${panelServers.map(s => `<option value="${s.id}" ${prefill && Number(prefill.provision_server_id) === Number(s.id) ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label><div id="prod-target-picker"></div></div>
       <div id="prod-ssh-fields" style="display:${(target === 'ssh' || target === 'both' || target === 'multi') ? '' : 'none'}"><label class="field" id="prod-ssh-node-field" style="display:${target === 'multi' ? 'none' : ''}"><span>نود SSH</span><select class="input" id="prod-ssh-node">${sshNodes.map(n => `<option value="${n.id}" data-protocols="${esc((n.protocols || ['ssh']).join(','))}" ${prefill && Number(prefill.provision_ssh_node_id) === Number(n.id) ? 'selected' : ''}>${esc(n.name)} · ${esc(n.host || '')}</option>`).join('')}</select><span class="card-sub">فقط Linux Agent فعال با حسابداری معتبر پشتیبانی می‌شود.</span></label>
       <div id="prod-proto-wrap" style="display:${(target === 'multi' || target === 'both') ? '' : 'none'}">
         <div class="card-sub">پروتکل‌های حساب SSH (هر تعداد)</div>
@@ -3501,15 +3582,82 @@ function productProvisionFieldsHtml(panelServers, sshNodes = [], prefill = null)
       <label class="field field-row"><span>♾ مدت اعتبار نامحدود</span><input type="checkbox" id="prod-duration-unlimited" ${durUnlimited ? 'checked' : ''}></label>
       <label class="field"><span>حجم (GB) — ۰ = نامحدود</span><input class="input" id="prod-volume" type="number" min="0" step="1" placeholder="حجم (گیگابایت)" value="${prefill && prefill.auto_provision_volume_gb != null ? prefill.auto_provision_volume_gb : ''}" ${volUnlimited ? 'disabled' : ''}></label>
       <label class="field field-row"><span>♾ حجم نامحدود</span><input type="checkbox" id="prod-volume-unlimited" ${volUnlimited ? 'checked' : ''}></label>
+      <div id="prod-user-limit-fields" style="display:none;grid-column:1/-1">
+        <div class="card-sub">👥 محدودیت تعداد کاربر همزمان <span id="prod-user-limit-supported-by"></span></div>
+        <div class="form-grid">
+          <label class="field"><span>کاربر پایه (۰ = بدون محدودیت)</span><input class="input" id="prod-base-users" type="number" min="0" max="20" step="1" value="${prefill && prefill.base_users != null ? prefill.base_users : 0}"></label>
+          <label class="field"><span>قیمت هر کاربر اضافه (تومان)</span><input class="input" id="prod-extra-user-price" type="number" min="0" step="1" value="${prefill && prefill.extra_user_price != null ? prefill.extra_user_price : 0}"></label>
+          <label class="field"><span>سقف نهایی کاربر</span><input class="input" id="prod-max-users" type="number" min="0" max="20" step="1" value="${prefill && prefill.max_users != null ? prefill.max_users : 0}"></label>
+        </div>
+        <span class="card-sub">این گزینه فقط وقتی فعال است که تمام پنل‌های VPN انتخاب‌شده از محدودیت کاربر پشتیبانی کنند.</span>
+      </div>
+      ${renewRulesHtml(prefill)}
     </div>`;
 }
 
+// «قوانین تمدید کامل» هر محصول (renewal_rules.py در بک‌اند). پیش‌فرض‌ها رفتار قبلی را حفظ می‌کنند.
+function renewRulesHtml(prefill) {
+  const v = (k, d) => (prefill && prefill[k] != null ? Number(prefill[k]) : d);
+  const reset = v('renew_reset', 0) === 1;
+  const row = (id, label, on, hint, disabled) => `<label class="field field-row"><span>${label}${hint ? `<small class="card-sub" style="display:block">${hint}</small>` : ''}</span><input type="checkbox" id="${id}" ${on ? 'checked' : ''} ${disabled ? 'disabled' : ''}></label>`;
+  return `<div id="prod-renew-rules" style="grid-column:1/-1;border-top:1px dashed var(--border, #8884);margin-top:10px;padding-top:10px">
+    <div class="card-sub">🔄 قوانین تمدید کامل</div>
+    ${row('prod-renew-enabled', 'قابل تمدید کامل باشد', v('renew_full_enabled', 1) === 1, 'اگر خاموش باشد این محصول در لیست تمدید کامل نمایش داده نمی‌شود.')}
+    ${row('prod-renew-same-type', 'فقط برای سرویس‌های هم‌نوع', v('renew_same_type_only', 1) === 1, 'نامحدود فقط به سرویس نامحدود و حجمی فقط به سرویس حجمی نمایش داده می‌شود.')}
+    ${row('prod-renew-reset', 'ریست کامل بعد از تمدید', reset, 'حجم و زمان باقیمانده حذف و فقط بسته‌ی جدید اعمال می‌شود.')}
+    ${row('prod-renew-carry-volume', 'انتقال حجم باقیمانده', !reset && v('renew_carry_volume', 1) === 1, 'حجم باقیمانده به محصول جدید اضافه می‌شود.', reset)}
+    ${row('prod-renew-carry-time', 'انتقال زمان باقیمانده', !reset && v('renew_carry_time', 1) === 1, 'روزهای باقیمانده به محصول جدید اضافه می‌شود.', reset)}
+  </div>`;
+}
+
+function wireRenewRules(b) {
+  const reset = $('#prod-renew-reset', b);
+  if (!reset) return;
+  const cv = $('#prod-renew-carry-volume', b), ct = $('#prod-renew-carry-time', b);
+  reset.addEventListener('change', () => {
+    if (reset.checked) { cv.checked = false; ct.checked = false; }
+    cv.disabled = ct.disabled = reset.checked;
+  });
+}
+
+function collectRenewRules(b) {
+  const en = $('#prod-renew-enabled', b);
+  if (!en) return undefined;
+  const reset = $('#prod-renew-reset', b).checked;
+  return {
+    renew_full_enabled: en.checked ? 1 : 0,
+    renew_same_type_only: $('#prod-renew-same-type', b).checked ? 1 : 0,
+    renew_reset: reset ? 1 : 0,
+    renew_carry_volume: !reset && $('#prod-renew-carry-volume', b).checked ? 1 : 0,
+    renew_carry_time: !reset && $('#prod-renew-carry-time', b).checked ? 1 : 0,
+  };
+}
+
 function wireProductProvisionToggle(b) {
+  wireRenewRules(b);
   $$('input[name="prod-source"]', b).forEach(r => r.addEventListener('change', () => {
     const df = $('#prod-direct-fields', b);
     if (df) df.style.display = $('input[name="prod-source"]:checked', b).value === 'direct' ? '' : 'none';
   }));
   const targetType = $('#prod-target-type', b);
+  const syncUserLimit = () => {
+    const wrap = $('#prod-user-limit-fields', b);
+    if (!wrap) return;
+    const tt = targetType ? targetType.value : 'vpn';
+    const serverData = (window.__productPanelServers || []);
+    let ids = [];
+    if (tt === 'multi') ids = $$('.prod-multi-panel:checked', b).map(c => Number(c.value));
+    else if (tt === 'both' || tt === 'vpn') { const v = Number($('#prod-server', b)?.value || 0); if (v) ids=[v]; }
+    const rows = ids.map(id => serverData.find(s => Number(s.id) === id)).filter(Boolean);
+    const supported = rows.length > 0 && rows.every(s => !!s.supports_user_limit);
+    wrap.style.display = supported ? '' : 'none';
+    const hint = $('#prod-user-limit-supported-by', b);
+    if (hint) hint.textContent = supported ? `(${rows.map(s => s.name).join('، ')})` : '';
+    if (!supported) {
+      const base=$('#prod-base-users',b), extra=$('#prod-extra-user-price',b), max=$('#prod-max-users',b);
+      if(base) base.value='0'; if(extra) extra.value='0'; if(max) max.value='0';
+    }
+  };
   const syncMultiProtocols = () => {
     const box = $('#prod-multi-protocols', b);
     if (!box) return;
@@ -3555,6 +3703,7 @@ function wireProductProvisionToggle(b) {
     if ($('#prod-proto-wrap', b)) $('#prod-proto-wrap', b).style.display = (t === 'multi' || t === 'both') ? '' : 'none';
     if ($('#prod-multi-fields', b)) $('#prod-multi-fields', b).style.display = t === 'multi' ? '' : 'none';
     syncSshProtocol();
+    syncUserLimit();
   });
   const durUnlimitedCb = $('#prod-duration-unlimited', b);
   if (durUnlimitedCb) {
@@ -3562,6 +3711,23 @@ function wireProductProvisionToggle(b) {
     if (durInput) durInput.disabled = durUnlimitedCb.checked;
     durUnlimitedCb.addEventListener('change', () => { if (durInput) durInput.disabled = durUnlimitedCb.checked; });
   }
+  $$('.prod-multi-panel', b).forEach(c => c.addEventListener('change', syncUserLimit));
+  const multiPanelChecks = $$('.prod-multi-panel', b);
+  multiPanelChecks.forEach(c => c.addEventListener('change', () => {
+    loadMultiPanelTargetPickers(b, window.__productPrefillExtraTargetConfigs || {}).catch(e => toast(e.message || 'دریافت مقصدهای پنل ناموفق بود.', true));
+  }));
+  if (targetType && targetType.value === 'multi') {
+    loadMultiPanelTargetPickers(b, window.__productPrefillExtraTargetConfigs || {}).catch(() => {});
+  }
+  const prodServer = $('#prod-server', b);
+  if (prodServer) {
+    prodServer.addEventListener('change', async () => {
+      syncUserLimit();
+      try { await loadProductPanelTargetPicker(b, prodServer.value, []); } catch (e) { toast(e.message || 'دریافت مقصد پنل ناموفق بود.', true); }
+    });
+    loadProductPanelTargetPicker(b, prodServer.value, productTargetValuesFromConfig(window.__productPrefillTargetConfig, prodServer.value)).catch(() => {});
+  }
+  syncUserLimit();
   const volUnlimitedCb = $('#prod-volume-unlimited', b);
   if (volUnlimitedCb) volUnlimitedCb.addEventListener('change', () => {
     const volInput = $('#prod-volume', b); if (volInput) volInput.disabled = volUnlimitedCb.checked;
@@ -3576,7 +3742,8 @@ function readProductProvisionFields(b) {
   const durationUnlimited = isDirect && durUnlimitedCb && durUnlimitedCb.checked;
   const durInput = $('#prod-duration', b);
   const duration_days = durationUnlimited ? 0 : (Number(durInput ? durInput.value : 0) || 30);
-  if (!isDirect) return { ok: true, source: 'bank', provision_server_id: null, provision_ssh_node_id: null, extra_panel_ids: [], extra_ssh_node_ids: [], auto_provision_volume_gb: null, duration_days };
+  const userLimit = () => ({ base_users: Number($('#prod-base-users', b)?.value || 0), extra_user_price: Number($('#prod-extra-user-price', b)?.value || 0), max_users: Number($('#prod-max-users', b)?.value || 0), renew_rules: collectRenewRules(b) });
+  if (!isDirect) return { ok: true, source: 'bank', provision_server_id: null, provision_ssh_node_id: null, extra_panel_ids: [], extra_ssh_node_ids: [], auto_provision_volume_gb: null, duration_days, ...userLimit() };
   const target = $('#prod-target-type', b)?.value || 'vpn';
   const volUnlimitedCb = $('#prod-volume-unlimited', b);
   const volumeUnlimited = volUnlimitedCb && volUnlimitedCb.checked;
@@ -3589,27 +3756,45 @@ function readProductProvisionFields(b) {
     const panels = $$('.prod-multi-panel:checked', b).map(c => Number(c.value));
     const nodes = $$('.prod-multi-node:checked', b).map(c => Number(c.value));
     if (panels.length + nodes.length < 2) { toast('حداقل دو مقصد (پنل یا نود) انتخاب کنید.', true); return { ok: false }; }
-    return { ok: true, source: 'direct', provision_server_id: panels[0] || null, provision_ssh_node_id: nodes[0] || null,
+    const panelTargetMap = readMultiPanelTargetConfigs(b);
+    const primaryTargetValues = panelTargetMap[String(panels[0])] || [];
+    for (const sid of panels) {
+      const section = $(`#prod-multi-target-pickers [data-multi-panel-id="${sid}"]`, b);
+      if (section && section.dataset.hasChoices === '1' && !(panelTargetMap[String(sid)] || []).length) {
+        toast(`برای پنل ${sid} حداقل یک مقصد انتخاب کنید.`, true); return { ok: false };
+      }
+      if (section && section.dataset.hasChoices === 'error') {
+        toast(`دریافت مقصدهای پنل ${sid} ناموفق بوده است.`, true); return { ok: false };
+      }
+    }
+    const extraTargetValues = { ...panelTargetMap };
+    delete extraTargetValues[String(panels[0])];
+    return { ok: true, source: 'direct', provision_server_id: panels[0] || null, provision_target_values: primaryTargetValues,
+      extra_panel_target_values: extraTargetValues, provision_ssh_node_id: nodes[0] || null,
       extra_panel_ids: panels.slice(1), extra_ssh_node_ids: nodes.slice(1),
       provision_ssh_protocol: nodes.length ? ($$('#prod-multi-protocols input[data-multi-proto]:checked', b).map(c => c.dataset.multiProto).join(',') || 'ssh') : 'ssh',
-      auto_provision_volume_gb, duration_days };
+      auto_provision_volume_gb, duration_days, ...userLimit() };
   }
   if (target === 'both') {
     const provision_server_id = Number($('#prod-server', b)?.value || 0);
     const provision_ssh_node_id = Number($('#prod-ssh-node', b)?.value || 0);
     if (!provision_server_id) { toast('یک پنل VPN فعال انتخاب کنید.', true); return { ok: false }; }
     if (!provision_ssh_node_id) { toast('یک نود SSH فعال انتخاب کنید.', true); return { ok: false }; }
-    return { ok: true, source: 'direct', provision_server_id, provision_ssh_node_id, extra_panel_ids: [], extra_ssh_node_ids: [],
-      provision_ssh_protocol: $$('#prod-multi-protocols input[data-multi-proto]:checked', b).map(c => c.dataset.multiProto).join(',') || 'ssh', auto_provision_volume_gb, duration_days };
+    const provision_target_values = readProductTargetValues(b);
+    if (provision_target_values !== null && !provision_target_values.length) { toast('حداقل یک گروه یا Inbound انتخاب کنید.', true); return { ok: false }; }
+    return { ok: true, source: 'direct', provision_server_id, provision_target_values, provision_ssh_node_id, extra_panel_ids: [], extra_ssh_node_ids: [],
+      provision_ssh_protocol: $$('#prod-multi-protocols input[data-multi-proto]:checked', b).map(c => c.dataset.multiProto).join(',') || 'ssh', auto_provision_volume_gb, duration_days, ...userLimit() };
   }
   if (target === 'ssh') {
     const provision_ssh_node_id = Number($('#prod-ssh-node', b)?.value || 0);
     if (!provision_ssh_node_id) { toast('یک نود SSH فعال انتخاب کنید.', true); return { ok: false }; }
-    return { ok: true, source: 'direct', provision_server_id: null, provision_ssh_node_id, extra_panel_ids: [], extra_ssh_node_ids: [], provision_ssh_protocol: 'ssh', auto_provision_volume_gb, duration_days };
+    return { ok: true, source: 'direct', provision_server_id: null, provision_ssh_node_id, extra_panel_ids: [], extra_ssh_node_ids: [], provision_ssh_protocol: 'ssh', auto_provision_volume_gb, duration_days, ...userLimit() };
   }
   const provision_server_id = Number($('#prod-server', b)?.value || 0);
   if (!provision_server_id) { toast('یک پنل VPN فعال انتخاب کنید.', true); return { ok: false }; }
-  return { ok: true, source: 'direct', provision_server_id, provision_ssh_node_id: null, extra_panel_ids: [], extra_ssh_node_ids: [], auto_provision_volume_gb, duration_days };
+  const provision_target_values = readProductTargetValues(b);
+  if (provision_target_values !== null && !provision_target_values.length) { toast('حداقل یک گروه یا Inbound انتخاب کنید.', true); return { ok: false }; }
+  return { ok: true, source: 'direct', provision_server_id, provision_target_values, provision_ssh_node_id: null, extra_panel_ids: [], extra_ssh_node_ids: [], auto_provision_volume_gb, duration_days, ...userLimit() };
 }
 
 // روش‌های پرداخت مجاز حین «ساخت» محصول جدید (پیش‌فرض: همه تیک‌خورده = بدون
@@ -3701,6 +3886,7 @@ function productEditFormHtml(product, categories, panelServers, sshNodes) {
 }
 
 function openProductEditModal(product, categories, panelServers, sshNodes) {
+  window.__productPrefillTargetConfig = product.provision_target_config || null;
   openModal('ویرایش محصول', productEditFormHtml(product, categories, panelServers, sshNodes), (b, close) => {
     wireProductProvisionToggle(b);
     $('#pe-save', b).addEventListener('click', async () => {
@@ -3718,11 +3904,14 @@ function openProductEditModal(product, categories, panelServers, sshNodes) {
       };
       if (prov.source === 'direct') {
         payload.provision_server_id = prov.provision_server_id;
+        payload.provision_target_values = prov.provision_target_values;
+        payload.extra_panel_target_values = prov.extra_panel_target_values;
         payload.provision_ssh_node_id = prov.provision_ssh_node_id;
         payload.provision_ssh_protocol = prov.provision_ssh_protocol;
         payload.extra_panel_ids = prov.extra_panel_ids;
         payload.extra_ssh_node_ids = prov.extra_ssh_node_ids;
         payload.auto_provision_volume_gb = prov.auto_provision_volume_gb;
+        payload.base_users = prov.base_users; payload.extra_user_price = prov.extra_user_price; payload.max_users = prov.max_users; payload.renew_rules = prov.renew_rules;
       }
       try {
         await apiPut(`/products/${product.id}`, payload);
@@ -3804,7 +3993,7 @@ async function renderCatalog() {
     </tr>`;
     }).join('') || '<tr><td colspan="6" class="empty-state">محصولی نیست</td></tr>'}</tbody></table></div></div>`;
 
-  $('#add-prod').addEventListener('click', () => openModal('محصول جدید', `
+  $('#add-prod').addEventListener('click', () => { window.__productPrefillTargetConfig = null; openModal('محصول جدید', `
     <div class="form-grid">
       <select class="input" id="prod-cat">${categories.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
       <input class="input" id="prod-name" placeholder="نام محصول">
@@ -3830,13 +4019,13 @@ async function renderCatalog() {
         await apiPost('/products', {
           category_id: Number($('#prod-cat', b).value), name, price: disc.price, compare_price: disc.compare_price, discount_days: disc.discount_days, discount_max_uses: disc.discount_max_uses,
           description: $('#prod-desc', b).value, duration_days: prov.duration_days,
-          provision_server_id: prov.provision_server_id, provision_ssh_node_id: prov.provision_ssh_node_id, provision_ssh_protocol: prov.provision_ssh_protocol, extra_panel_ids: prov.extra_panel_ids, extra_ssh_node_ids: prov.extra_ssh_node_ids,
-          auto_provision_volume_gb: prov.auto_provision_volume_gb, payment_methods,
+          provision_server_id: prov.provision_server_id, provision_target_values: prov.provision_target_values, extra_panel_target_values: prov.extra_panel_target_values, provision_ssh_node_id: prov.provision_ssh_node_id, provision_ssh_protocol: prov.provision_ssh_protocol, extra_panel_ids: prov.extra_panel_ids, extra_ssh_node_ids: prov.extra_ssh_node_ids,
+          auto_provision_volume_gb: prov.auto_provision_volume_gb, payment_methods, base_users: prov.base_users, extra_user_price: prov.extra_user_price, max_users: prov.max_users, renew_rules: prov.renew_rules,
         });
         toast('محصول اضافه شد.'); close(); renderCatalog();
       } catch (e) { handleErr(e); }
     });
-  }));
+  }); });
   $$('[data-toggle-prod]', body).forEach(b => b.addEventListener('click', async () => {
     try { await apiPost(`/products/${b.dataset.toggleProd}/toggle`); renderCatalog(); } catch (e) { handleErr(e); }
   }));
@@ -3965,8 +4154,8 @@ function renderCatalogBento(categories, products, panelServers, sshNodes, paymen
         await apiPost('/products', {
           category_id: Number($('#prod-cat', b).value), name, price: disc.price, compare_price: disc.compare_price, discount_days: disc.discount_days, discount_max_uses: disc.discount_max_uses,
           description: $('#prod-desc', b).value, duration_days: prov.duration_days,
-          provision_server_id: prov.provision_server_id, provision_ssh_node_id: prov.provision_ssh_node_id, provision_ssh_protocol: prov.provision_ssh_protocol, extra_panel_ids: prov.extra_panel_ids, extra_ssh_node_ids: prov.extra_ssh_node_ids,
-          auto_provision_volume_gb: prov.auto_provision_volume_gb, payment_methods,
+          provision_server_id: prov.provision_server_id, provision_target_values: prov.provision_target_values, extra_panel_target_values: prov.extra_panel_target_values, provision_ssh_node_id: prov.provision_ssh_node_id, provision_ssh_protocol: prov.provision_ssh_protocol, extra_panel_ids: prov.extra_panel_ids, extra_ssh_node_ids: prov.extra_ssh_node_ids,
+          auto_provision_volume_gb: prov.auto_provision_volume_gb, payment_methods, base_users: prov.base_users, extra_user_price: prov.extra_user_price, max_users: prov.max_users, renew_rules: prov.renew_rules,
         });
         toast('محصول اضافه شد.'); close(); renderCatalog();
       } catch (e) { handleErr(e); }
@@ -4099,8 +4288,8 @@ function renderCatalogBrutalist(categories, products, panelServers, sshNodes, pa
         await apiPost('/products', {
           category_id: Number($('#prod-cat', b).value), name, price: disc.price, compare_price: disc.compare_price, discount_days: disc.discount_days, discount_max_uses: disc.discount_max_uses,
           description: $('#prod-desc', b).value, duration_days: prov.duration_days,
-          provision_server_id: prov.provision_server_id, provision_ssh_node_id: prov.provision_ssh_node_id, provision_ssh_protocol: prov.provision_ssh_protocol, extra_panel_ids: prov.extra_panel_ids, extra_ssh_node_ids: prov.extra_ssh_node_ids,
-          auto_provision_volume_gb: prov.auto_provision_volume_gb, payment_methods,
+          provision_server_id: prov.provision_server_id, provision_target_values: prov.provision_target_values, extra_panel_target_values: prov.extra_panel_target_values, provision_ssh_node_id: prov.provision_ssh_node_id, provision_ssh_protocol: prov.provision_ssh_protocol, extra_panel_ids: prov.extra_panel_ids, extra_ssh_node_ids: prov.extra_ssh_node_ids,
+          auto_provision_volume_gb: prov.auto_provision_volume_gb, payment_methods, base_users: prov.base_users, extra_user_price: prov.extra_user_price, max_users: prov.max_users, renew_rules: prov.renew_rules,
         });
         toast('محصول اضافه شد.'); close(); renderCatalog();
       } catch (e) { handleErr(e); }
@@ -7811,6 +8000,67 @@ function extraFieldHtml(f, values) {
   return `<div class="extra-field" data-extra-search="${search}">${html}${hint}</div>`;
 }
 
+// تصویر پس‌زمینه‌ی QR (فایل مشترک qr_background.png که بات هم استفاده می‌کند)
+function extraQrBackgroundHtml() {
+  const T = settingsUiText;
+  return `<div class="extra-field extra-qrbg" data-extra-search="${esc('تصویر پس‌زمینه qr background')}" style="margin-top:12px">
+    <label class="label">${esc(T('🖼 تصویر پس‌زمینه‌ی QR'))}</label>
+    <div class="card-sub" data-qrbg-status>${esc(T('در حال بررسی...'))}</div>
+    <img data-qrbg-preview alt="" style="display:none;max-width:160px;border-radius:12px;margin:8px 0">
+    <input type="file" accept="image/*" data-qrbg-file class="input" style="margin-top:6px">
+    <div class="card-sub extra-hint">${esc(T('حداقل ۳۰۰×۳۰۰ و حداکثر ۸ مگابایت؛ ۵۰۰×۵۰۰ یا بزرگ‌تر پیشنهاد می‌شود.'))}</div>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button type="button" class="btn" data-qrbg-upload>${esc(T('آپلود'))}</button>
+      <button type="button" class="btn" data-qrbg-remove style="display:none">${esc(T('حذف'))}</button>
+    </div>
+  </div>`;
+}
+
+async function wireExtraQrBackground(box) {
+  const wrap = $('.extra-qrbg', box);
+  if (!wrap) return;
+  const T = settingsUiText;
+  const statusEl = $('[data-qrbg-status]', wrap), img = $('[data-qrbg-preview]', wrap);
+  const rm = $('[data-qrbg-remove]', wrap), up = $('[data-qrbg-upload]', wrap), fileEl = $('[data-qrbg-file]', wrap);
+  const refresh = async () => {
+    try {
+      const st = await apiGet('/settings/qr-background');
+      statusEl.textContent = st.has
+        ? T(st.enabled ? '✅ تصویر آپلود شده و فعال است.' : '⏸ تصویر آپلود شده ولی غیرفعال است.')
+        : T('تصویری آپلود نشده؛ QR ساده‌ی سیاه/سفید ارسال می‌شود.');
+      rm.style.display = st.has ? '' : 'none';
+      if (st.has) {
+        const pv = await apiGet('/settings/qr-background/preview');
+        img.src = pv.image; img.style.display = '';
+      } else {
+        img.style.display = 'none';
+      }
+    } catch (e) { statusEl.textContent = ''; handleErr(e); }
+  };
+  up.addEventListener('click', async () => {
+    const file = fileEl.files[0];
+    if (!file) { toast(T('ابتدا یک تصویر انتخاب کن.'), true); return; }
+    const fd = new FormData();
+    fd.append('photo', file);
+    up.disabled = true;
+    try {
+      const res = await fetch('/api/settings/qr-background', { method: 'POST', credentials: 'include', body: fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(formatApiError(data.detail));
+      fileEl.value = '';
+      toast(T('تصویر پس‌زمینه ذخیره و فعال شد.'));
+      await refresh();
+    } catch (e) { toast(e.message, true); }
+    finally { up.disabled = false; }
+  });
+  rm.addEventListener('click', async () => {
+    try { await apiDelete('/settings/qr-background'); toast(T('تصویر پس‌زمینه حذف شد.')); await refresh(); }
+    catch (e) { handleErr(e); }
+  });
+  box._refreshQrBg = refresh;
+  refresh();
+}
+
 function extraSettingsHtml(data) {
   const T = settingsUiText;
   const values = data.values || {};
@@ -7831,6 +8081,7 @@ function extraSettingsHtml(data) {
           </button>
           <div class="settings-group-body">
             <div class="form-grid">${g.fields.map(f => extraFieldHtml(f, values)).join('')}</div>
+            ${g.id === 'post_tools' ? extraQrBackgroundHtml() : ''}
             <button type="button" class="btn btn-primary extra-save-btn" data-group="${esc(g.id)}" style="margin-top:12px">${esc(T('ذخیره'))}</button>
           </div>
         </div>`).join('')}
@@ -7867,6 +8118,8 @@ async function saveExtraGroup(groupEl, btn) {
     // رمز تازه‌ذخیره‌شده دیگر در صفحه نمی‌ماند؛ به ماسک برمی‌گردد.
     $$('input[type=password][data-xkey]', groupEl).forEach(inp => { if (inp.value.trim()) inp.value = EXTRA_SECRET_MASK; });
     toast(settingsUiText('ذخیره شد.'));
+    const qbox = groupEl.closest('#extra-settings-root');
+    if (qbox && qbox._refreshQrBg && groupEl.dataset.extraGroup === 'post_tools') qbox._refreshQrBg();
   } catch (e) {
     handleErr(e);
   } finally {
@@ -7886,6 +8139,7 @@ async function ensureExtraSettings(root) {
     $$('.settings-group-head', box).forEach(h => h.addEventListener('click', () => h.parentElement.classList.toggle('open')));
     $$('.switch[data-xkey]', box).forEach(sw => sw.addEventListener('click', () => { sw.dataset.on = sw.dataset.on === '1' ? '0' : '1'; }));
     $$('.extra-save-btn', box).forEach(b => b.addEventListener('click', () => saveExtraGroup(b.closest('.extra-group'), b)));
+    wireExtraQrBackground(box);
     const si = $('#extra-search-input', box);
     if (si) si.addEventListener('input', () => filterExtraSettings(box, si.value));
     if (typeof window.ShopVPNApplyI18n === 'function') { try { window.ShopVPNApplyI18n(); } catch (_) {} }

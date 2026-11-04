@@ -89,14 +89,25 @@ def _left_parts(snap) -> list:
     return parts
 
 
-def warning_text(snap) -> str:
-    """متن هشدار صفحه‌ی تایید تمدید کامل؛ اگر چیزی از سرویس باقی نمانده خالی است."""
+def warning_text(snap, carry_volume=None, carry_time=None) -> str:
+    """متن هشدار صفحه‌ی تایید تمدید کامل؛ اگر چیزی از سرویس باقی نمانده خالی است.
+    carry_volume/carry_time از «قوانین تمدید کامل» محصول می‌آیند (None = انتقال، رفتار قدیمی)."""
     parts = _left_parts(snap)
     if not parts:
         return ""
+    cv = True if carry_volume is None else bool(carry_volume)
+    ct = True if carry_time is None else bool(carry_time)
+    if cv and ct:
+        effect = "با تمدید کامل، بسته‌ی جدید روی حجم و زمان باقی‌مانده اضافه می‌شود.\n"
+    elif not cv and not ct:
+        effect = "با تمدید کامل، حجم و زمان باقی‌مانده حذف می‌شود و فقط بسته‌ی جدید اعمال می‌شود (ریست کامل).\n"
+    elif cv:
+        effect = "با تمدید کامل، حجم باقی‌مانده منتقل می‌شود ولی زمان باقی‌مانده حذف و زمان بسته‌ی جدید از امروز شروع می‌شود.\n"
+    else:
+        effect = "با تمدید کامل، زمان باقی‌مانده منتقل می‌شود ولی حجم باقی‌مانده حذف و فقط حجم بسته‌ی جدید اعمال می‌شود.\n"
     return (
         f"⚠️ توجه: این سرویس هنوز {' و '.join(parts)} باقی‌مانده دارد.\n"
-        "با تمدید کامل، بسته‌ی جدید روی حجم و زمان باقی‌مانده اضافه می‌شود.\n"
+        + effect +
         "اگر هنوز نیازی به تمدید ندارید، انصراف دهید.\n"
     )
 
@@ -183,6 +194,22 @@ async def _send(db, order, service_name, before, after_cc, provider) -> None:
         await report_router.report_raw(token, db, TOPIC_KEY, text, senior_only=True)
     except Exception:
         logger.warning("ارسال لاگ تمدید سفارش #%s ناموفق بود.", order["id"], exc_info=True)
+
+
+async def _send_alert(db, text) -> None:
+    try:
+        token = await asyncio.to_thread(resolve_token, db)
+        if token:
+            await report_router.report_raw(token, db, TOPIC_KEY, text, senior_only=True)
+    except Exception:
+        logger.warning("ارسال هشدار تمدید ناقص ناموفق بود.", exc_info=True)
+
+
+def alert(db, text) -> None:
+    """هشدار پس‌زمینه به مدیران ارشد (مثلاً تمدید ناقص پنل‌های اضافه)."""
+    task = asyncio.get_running_loop().create_task(_send_alert(db, text))
+    _pending.add(task)
+    task.add_done_callback(_pending.discard)
 
 
 def notify(db, order, service_name, before=None, after_cc=None, provider=None) -> None:
