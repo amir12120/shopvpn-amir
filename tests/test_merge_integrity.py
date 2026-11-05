@@ -123,6 +123,12 @@ UPSTREAM_FEATURE_MODULES = (
     "admin_extra_settings.py",
     "check_settings_sync.py",
     "settings_parity_baseline.json",
+    # --- upstream batch: W-UI panel, cross-panel user migration, multi
+    # --- card-to-card cards ---
+    "panel_providers/wui_provider.py",
+    "panel_migration.py",
+    "admin_panel_migration.py",
+    "db/panel_migration.py",
 )
 
 # Upstream keeps re-uploading these with a module-level `from i18n import tr`
@@ -956,3 +962,56 @@ def test_product_targets_capabilities_resync_and_renewal_rules_are_wired():
     # check_settings_sync.py demands the two settings_schema.py copies stay identical.
     assert (ROOT / "settings_schema.py").read_text(encoding="utf-8") == (
         ROOT / "admin_panel/static/settings_schema.py").read_text(encoding="utf-8")
+
+
+def test_wui_panel_migration_and_multi_cards_are_wired():
+    """Upstream 9298ad8: W-UI panel type, user migration between panels, several
+    card-to-card cards with weighted display, and the W-UI dedicated-sub page.
+
+    The upstream upload also re-added a 9k-line root ``app.js`` duplicate and a
+    Persian "what we merged" note; the fork keeps neither, and the merge must not
+    silently bring back the upload duplicates.
+    """
+    providers = (ROOT / "panel_providers/__init__.py").read_text(encoding="utf-8")
+    assert "from .wui_provider import WUIProvider" in providers
+    assert '"wui": WUIProvider' in providers
+    assert '"wui": "W-UI"' in providers
+    template_line = next(
+        line for line in providers.splitlines() if line.startswith("TEMPLATE_BASED_PANEL_TYPES = ")
+    )
+    assert '"wui"' in template_line, "W-UI templates come from an existing customer"
+    wui = (ROOT / "panel_providers/wui_provider.py").read_text(encoding="utf-8")
+    for method in ("def get_config_files(", "def get_sub_info(", "def get_login_profiles("):
+        assert method in wui, f"W-UI provider lost {method.strip()}"
+
+    # Migration is reachable from the bot and its history tables are part of the DB.
+    assert "PanelMigrationMixin" in (ROOT / "db/__init__.py").read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS panel_migrations" in (
+        ROOT / "db/panel_migration.py").read_text(encoding="utf-8")
+    handlers_admin = (ROOT / "handlers_admin.py").read_text(encoding="utf-8")
+    assert "import admin_panel_migration" in handlers_admin
+    assert "admin_panel_migration.register(router, db, senior_admin_only, deny_mid, replace_admin_view)" in handlers_admin
+    assert "async def run_migration(" in (ROOT / "panel_migration.py").read_text(encoding="utf-8")
+
+    # Several manual card numbers with weights, and receipt matching that sees them.
+    base = (ROOT / "db/_base.py").read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS payment_cards" in base
+    assert "CREATE TABLE IF NOT EXISTS payment_card_assignments" in base
+    assert "def get_manual_card_for_user(" in (ROOT / "db/payments.py").read_text(encoding="utf-8")
+    assert "payment_cards" in (ROOT / "db/orders.py").read_text(encoding="utf-8")
+    assert '@router.callback_query(F.data == "adm_pcards")' in handlers_admin
+    assert "def payment_cards_kb(" in (ROOT / "keyboards.py").read_text(encoding="utf-8")
+    assert "class AdminPayCard(StatesGroup)" in (ROOT / "states.py").read_text(encoding="utf-8")
+
+    # W-UI subscribers get their WireGuard/OpenVPN files and login profiles in the
+    # dedicated sub page; secrets are fetched per item, never rendered into HTML.
+    assert "def vpn_secret(" in (ROOT / "dedicated_sub.py").read_text(encoding="utf-8")
+    assert "def vpn_items_for_page(" in (ROOT / "dedicated_sub.py").read_text(encoding="utf-8")
+    assert "def wui_dsub_warning(" in (ROOT / "dedicated_sub.py").read_text(encoding="utf-8")
+    sub_server = (ROOT / "sub_server/server.py").read_text(encoding="utf-8")
+    assert "async def _wui_bundle(" in sub_server
+    assert "connect-src 'self'" in sub_server
+    assert "provider.get_login_profiles(" in sub_server
+
+    # The fork does not resurrect upstream's upload duplicates.
+    assert not (ROOT / "app.js").exists(), "the 9k-line root app.js upload duplicate came back"

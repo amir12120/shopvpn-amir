@@ -2722,3 +2722,23 @@ EXTRA_DYNAMIC_PHRASES += [
     ('دریافت مقصدهای پنل {x} ناموفق بود: {x}', 'Could not fetch the panel {x} destinations: {x}'),
     ('بررسی مقصدهای پنل جدید ناموفق بود: {x}', 'Could not validate the new panel destinations: {x}'),
 ]
+
+# --- W-UI, panel migration and multi card-to-card cards (upstream 9298ad8) ---
+EXTRA_PHRASES.update({
+    '❌ متن خوش\u200cآمد نمی\u200cتواند خالی باشد. یک متن ارسال کنید:': '❌ The welcome text cannot be empty. Send a text:',
+    '➕ افزودن کارت': '➕ Add card',
+    '🚚 مهاجرت کاربران به پنل دیگر': '🚚 Migrate users to another panel',
+    '🎯 تغییر درصد نمایش': '🎯 Change display share',
+    '🔄 سرویس شما به سرور جدید منتقل شد': '🔄 Your service was moved to a new server',
+    '✅ حجم و زمان باقی\u200cمانده\u200cی شما بدون تغییر حفظ شده است.': '✅ Your remaining volume and time were kept unchanged.',
+    '🔗 لینک اشتراک جدید شما:': '🔗 Your new subscription link:',
+    'لینک قبلی دیگر کار نمی\u200cکند. لطفاً در برنامه\u200cی خود اشتراک قدیمی را حذف کنید و این لینک را به\u200cجایش اضافه کنید.': 'The previous link no longer works. Please remove the old subscription in your app and add this link instead.',
+    'لینک شما تغییری نکرده است؛ فقط کافی است داخل برنامه\u200cات اشتراک را یک بار به\u200cروزرسانی (Update) کنی تا کانفیگ\u200cهای جدید دریافت شوند.': 'Your link did not change; just update the subscription once inside your app to receive the new configs.',
+    'سرویس:': 'Service:',
+    'ابتدا کلید API آبان گیت وی را تنظیم کن.': 'Set the Aban Gateway API key first.',
+    'آدرس مینی\u200cاپ روی سرور تنظیم نشده است؛ MINIAPP_URL (یا API_BASE_URL) را در فایل .env پر کن و سرویس را ری\u200cاستارت کن.': 'The mini app URL is not configured on the server; set MINIAPP_URL (or API_BASE_URL) in the .env file and restart the service.',
+})
+
+EXTRA_DYNAMIC_PHRASES += [
+    ('🗂 چند شماره کارت + درصد نمایش ({x} فعال)', '🗂 Multiple card numbers + display shares ({x} active)'),
+]

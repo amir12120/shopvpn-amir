@@ -37,6 +37,7 @@ from .engagement import EngagementMixin
 from .dedicated_sub import DedicatedSubMixin
 from .usage import UsageMixin
 from .multi_target import MultiTargetMixin
+from .panel_migration import PanelMigrationMixin
 
 class Database(
     DatabaseBase,
@@ -57,6 +58,7 @@ class Database(
     DedicatedSubMixin,
     UsageMixin,
     MultiTargetMixin,
+    PanelMigrationMixin,
 ):
     pass
 
