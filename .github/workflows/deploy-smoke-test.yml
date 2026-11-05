@@ -21,8 +21,11 @@ jobs:
         with:
           python-version: "3.10"
 
+      # tests/ stays importable without the bot's full dependency set, but the
+      # dedicated-sub test imports config (python-dotenv) and panel_providers
+      # (aiohttp, cryptography), so those three are needed for collection.
       - name: Install analysis tools
-        run: pip install -q --disable-pip-version-check pyflakes ruff pytest
+        run: pip install -q --disable-pip-version-check pyflakes ruff pytest python-dotenv aiohttp cryptography
 
       - name: Shell syntax check
         run: |
