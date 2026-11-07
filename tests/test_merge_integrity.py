@@ -129,6 +129,13 @@ UPSTREAM_FEATURE_MODULES = (
     "panel_migration.py",
     "admin_panel_migration.py",
     "db/panel_migration.py",
+    # --- upstream batch: account naming, buy guide, card UI, admin links,
+    # --- multi-channel force-join ---
+    "account_naming.py",
+    "admin_links.py",
+    "buy_guide.py",
+    "card_payment_ui.py",
+    "force_join_channels.py",
 )
 
 # Upstream keeps re-uploading these with a module-level `from i18n import tr`
@@ -217,6 +224,16 @@ def test_upstream_feature_modules_still_shipped_and_wired():
     assert "product_waitlist.notify_waitlist" in handlers_admin
     assert "product_waitlist.notify_waitlist" in admin_panel
     assert "product_waitlist.notify_waitlist" in (ROOT / "miniapp/server.py").read_text(encoding="utf-8")
+
+    handlers_admin = (ROOT / "handlers_admin.py").read_text(encoding="utf-8")
+    assert "import account_naming" in handlers_admin
+    assert "import admin_links" in handlers_admin
+    assert "from force_join_channels import parse_channels" in handlers_admin
+    handlers_user = (ROOT / "handlers_user.py").read_text(encoding="utf-8")
+    assert "import card_payment_ui" in handlers_user
+    assert "import buy_guide" in handlers_user
+    assert "from force_join_channels import parse_channels" in (ROOT / "force_join.py").read_text(encoding="utf-8")
+    assert "from force_join_channels import serialize_channels" in (ROOT / "admin_panel/server.py").read_text(encoding="utf-8")
 
 
 

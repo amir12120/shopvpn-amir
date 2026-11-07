@@ -342,6 +342,25 @@ EXTRA_SETTINGS_GROUPS: List[Dict[str, Any]] = [
         ],
     },
     {
+        "id": "card_to_card_ui", "title": "💳 ظاهر و دکمه‌های کارت‌به‌کارت", "web": True, "mini": True, "bot": True,
+        "fields": [
+            _sel("c2c_message_style", "ظاهر پیام اطلاعات واریز",
+                 [["pretty", "✨ زیبا (کارت اطلاعات واریز)"], ["classic", "کلاسیک (متن ساده‌ی قبلی)"]], "pretty"),
+            _b("c2c_copy_buttons", "نمایش دکمه‌های کپی زیر پیام کارت", "1",
+               "با لمس هر دکمه، مقدار در کلیپ‌بورد کاربر کپی می‌شود (حتی وقتی محافظت از پیام روشن است). حذف خودکار پیام کارت از بخش «متفرقه» تنظیم می‌شود."),
+            _b("c2c_copy_card", "دکمه‌ی «کپی شماره کارت»", "1"),
+            _b("c2c_copy_amount_toman", "دکمه‌ی «کپی مبلغ (تومان)»", "1"),
+            _b("c2c_copy_amount_rial", "دکمه‌ی «کپی مبلغ (ریال)»", "1"),
+            _b("c2c_copy_holder", "دکمه‌ی «کپی نام صاحب کارت»", "0"),
+            _sel("c2c_copy_btn_style", "رنگ دکمه‌های کپی",
+                 [["default", "پیش‌فرض"], ["primary", "🔵 آبی"], ["success", "🟢 سبز"], ["danger", "🔴 قرمز"]], "default"),
+            _b("c2c_protect_card", "محافظت از شماره کارت", "0",
+               "پیام کارت قابل انتخاب/کپی متن، فوروارد و (روی موبایل) اسکرین‌شات نمی‌شود؛ کاربر فقط با دکمه‌های کپی می‌تواند کپی کند."),
+            _b("c2c_show_bank", "نمایش نام بانک در پیام", "1"),
+            _b("c2c_back_to_wallet", "دکمه‌ی «بازگشت به کیف پول» در پرداخت شارژ کیف پول", "1"),
+        ],
+    },
+    {
         "id": "misc_admin", "title": "🧩 متفرقه", "web": True, "mini": True,
         "fields": [
             _n("card_msg_autodelete_seconds", "حذف خودکار پیام شماره کارت پس از (ثانیه، ۰ = غیرفعال)", "0", min=0, max=86400),
@@ -438,6 +457,25 @@ EXTRA_SETTINGS_GROUPS: List[Dict[str, Any]] = [
         ],
     },
     {
+        "id": "ai_buy_guide", "title": "🛒 دستیار هوشمند خرید", "web": True, "mini": True, "bot": True,
+        "bot_back": "adm_ai_agents", "bot_hidden_in_list": True,
+        "fields": [
+            _b("buy_guide_enabled", "فعال بودن دستیار هوشمند خرید (دکمه‌ی «راهنمای خرید» در مسیر خرید)", "1"),
+            {**_ta("buy_guide_questions",
+                   "سوال‌های راهنمای خرید (هر خط یک سوال: «عنوان | متن سوال | گزینه۱ ; گزینه۲ ; ...»)",
+                   _default_setting("buy_guide_questions"),
+                   "حداکثر ۸ سوال و هر سوال ۲ تا ۸ گزینه (جداشده با ;). عنوان در خلاصه‌ی جواب‌ها به AI داده می‌شود. "
+                   "خالی = سوال‌های پیش‌فرض."),
+             "maxlen": 3000, "plain": True},
+            {**_ta("buy_guide_prompt",
+                   "دستورالعمل AI در راهنمای خرید (سبک پیشنهاد و لحن)",
+                   _default_setting("buy_guide_prompt"),
+                   "قوانین ایمنی (فقط محصولات واقعی از list_products، پنهان‌ماندن توضیح داخلی محصول، موجودی، کارت خرید) "
+                   "ثابت‌اند و با ویرایش این متن حذف نمی‌شوند. خالی = متن پیش‌فرض."),
+             "maxlen": 3000, "plain": True},
+        ],
+    },
+    {
         "id": "ai_providers", "title": "🔑 دستیار هوش مصنوعی: ارائه‌دهنده‌ها", "web": True, "mini": True,
         "fields": [
             _pwm("gemini_api_key", "کلید(های) Gemini", _AI_KEY_HINT),
@@ -511,7 +549,7 @@ EXTRA_SETTINGS_GROUPS: List[Dict[str, Any]] = [
         "id": "force_join", "title": "📢 عضویت اجباری در کانال", "web": False, "mini": True,
         "fields": [
             _b("force_join_enabled", "عضویت اجباری", "0"),
-            _t("force_join_channel", "آیدی کانال (مثلاً @mychannel)", ""),
+            _ta("force_join_channel", "آیدی کانال‌ها (هر کانال در یک خط، مثلاً @mychannel؛ تعداد نامحدود)", ""),
         ],
     },
     # تنظیمات پرداخت کریپتو در پنل وب فرم اختصاصی دارد؛ این فیلد فقط
@@ -719,6 +757,12 @@ def _cross_check(values: Dict[str, str], db) -> None:
             raise SettingsValidationError("نام مدل نباید فاصله داشته باشد و باید حداکثر ۱۲۰ نویسه باشد.")
         if k == "cloudflare_model" and not v.startswith(("@cf/", "@hf/")):
             raise SettingsValidationError("نام مدل Workers AI نامعتبر است (باید با @cf/ یا @hf/ شروع شود).")
+    if values.get("buy_guide_questions", "").strip():
+        import buy_guide as _bg
+        _qs, _qerrors = _bg.parse_questions(values["buy_guide_questions"])
+        if _qerrors:
+            raise SettingsValidationError("؛ ".join(_qerrors[:3]))
+        values["buy_guide_questions"] = _bg.serialize_questions(_qs)
     if "main_menu_reply_enabled" in values or "main_menu_inline_enabled" in values:
         if cur("main_menu_reply_enabled") != "1" and cur("main_menu_inline_enabled") != "1":
             raise SettingsValidationError("حداقل یکی از «منوی پایین» یا «منوی شیشه‌ای» باید روشن بماند.")
@@ -734,7 +778,13 @@ def _cross_check(values: Dict[str, str], db) -> None:
     if "reseller_fixed_product_ids" in values and values["reseller_fixed_product_ids"]:
         if not all(p.strip().isdigit() for p in values["reseller_fixed_product_ids"].split(",") if p.strip()):
             raise SettingsValidationError("شناسه‌ی محصولات باید عدد و با ویرگول جدا شده باشند.")
-    for k in ("force_join_channel", "service_alert_channel", "promo_channel_id"):
+    if values.get("force_join_channel"):
+        from force_join_channels import parse_channels, serialize_channels, invalid_entries
+        if invalid_entries(values["force_join_channel"]):
+            raise SettingsValidationError("آیدی کانال باید با @ شروع شود (یا آیدی عددی باشد).")
+        _fj = parse_channels(values["force_join_channel"])
+        values["force_join_channel"] = serialize_channels(_fj)
+    for k in ("service_alert_channel", "promo_channel_id"):
         if k in values and values[k] and not (values[k].startswith("@") or values[k].lstrip("-").isdigit()
                                                 or values[k].startswith("https://t.me/")):
             raise SettingsValidationError("آیدی کانال باید با @ شروع شود (یا آیدی عددی باشد).")

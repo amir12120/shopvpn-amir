@@ -799,14 +799,21 @@ class SystemMixin:
 
 
     def get_categories(self, active_only=True):
+        """همه‌ی دسته‌ها به‌صورت لیست تخت، به ترتیب درخت (والد، سپس فرزندانش).
+
+        active_only=True: دسته‌ی غیرفعال و کل زیرشاخه‌اش حذف می‌شود (فرزندِ دسته‌ی غیرفعال دیده نمی‌شود).
+        """
         with self._get_conn() as conn:
-            if active_only:
-                rows = conn.execute(
-                    "SELECT * FROM categories WHERE is_active=1 ORDER BY sort_order, id"
-                ).fetchall()
-            else:
-                rows = conn.execute("SELECT * FROM categories ORDER BY sort_order, id").fetchall()
-            return rows
+            _rows, children = self._category_children_map(conn)
+        out = []
+        def walk(pid):
+            for r in children.get(pid, []):
+                if active_only and not r["is_active"]:
+                    continue
+                out.append(r)
+                walk(int(r["id"]))
+        walk(0)
+        return out
 
 
     def _refund_candidate(self, conn, custom_config_id: int, user_tg_id: int, source: str):
@@ -1174,18 +1181,34 @@ class SystemMixin:
 
 
     def get_bot_revenue_summary(self):
-        """جمع فروش (سفارش‌های تاییدشده) روی همین دیتابیس - برای نمایش میزان فروش هر
-        نماینده‌ی کامل (سطح ۱) که دیتابیس/باتِ مستقل خودش را دارد، از پنل وب اصلی."""
+        """جمع فروش سفارش‌های تاییدشده (بدون شارژ کیف پول)."""
+        t = self._bot_sales_by_day().get("all", {"revenue": 0, "orders": 0})
+        return {"revenue_toman": t["revenue"], "paid_orders": t["orders"]}
+
+
+    def _bot_sales_by_day(self, start_date=None, end_date=None, per_day=False):
+        """تنها منبع محاسبه‌ی فروش نماینده: سفارش‌های تاییدشده، روز بر اساس وقت تهران (UTC+3:30)."""
+        day = "date(o.created_at, '+210 minutes')"
+        rng, params = "", ()
+        if start_date and end_date:
+            rng, params = f" AND {day} BETWEEN ? AND ?", (start_date, end_date)
+        out = {}
         with self._get_conn() as conn:
-            row = conn.execute(
-                "SELECT COALESCE(SUM(CASE WHEN o.status='approved' THEN COALESCE(o.final_price, p.price) ELSE 0 END),0) revenue, "
-                "COUNT(CASE WHEN o.status='approved' THEN 1 END) cnt "
-                "FROM orders o LEFT JOIN products p ON p.id=o.product_id"
-            ).fetchone()
-            topup = conn.execute(
-                "SELECT COALESCE(SUM(amount),0) s FROM wallet_topups WHERE status='approved'"
-            ).fetchone()["s"] or 0
-        return {"revenue_toman": (row["revenue"] or 0) + topup, "paid_orders": row["cnt"] or 0}
+            for r in conn.execute(
+                f"SELECT {day} d, COUNT(*) cnt, COALESCE(SUM(COALESCE(o.final_price, p.price, 0)),0) rev "
+                f"FROM orders o LEFT JOIN products p ON p.id=o.product_id WHERE o.status='approved'{rng} GROUP BY d",
+                params,
+            ).fetchall():
+                key = r["d"] if per_day else "all"
+                cur = out.setdefault(key, {"revenue": 0, "orders": 0})
+                cur["revenue"] += r["rev"] or 0
+                cur["orders"] += r["cnt"] or 0
+        return out
+
+
+    def get_bot_daily_revenue(self, start_date: str, end_date: str):
+        """فروش روزانه (وقت تهران) در بازه‌ی میلادی YYYY-MM-DD."""
+        return self._bot_sales_by_day(start_date, end_date, per_day=True)
 
 
     def queue_db_purge(self, bot_token: str, db_path: str):
@@ -1317,9 +1340,12 @@ class SystemMixin:
 
 
     def get_force_join_settings(self) -> dict:
+        from force_join_channels import parse_channels
+        channels = parse_channels(self.get_setting("force_join_channel", ""))
         return {
             "enabled": self.get_setting("force_join_enabled", "0") == "1",
-            "channel": self.get_setting("force_join_channel", "").strip(),
+            "channel": channels[0] if channels else "",  # سازگاری با کدهای قدیمی
+            "channels": channels,
         }
 
 

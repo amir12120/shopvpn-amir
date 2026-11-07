@@ -41,6 +41,11 @@ DSUB_DEFAULTS: Dict[str, str] = {
     "dsub_support_url": "",             # لینک پشتیبانی (t.me/... یا https://...)
     "dsub_footer_text": "",             # متن پایین صفحه
     "dsub_theme": "auto",               # auto / light / dark
+    "dsub_style": "minimal",             # minimal / modern / glass / cyberpunk / classic
+    "dsub_accent_color": "#6366F1",
+    "dsub_secondary_color": "#06B6D4",
+    "dsub_card_style": "rounded",
+    "dsub_density": "comfortable",
     "dsub_show_configs": "1",           # بخش «کانفیگ‌ها» در صفحه
     "dsub_show_chart": "1",             # نمودار مصرف
     "dsub_show_qr": "1",                # دکمه‌های QR
@@ -711,6 +716,17 @@ class ClientReply:
         self.status, self.headers, self.body, self.state = status, headers, body, state
 
 
+_HTML_HEAD_RE = re.compile(rb"^\s*(<!doctype\s+html|<html|<head|<body|<\?xml)", re.I)
+
+
+def looks_like_html(headers: Dict[str, str], body: bytes) -> bool:
+    """پاسخ HTML/صفحه‌ی خطا (کلودفلر، صفحه‌ی وب پنل، ...) به‌جای کانفیگ؛ اپ‌ها این را «Unknown content type» می‌گیرند."""
+    ctype = ((headers or {}).get("content-type") or "").lower()
+    if "text/html" in ctype or "application/xhtml" in ctype:
+        return True
+    return bool(_HTML_HEAD_RE.match((body or b"")[:512]))
+
+
 _PASS_HEADERS = ("subscription-userinfo", "content-disposition", "routing", "profile-web-page-url",
                  "support-url", "announce", "profile-title", "profile-update-interval")
 
@@ -722,6 +738,8 @@ def compose_client_reply(up_status: Optional[int], up_headers: Dict[str, str], u
     now = now or int(time.time())
     up_headers = {k.lower(): v for k, v in (up_headers or {}).items()}
     ok = up_status == 200 and bool(up_body)
+    if ok and looks_like_html(up_headers, up_body):
+        ok = False  # پنل مبدأ HTML داده، نه کانفیگ → مثل «پنل جواب نداد» رفتار می‌کنیم
     info = parse_userinfo(up_headers.get("subscription-userinfo")) if ok else {}
     state = compute_state(cc, info, now)
     body = parse_body(up_body) if ok else None
@@ -780,6 +798,8 @@ def compose_client_reply(up_status: Optional[int], up_headers: Dict[str, str], u
         return finish(encode_uris(out_text, body.was_b64), "text/plain; charset=utf-8")
 
     ctype = up_headers.get("content-type") or "text/plain; charset=utf-8"
+    if "html" in ctype.lower():
+        ctype = "text/plain; charset=utf-8"
     return finish(up_body, ctype)
 
 
@@ -824,9 +844,13 @@ def merge_smart(parts: List[tuple]) -> tuple:
 _CLIENT_UA = re.compile(
     r"v2ray|xray|clash|mihomo|stash|sing-?box|hiddify|streisand|happ|v2box|shadowrocket|karing|neko|flclash|foxray|"
     r"npv|quantumult|surge|loon|hysteria|tuic|cfnetwork|okhttp|dart|curl|wget|python|go-http|axios|libcurl|"
-    r"exclave|husi|matsuri|kitsunebi|sagernet|v2rayu|v2rayx|verge|pharos|potatso|rocket|fair|anx|oneclick",
+    r"exclave|husi|matsuri|kitsunebi|sagernet|v2rayu|v2rayx|verge|pharos|potatso|rocket|fair|anx|oneclick|"
+    r"v2raytun|incy|nekobox|nekoray|v2rayn|v2raya|koala|liberty|napsternet|mahsa|prizrak|sfa/|sfi/|sfm/|"
+    r"clientapp|vpn|proxy|subscription|sub-?client",
     re.I,
 )
+# مرورگر واقعی: Mozilla + موتور رندر (WebView/اپ‌های مبتنی بر HTTP کتابخانه‌ای معمولاً اینها را ندارند)
+_BROWSER_UA = re.compile(r"Mozilla/\d.*(AppleWebKit|Gecko/|Trident/)", re.I)
 
 
 def wants_page(user_agent: str, accept: str, query: dict) -> bool:
@@ -837,7 +861,10 @@ def wants_page(user_agent: str, accept: str, query: dict) -> bool:
     ua = user_agent or ""
     if _CLIENT_UA.search(ua):
         return False
-    return "text/html" in (accept or "") and bool(re.search(r"Mozilla/\d", ua))
+    # مرورگر همیشه Accept را با text/html شروع می‌کند؛ اپ‌ها */* یا application/* می‌فرستند
+    if not (accept or "").strip().lower().startswith("text/html"):
+        return False
+    return bool(_BROWSER_UA.search(ua))
 
 
 # ---------------------------------------------------------------------------
@@ -976,6 +1003,11 @@ def build_page_data(cc, info: dict, uris: List[str], settings: Dict[str, str], b
         "notice": (settings.get("dsub_notice") or "").strip(),
         "support": support, "footer": (settings.get("dsub_footer_text") or "").strip(),
         "theme": theme if theme in THEMES else "auto",
+        "style": settings.get("dsub_style", "minimal") if settings.get("dsub_style") in ("minimal", "modern", "glass", "cyberpunk", "classic") else "minimal",
+        "accent": settings.get("dsub_accent_color", "#6366F1") if re.fullmatch(r"#[0-9a-fA-F]{6}", settings.get("dsub_accent_color", "")) else "#6366F1",
+        "secondary": settings.get("dsub_secondary_color", "#06B6D4") if re.fullmatch(r"#[0-9a-fA-F]{6}", settings.get("dsub_secondary_color", "")) else "#06B6D4",
+        "cardStyle": settings.get("dsub_card_style", "rounded") if settings.get("dsub_card_style") in ("rounded", "soft", "sharp") else "rounded",
+        "density": settings.get("dsub_density", "comfortable") if settings.get("dsub_density") in ("comfortable", "compact") else "comfortable",
         "sub": sub_link,
         "show": {
             "configs": settings.get("dsub_show_configs") == "1" and bool(configs),

@@ -2187,6 +2187,35 @@ EXTRA_PHRASES.update({
     '🔒 شرط نمایش شماره کارت:\n\nتا وقتی کاربر یکی از دو شرط زیر را نداشته باشد، روش\u200cهای «کارت\u200cبه\u200cکارت» (دستی و خودکار) برایش در خرید، تمدید و شارژ کیف پول (ربات و مینی\u200cاپ) نمایش داده نمی\u200cشود و شماره کارت را نمی\u200cبیند. بقیه\u200cی درگاه\u200cها عادی کار می\u200cکنند.\n• حداقل خرید موفق: تعداد سفارش تاییدشده\u200cی کاربر\n• حداقل روز از استارت بات: فاصله\u200cی زمانی از اولین استارت\nرسیدن به هرکدام از دو شرط کافی است. 0 یعنی آن شرط خاموش؛ اگر هر دو 0 باشند محدودیتی نیست. ادمین\u200cها همیشه شماره کارت را می\u200cبینند.': '🔒 Card number display condition:\n\nUntil a user meets one of the two conditions below, the card-to-card methods (manual and automatic) are not shown to them for purchase, renewal or wallet top-up (bot and mini app), and they cannot see the card number. The other gateways work normally.\n• Minimum successful purchases: the user\'s approved order count\n• Minimum days since the bot started: time elapsed since the first start\nMeeting either condition is enough. 0 means that condition is off; if both are 0 there is no restriction. Admins always see the card number.',
 })
 
+
+EXTRA_PHRASES.update({
+    'نام دلخواه کاربر': 'Custom user name',
+    '✅ نام دلخواه کاربر': '✅ Custom user name',
+    'هش آیدی عددی + نام دلخواه کاربر': 'Numeric ID hash + custom user name',
+    '✅ هش آیدی عددی + نام دلخواه کاربر': '✅ Numeric ID hash + custom user name',
+    'پیشوند + نام دلخواه کاربر': 'Prefix + custom user name',
+    '✅ پیشوند + نام دلخواه کاربر': '✅ Prefix + custom user name',
+    'نام دلخواه کاربر + پسوند': 'Custom user name + suffix',
+    '✅ نام دلخواه کاربر + پسوند': '✅ Custom user name + suffix',
+    'شمارنده + نام دلخواه کاربر': 'Counter + custom user name',
+    '✅ شمارنده + نام دلخواه کاربر': '✅ Counter + custom user name',
+    'پیشوند + شمارنده': 'Prefix + counter',
+    '✅ پیشوند + شمارنده': '✅ Prefix + counter',
+    'شمارنده + پسوند': 'Counter + suffix',
+    '✅ شمارنده + پسوند': '✅ Counter + suffix',
+    'آیدی عددی تلگرام + شمارنده': 'Telegram numeric ID + counter',
+    '✅ آیدی عددی تلگرام + شمارنده': '✅ Telegram numeric ID + counter',
+    'پیش\u200cفرض (روش قبلی)': 'Default (previous method)',
+    '✅ پیش\u200cفرض (روش قبلی)': '✅ Default (previous method)',
+    '🏷 نام\u200cگذاری اکانت\u200cها: ': '🏷 Account naming: ',
+    '✏️ تغییر پیشوند': '✏️ Change prefix',
+    '✏️ تغییر پسوند': '✏️ Change suffix',
+    '🔄 صفر کردن شمارنده': '🔄 Reset counter',
+    'شمارنده صفر شد.': 'Counter reset.',
+    'ذخیره شد.': 'Saved.',
+    '❌ این نام کاربری قبلاً استفاده شده. لطفاً نام دیگری انتخاب کنید.': '❌ This username is already taken. Please choose another one.',
+})
+
 EXTRA_DYNAMIC_PHRASES += [
     # current
     ('مقدار فعلی: {x} {x}\nعدد جدید را ارسال کن (0 یعنی خاموش):', 'Current value: {x} {x}\nSend the new number (0 means off):'),
@@ -2741,4 +2770,40 @@ EXTRA_PHRASES.update({
 
 EXTRA_DYNAMIC_PHRASES += [
     ('🗂 چند شماره کارت + درصد نمایش ({x} فعال)', '🗂 Multiple card numbers + display shares ({x} active)'),
+]
+
+EXTRA_PHRASES.update({
+    'این کانال\u200cها از قبل در فهرست بودند.': 'These channels were already in the list.',
+    '✅ توضیح AI ذخیره شد.': '✅ The AI description was saved.',
+    'می\u200cتونی از منوی عضویت اجباری، آن را فعال کنی.': 'You can enable it from the forced-join menu.',
+    'این کانال دیگر در فهرست نیست.': 'This channel is no longer in the list.',
+    '✅ کانال\u200cهای ثبت\u200cشده:': '✅ Registered channels:',
+    '⛔️ دسترسی به این کانال\u200cها ممکن نبود (ربات باید ادمین باشد):': '⛔️ Access to these channels was not possible (the bot must be an admin):',
+    'یک زیردسته یا محصول را انتخاب کنید:': 'Choose a subcategory or a product:',
+    'راهنمای خرید هوشمند در حال حاضر فعال نیست.': 'The smart purchase guide is not active right now.',
+    '⬅️ بازگشت به کیف پول': '⬅️ Back to wallet',
+    '⏭ رد کردن': '⏭ Skip',
+    '⬅️ قبلی': '⬅️ Previous',
+    '🛒 دستیار هوشمند خرید': '🛒 Smart purchase assistant',
+    'کانالی ثبت نشده است': 'No channel is registered',
+    '🤖 راهنمای خرید هوشمند': '🤖 Smart purchase guide',
+    '🔄 شروع دوباره': '🔄 Start over',
+    '🛍 همه\u200cی محصولات': '🛍 All products',
+    'جهت نامعتبر است.': 'Invalid direction.',
+    'آیدی کانال باید با @ شروع شود (یا آیدی عددی باشد)؛ لینک دعوت خصوصی پشتیبانی نمی\u200cشود.': 'The channel id must start with @ (or be numeric); private invite links are not supported.',
+    'برای فعال\u200cسازی، آیدی حداقل یک کانال الزامی است.': 'To enable this, at least one channel id is required.',
+    'بازه نامعتبر است.': 'Invalid range.',
+    'تاریخ نامعتبر است.': 'Invalid date.',
+    'لطفاً چند لحظه صبر کن و دوباره بفرست.': 'Please wait a moment and send it again.',
+    'برای ادامه، ابتدا باید در کانال\u200cهای زیر عضو شوید.': 'To continue, you must first join the channels below.',
+    'الان نتونستم پیشنهاد بدم؛ دوباره امتحان کن یا از لیست محصولات انتخاب کن.': 'I could not suggest anything right now; try again or pick from the product list.',
+    'آیدی عددی یا یوزرنیم کانال (یا چند کانال، هر کدام در یک خط) را ارسال کن؛ به فهرست کانال\u200cهای اجباری اضافه می\u200cشود. تعداد کانال\u200cها محدودیتی ندارد.\n\nمثال: `@mychannel`\n\n⚠️ حتماً ربات باید از قبل به\u200cعنوان ادمین به همه\u200cی این کانال\u200cها اضافه شده باشد؛ در غیر این صورت نمی\u200cتواند عضویت را بررسی کند.': 'Send the numeric id or username of a channel (or several channels, one per line); they are added to the forced-join list. There is no limit on the number of channels.\n\nExample: `@mychannel`\n\n⚠️ The bot must already be an admin in all of these channels; otherwise it cannot check membership.',
+})
+
+EXTRA_DYNAMIC_PHRASES += [
+    ('{x} حذف شد.', '{x} was removed.'),
+    ('توضیح فعلی برای AI:\n{x}\n\n', 'Current AI description:\n{x}\n\n'),
+    ('⚠️ مقدار نامعتبر است. فقط حروف انگلیسی، عدد و آندرلاین، بین ۱ تا {x} کاراکتر.', '⚠️ Invalid value. English letters, digits and underscore only, between 1 and {x} characters.'),
+    ('🤖 راهنمای خرید ({x} از {x})\n\n{x}', '🤖 Purchase guide ({x} of {x})\n\n{x}'),
+    ('🛠 ساخت کانفیگ شخصی\n\nنام نهایی اکانت به شکل «{x}» ساخته می\u200cشود (مثال: {x}).\nیک نام دلخواه بفرستید، یا از دکمه\u200cی زیر نام خودکار بگیرید.\nفقط حروف انگلیسی، عدد و آندرلاین مجاز است (بین ۳ تا ۲۰ کاراکتر).', '🛠 Personal config creation\n\nThe final account name will look like "{x}" (example: {x}).\nSend a custom name, or tap the button below for an automatic name.\nOnly English letters, digits and underscore are allowed (3 to 20 characters).'),
 ]

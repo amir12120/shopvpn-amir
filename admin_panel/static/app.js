@@ -410,6 +410,7 @@ const NAV_GROUPS = [
     { key: 'reseller_tiers', label: 'سطوح نمایندگی', icon: 'layers', role: 'resellers' },
   ] },
   { id: 'botconfig', label: 'ربات و تنظیمات', items: [
+    { key: 'subscription-page', label: 'تنظیمات صفحه اشتراک', icon: 'link', role: 'settings' },
     { key: 'settings', label: 'تنظیمات و برندینگ', icon: 'settings', role: 'settings',
       subs: [['content', 'محتوا و متن‌ها'], ['payment', 'پرداخت و مالی'], ['services', 'سرویس‌های ویژه'], ['mobile_app', 'اپ موبایل'], ['extra', 'تنظیمات تکمیلی']] },
     { key: 'buttons', label: 'دکمه‌های ربات', icon: 'buttons', role: 'settings' },
@@ -1160,6 +1161,7 @@ async function renderPage(tab) {
       case 'ssh': return await renderSSHManagement();
       case 'system': return await renderSystem();
       case 'settings': return await renderSettings();
+      case 'subscription-page': return await renderSubscriptionPageSettings();
       case 'languages': return await renderLanguages();
       case 'buttons': return await renderButtons();
       case 'bottexts': return await renderBotTexts();
@@ -3682,6 +3684,107 @@ async function openCustomConfigPaymentMethodsModal() {
 
 let catalogDsubEnabled = false;
 
+// دسته‌بندی تو در تو: ویرایش نام/والد، افزودن زیردسته و جابه‌جایی (بالا/پایین) بین هم‌ردیف‌ها
+function catIndentHtml(c) {
+  const d = Number(c.depth || 0);
+  return d ? `<span style="display:inline-block;width:${d * 18}px"></span>↳ ` : '';
+}
+function catDescendantIds(categories, id) {
+  const out = new Set();
+  const walk = pid => categories.forEach(x => { if (Number(x.parent_id) === pid && !out.has(x.id)) { out.add(x.id); walk(x.id); } });
+  walk(Number(id));
+  return out;
+}
+function catParentOptionsHtml(categories, selectedId, excludeId) {
+  const banned = excludeId ? catDescendantIds(categories, excludeId) : new Set();
+  if (excludeId) banned.add(Number(excludeId));
+  return `<option value="">📂 دسته‌ی اصلی (بدون والد)</option>` + categories.filter(x => !banned.has(x.id))
+    .map(x => `<option value="${x.id}" ${Number(selectedId) === x.id ? 'selected' : ''}>${esc(x.path || x.name)}</option>`).join('');
+}
+function openCategoryCreateModal(categories, presetParent = null) {
+  openModal(presetParent ? 'زیردسته‌ی جدید' : 'دسته‌بندی جدید', `
+    <div class="form-grid"><input class="input" id="cat-new-name" placeholder="نام دسته‌بندی">
+    <select class="input" id="cat-new-parent">${catParentOptionsHtml(categories, presetParent, null)}</select>
+    <button class="btn btn-primary" id="cat-new-save">ثبت</button></div>`, (b, close) => {
+    $('#cat-new-save', b).addEventListener('click', async () => {
+      const name = $('#cat-new-name', b).value.trim();
+      if (!name) return toast('نام دسته‌بندی را وارد کنید.', true);
+      const parent = Number($('#cat-new-parent', b).value) || null;
+      try { await apiPost('/categories', { name, parent_id: parent }); toast('اضافه شد.'); close(); renderCatalog(); } catch (e) { handleErr(e); }
+    });
+  });
+}
+function catOrderButtonsHtml(c, categories, cls = 'btn btn-sm') {
+  const sibs = categories.filter(x => (x.parent_id || null) === (c.parent_id || null));
+  const i = sibs.findIndex(x => x.id === c.id);
+  return `<button class="${cls}" data-cat-up="${c.id}" ${i <= 0 ? 'disabled' : ''} title="بالا">▲</button>
+    <button class="${cls}" data-cat-down="${c.id}" ${i === sibs.length - 1 ? 'disabled' : ''} title="پایین">▼</button>
+    <button class="${cls}" data-add-subcat="${c.id}" title="افزودن زیردسته">＋ زیردسته</button>
+    <button class="${cls}" data-edit-cat="${c.id}">✏️ ویرایش</button>`;
+}
+function wireCategoryActions(body, categories, basePath = '/categories') {
+  const reload = () => renderCatalog();
+  $$('[data-cat-up],[data-cat-down]', body).forEach(btn => btn.addEventListener('click', async () => {
+    const id = btn.dataset.catUp || btn.dataset.catDown;
+    const direction = btn.dataset.catUp ? 'up' : 'down';
+    try { await apiPost(`${basePath}/${id}/move`, { direction }); reload(); } catch (e) { handleErr(e); }
+  }));
+  $$('[data-add-subcat]', body).forEach(btn => btn.addEventListener('click', () => openCategoryCreateModal(categories, Number(btn.dataset.addSubcat))));
+  $$('[data-edit-cat]', body).forEach(btn => btn.addEventListener('click', () => {
+    const cat = categories.find(x => x.id === Number(btn.dataset.editCat));
+    if (!cat) return;
+    openModal('ویرایش دسته‌بندی', `
+      <div class="form-grid"><input class="input" id="cat-edit-name" placeholder="نام دسته‌بندی" value="${esc(cat.name)}">
+      <label class="field"><span>📂 دسته‌ی والد</span><select class="input" id="cat-edit-parent">${catParentOptionsHtml(categories, cat.parent_id, cat.id)}</select></label>
+      <button class="btn btn-primary" id="cat-edit-save">ذخیره</button></div>`, (b, close) => {
+      $('#cat-edit-save', b).addEventListener('click', async () => {
+        const name = $('#cat-edit-name', b).value.trim();
+        if (!name) return toast('نام دسته‌بندی را وارد کنید.', true);
+        const parent = Number($('#cat-edit-parent', b).value) || null;
+        try { await apiPut(`${basePath}/${cat.id}`, { name, parent_id: parent }); toast('ویرایش شد.'); close(); reload(); } catch (e) { handleErr(e); }
+      });
+    });
+  }));
+}
+
+// رنگ دکمه‌ی محصول در بات تلگرام (اختیاری؛ خالی = رنگ پیش‌فرض/سراسری)
+function productBtnStyleHtml(idPrefix, current) {
+  const opts = [['', '⚪️ پیش‌فرض'], ['primary', '🔵 آبی'], ['success', '🟢 سبز'], ['danger', '🔴 قرمز']];
+  return `<label class="field"><span>🎨 رنگ دکمه‌ی محصول در بات</span>
+    <select class="input" id="${idPrefix}-btn-style">${opts.map(([v, l]) => `<option value="${v}" ${String(current || '') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>`;
+}
+function readProductBtnStyle(b, idPrefix) {
+  const el = $(`#${idPrefix}-btn-style`, b);
+  return el ? el.value : '';
+}
+
+// جستجوی زنده داخل لیست گروه/Inbound (تعداد زیاد مقصد در پنل‌های بزرگ)
+function targetSearchBoxHtml() {
+  return '<input type="search" class="input" data-target-search placeholder="🔍 جستجوی گروه / Inbound..." autocomplete="off" style="margin-bottom:7px">';
+}
+function bindTargetSearch(root) {
+  if (!root) return;
+  $$('[data-target-search]', root).forEach(inp => {
+    if (inp.dataset.bound === '1') return;
+    inp.dataset.bound = '1';
+    inp.addEventListener('input', () => {
+      const q = inp.value.trim().toLowerCase();
+      const box = inp.parentElement.querySelector('[data-target-list]');
+      if (!box) return;
+      let shown = 0;
+      box.querySelectorAll('label.field-row').forEach(l => {
+        const ok = !q || l.textContent.toLowerCase().includes(q);
+        l.style.display = ok ? '' : 'none';
+        if (ok) shown++;
+      });
+      let empty = box.querySelector('[data-target-empty]');
+      if (!shown) {
+        if (!empty) { empty = document.createElement('div'); empty.dataset.targetEmpty = '1'; empty.className = 'card-sub'; empty.textContent = 'موردی پیدا نشد.'; box.appendChild(empty); }
+      } else if (empty) empty.remove();
+    });
+  });
+}
+
 async function loadProductPanelTargetPicker(b, serverId, selectedValues = []) {
   const host = $('#prod-target-picker', b);
   if (!host) return { choices: [] };
@@ -3695,8 +3798,8 @@ async function loadProductPanelTargetPicker(b, serverId, selectedValues = []) {
       host.dataset.hasChoices = '0'; return info;
     }
     const selected = new Set((selectedValues || []).map(String));
-    host.innerHTML = `<div class="field" style="margin-top:8px"><span>🎯 گروه / Inbound مخصوص این محصول</span><div style="display:grid;gap:7px;max-height:220px;overflow:auto;padding:9px;border:1px solid var(--border);border-radius:10px">${choices.map(c => `<label class="field-row"><span>${esc(String(c.label || c.value))}</span><input type="checkbox" data-product-target-value="${esc(String(c.value))}" ${selected.has(String(c.value)) ? 'checked' : ''}></label>`).join('')}</div><span class="card-sub">این مقصد فقط برای همین محصول ذخیره می‌شود و تنظیمات مشترک پنل تغییر نمی‌کند.</span></div>`;
-    host.dataset.hasChoices = '1'; return info;
+    host.innerHTML = `<div class="field" style="margin-top:8px"><span>🎯 گروه / Inbound مخصوص این محصول</span>${targetSearchBoxHtml()}<div data-target-list style="display:grid;gap:7px;max-height:220px;overflow:auto;padding:9px;border:1px solid var(--border);border-radius:10px">${choices.map(c => `<label class="field-row"><span>${esc(String(c.label || c.value))}</span><input type="checkbox" data-product-target-value="${esc(String(c.value))}" ${selected.has(String(c.value)) ? 'checked' : ''}></label>`).join('')}</div><span class="card-sub">این مقصد فقط برای همین محصول ذخیره می‌شود و تنظیمات مشترک پنل تغییر نمی‌کند.</span></div>`;
+    host.dataset.hasChoices = '1'; bindTargetSearch(host); return info;
   } catch (e) {
     host.dataset.hasChoices = 'error';
     host.innerHTML = `<div class="form-error">دریافت مقصدهای پنل ناموفق بود: ${esc(e.message || 'خطا')}</div>`;
@@ -3726,7 +3829,8 @@ async function loadMultiPanelTargetPickers(b, prefillConfigs = {}) {
         section.innerHTML = `<div class="card-sub">${esc(panel?.name || `پنل #${sid}`)}: مقصد زنده ندارد؛ قالب پنل استفاده می‌شود.</div>`;
       } else {
         section.dataset.hasChoices = '1';
-        section.innerHTML = `<div class="field"><span>🎯 مقصد اختصاصی ${esc(panel?.name || `پنل #${sid}`)}</span><div style="display:grid;gap:7px;max-height:190px;overflow:auto;padding:9px;border:1px solid var(--border);border-radius:10px">${choices.map(c => `<label class="field-row"><span>${esc(String(c.label || c.value))}</span><input type="checkbox" data-multi-target-value="${esc(String(c.value))}" ${selected.has(String(c.value)) ? 'checked' : ''}></label>`).join('')}</div></div>`;
+        section.innerHTML = `<div class="field"><span>🎯 مقصد اختصاصی ${esc(panel?.name || `پنل #${sid}`)}</span>${targetSearchBoxHtml()}<div data-target-list style="display:grid;gap:7px;max-height:190px;overflow:auto;padding:9px;border:1px solid var(--border);border-radius:10px">${choices.map(c => `<label class="field-row"><span>${esc(String(c.label || c.value))}</span><input type="checkbox" data-multi-target-value="${esc(String(c.value))}" ${selected.has(String(c.value)) ? 'checked' : ''}></label>`).join('')}</div></div>`;
+        bindTargetSearch(section);
       }
     } catch (e) {
       section.dataset.hasChoices = 'error';
@@ -4090,7 +4194,7 @@ function readProductDiscount(b, prefix, base) {
 function productEditFormHtml(product, categories, panelServers, sshNodes) {
   return `
     <div class="form-grid">
-      <select class="input" id="pe-cat">${categories.map(c => `<option value="${c.id}" ${c.id === product.category_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
+      <select class="input" id="pe-cat">${categories.map(c => `<option value="${c.id}" ${c.id === product.category_id ? 'selected' : ''}>${esc(c.path || c.name)}</option>`).join('')}</select>
       <input class="input" id="pe-name" placeholder="نام محصول" value="${esc(product.name)}">
       <div class="form-row">
         <input class="input" id="pe-price" type="number" placeholder="قیمت اصلی (تومان)" value="${Number(product.compare_price || 0) > Number(product.price) ? product.compare_price : product.price}">
@@ -4098,6 +4202,8 @@ function productEditFormHtml(product, categories, panelServers, sshNodes) {
       </div>
       ${productDiscountFieldsHtml('pe', product)}
       <textarea class="input" id="pe-desc" placeholder="توضیحات (اختیاری)" rows="2">${esc(product.description || '')}</textarea>
+      ${productBtnStyleHtml('pe', product.btn_style)}
+      <textarea class="input" id="pe-ai-desc" placeholder="🤖 توضیح برای هوش مصنوعی (راهنمای خرید؛ به کاربر نمایش داده نمی‌شود)" rows="2">${esc(product.ai_description || '')}</textarea>
       ${productProvisionFieldsHtml(panelServers, sshNodes, product)}
       <button class="btn btn-primary" id="pe-save">ذخیره</button>
     </div>`;
@@ -4117,7 +4223,7 @@ function openProductEditModal(product, categories, panelServers, sshNodes) {
       if (!prov.ok) return;
       const payload = {
         category_id: Number($('#pe-cat', b).value), name, price: disc.price, compare_price: disc.compare_price, discount_days: disc.discount_days, discount_max_uses: disc.discount_max_uses,
-        description: $('#pe-desc', b).value, duration_days: prov.duration_days,
+        description: $('#pe-desc', b).value, btn_style: readProductBtnStyle(b, 'pe'), ai_description: $('#pe-ai-desc', b)?.value ?? '', duration_days: prov.duration_days,
         source: prov.source,
       };
       if (prov.source === 'direct') {
@@ -4162,19 +4268,13 @@ async function renderCatalog() {
       <div class="toolbar"><button class="btn btn-primary btn-sm" id="add-cat">+ دسته‌بندی جدید</button></div>
       <div class="card"><div class="table-wrap"><table><thead><tr><th>نام</th><th>وضعیت</th><th>عملیات</th></tr></thead>
       <tbody>${categories.map(c => `<tr>
-        <td>${esc(c.name)}</td>
+        <td>${catIndentHtml(c)}${esc(c.name)}</td>
         <td>${c.is_active ? '<span class="badge badge-approved">فعال</span>' : '<span class="badge badge-rejected">غیرفعال</span>'}</td>
-        <td><button class="btn btn-sm" data-toggle-cat="${c.id}">${c.is_active ? 'غیرفعال کن' : 'فعال کن'}</button>
+        <td>${catOrderButtonsHtml(c, categories)}
+        <button class="btn btn-sm" data-toggle-cat="${c.id}">${c.is_active ? 'غیرفعال کن' : 'فعال کن'}</button>
         <button class="btn btn-danger btn-sm" data-del-cat="${c.id}">حذف</button></td>
       </tr>`).join('') || '<tr><td colspan="3" class="empty-state">دسته‌بندی‌ای نیست</td></tr>'}</tbody></table></div></div>`;
-    $('#add-cat').addEventListener('click', () => openModal('دسته‌بندی جدید', `
-      <div class="form-grid"><input class="input" id="cat-name" placeholder="نام دسته‌بندی">
-      <button class="btn btn-primary" id="cat-save">ثبت</button></div>`, (b, close) => {
-      $('#cat-save', b).addEventListener('click', async () => {
-        const name = $('#cat-name', b).value.trim(); if (!name) return;
-        try { await apiPost('/categories', { name }); toast('اضافه شد.'); close(); renderCatalog(); } catch (e) { handleErr(e); }
-      });
-    }));
+    $('#add-cat').addEventListener('click', () => openCategoryCreateModal(categories));
     $$('[data-toggle-cat]', body).forEach(b => b.addEventListener('click', async () => {
       try { await apiPost(`/categories/${b.dataset.toggleCat}/toggle`); renderCatalog(); } catch (e) { handleErr(e); }
     }));
@@ -4182,6 +4282,7 @@ async function renderCatalog() {
       if (!confirm('حذف شود؟ (محصولات این دسته هم حذف می‌شوند)')) return;
       try { await apiDelete(`/categories/${b.dataset.delCat}`); toast('حذف شد.'); renderCatalog(); } catch (e) { handleErr(e); }
     }));
+    wireCategoryActions(body, categories);
     return;
   }
 
@@ -4217,22 +4318,18 @@ async function renderCatalog() {
     </tr>`;
     }).join('') || '<tr><td colspan="6" class="empty-state">محصولی نیست</td></tr>'}</tbody></table></div></div>`;
 
-  $('#add-cat-inline').addEventListener('click', () => openModal('دسته‌بندی جدید', `
-    <div class="form-grid"><input class="input" id="cat-name-inline" placeholder="نام دسته‌بندی"><button class="btn btn-primary" id="cat-save-inline">ثبت</button></div>`, (b, close) => {
-      $('#cat-save-inline', b).addEventListener('click', async () => {
-        const name = $('#cat-name-inline', b).value.trim(); if (!name) return toast('نام دسته‌بندی را وارد کنید.', true);
-        try { await apiPost('/categories', { name }); toast('دسته‌بندی اضافه شد.'); close(); renderCatalog(); } catch (e) { handleErr(e); }
-      });
-    }));
+  $('#add-cat-inline').addEventListener('click', () => openCategoryCreateModal(categories));
   if (!activeCategories.length) return;
   $('#add-prod').addEventListener('click', () => { window.__productPrefillTargetConfig = null; openModal('محصول جدید', `
     <div class="form-grid">
-      <select class="input" id="prod-cat">${activeCategories.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
+      <select class="input" id="prod-cat">${activeCategories.map(c => `<option value="${c.id}">${esc(c.path || c.name)}</option>`).join('')}</select>
       <input class="input" id="prod-name" placeholder="نام محصول">
       <div class="form-row"><input class="input" id="prod-price" type="number" placeholder="قیمت اصلی (تومان)">
       <input class="input" id="prod-duration" type="number" placeholder="مدت (روز)" value="30"></div>
       ${productDiscountFieldsHtml('prod', null)}
       <textarea class="input" id="prod-desc" placeholder="توضیحات (اختیاری)" rows="2"></textarea>
+      ${productBtnStyleHtml('prod', '')}
+      <textarea class="input" id="prod-ai-desc" placeholder="🤖 توضیح برای هوش مصنوعی (راهنمای خرید؛ به کاربر نمایش داده نمی‌شود)" rows="2"></textarea>
       ${productProvisionFieldsHtml(panelServers, sshNodes)}
       ${productPaymentMethodsFieldsHtml(paymentMethods)}
       <button class="btn btn-primary" id="prod-save">ثبت</button>
@@ -4250,7 +4347,7 @@ async function renderCatalog() {
       try {
         await apiPost('/products', {
           category_id: Number($('#prod-cat', b).value), name, price: disc.price, compare_price: disc.compare_price, discount_days: disc.discount_days, discount_max_uses: disc.discount_max_uses,
-          description: $('#prod-desc', b).value, duration_days: prov.duration_days,
+          description: $('#prod-desc', b).value, btn_style: readProductBtnStyle(b, 'prod'), ai_description: $('#prod-ai-desc', b)?.value || '', duration_days: prov.duration_days,
           provision_server_id: prov.provision_server_id, provision_target_values: prov.provision_target_values, extra_panel_target_values: prov.extra_panel_target_values, provision_ssh_node_id: prov.provision_ssh_node_id, provision_ssh_protocol: prov.provision_ssh_protocol, extra_panel_ids: prov.extra_panel_ids, extra_ssh_node_ids: prov.extra_ssh_node_ids,
           auto_provision_volume_gb: prov.auto_provision_volume_gb, payment_methods, base_users: prov.base_users, extra_user_price: prov.extra_user_price, max_users: prov.max_users, renew_rules: prov.renew_rules,
         });
@@ -4311,23 +4408,17 @@ function renderCatalogBento(categories, products, panelServers, sshNodes, paymen
         ${categories.map((c, i) => `
           <div class="bn-row bn-card-anim" style="animation-delay:${Math.min(i * 25, 220)}ms">
             ${bnAvatar(c.name.trim().charAt(0), i)}
-            <div class="bn-row-main"><span class="bn-row-title">${esc(c.name)}</span></div>
+            <div class="bn-row-main"><span class="bn-row-title">${catIndentHtml(c)}${esc(c.name)}</span></div>
             <div class="bn-row-trail">
               ${bnPill(c.is_active ? 'فعال' : 'غیرفعال', c.is_active ? 'ok' : 'no')}
+              ${catOrderButtonsHtml(c, categories, 'bn-btn bn-btn-ghost')}
               <button class="bn-btn bn-btn-ghost" data-toggle-cat="${c.id}">${c.is_active ? 'غیرفعال کن' : 'فعال کن'}</button>
               <button class="bn-btn bn-btn-no" data-del-cat="${c.id}">حذف</button>
             </div>
           </div>
         `).join('') || `<div class="empty-state"><div class="icon">${svg('empty')}</div>دسته‌بندی‌ای نیست</div>`}
       </div>`;
-    $('#add-cat').addEventListener('click', () => openModal('دسته‌بندی جدید', `
-      <div class="form-grid"><input class="input" id="cat-name" placeholder="نام دسته‌بندی">
-      <button class="btn btn-primary" id="cat-save">ثبت</button></div>`, (b, close) => {
-      $('#cat-save', b).addEventListener('click', async () => {
-        const name = $('#cat-name', b).value.trim(); if (!name) return;
-        try { await apiPost('/categories', { name }); toast('اضافه شد.'); close(); renderCatalog(); } catch (e) { handleErr(e); }
-      });
-    }));
+    $('#add-cat').addEventListener('click', () => openCategoryCreateModal(categories));
     $$('[data-toggle-cat]', body).forEach(b => b.addEventListener('click', async () => {
       try { await apiPost(`/categories/${b.dataset.toggleCat}/toggle`); renderCatalog(); } catch (e) { handleErr(e); }
     }));
@@ -4335,6 +4426,7 @@ function renderCatalogBento(categories, products, panelServers, sshNodes, paymen
       if (!confirm('حذف شود؟ (محصولات این دسته هم حذف می‌شوند)')) return;
       try { await apiDelete(`/categories/${b.dataset.delCat}`); toast('حذف شد.'); renderCatalog(); } catch (e) { handleErr(e); }
     }));
+    wireCategoryActions(body, categories);
     return;
   }
 
@@ -4362,12 +4454,14 @@ function renderCatalogBento(categories, products, panelServers, sshNodes, paymen
 
   $('#add-prod').addEventListener('click', () => openModal('محصول جدید', `
     <div class="form-grid">
-      <select class="input" id="prod-cat">${categories.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
+      <select class="input" id="prod-cat">${categories.map(c => `<option value="${c.id}">${esc(c.path || c.name)}</option>`).join('')}</select>
       <input class="input" id="prod-name" placeholder="نام محصول">
       <div class="form-row"><input class="input" id="prod-price" type="number" placeholder="قیمت اصلی (تومان)">
       <input class="input" id="prod-duration" type="number" placeholder="مدت (روز)" value="30"></div>
       ${productDiscountFieldsHtml('prod', null)}
       <textarea class="input" id="prod-desc" placeholder="توضیحات (اختیاری)" rows="2"></textarea>
+      ${productBtnStyleHtml('prod', '')}
+      <textarea class="input" id="prod-ai-desc" placeholder="🤖 توضیح برای هوش مصنوعی (راهنمای خرید؛ به کاربر نمایش داده نمی‌شود)" rows="2"></textarea>
       ${productProvisionFieldsHtml(panelServers, sshNodes)}
       ${productPaymentMethodsFieldsHtml(paymentMethods)}
       <button class="btn btn-primary" id="prod-save">ثبت</button>
@@ -4385,7 +4479,7 @@ function renderCatalogBento(categories, products, panelServers, sshNodes, paymen
       try {
         await apiPost('/products', {
           category_id: Number($('#prod-cat', b).value), name, price: disc.price, compare_price: disc.compare_price, discount_days: disc.discount_days, discount_max_uses: disc.discount_max_uses,
-          description: $('#prod-desc', b).value, duration_days: prov.duration_days,
+          description: $('#prod-desc', b).value, btn_style: readProductBtnStyle(b, 'prod'), ai_description: $('#prod-ai-desc', b)?.value || '', duration_days: prov.duration_days,
           provision_server_id: prov.provision_server_id, provision_target_values: prov.provision_target_values, extra_panel_target_values: prov.extra_panel_target_values, provision_ssh_node_id: prov.provision_ssh_node_id, provision_ssh_protocol: prov.provision_ssh_protocol, extra_panel_ids: prov.extra_panel_ids, extra_ssh_node_ids: prov.extra_ssh_node_ids,
           auto_provision_volume_gb: prov.auto_provision_volume_gb, payment_methods, base_users: prov.base_users, extra_user_price: prov.extra_user_price, max_users: prov.max_users, renew_rules: prov.renew_rules,
         });
@@ -4439,23 +4533,17 @@ function renderCatalogBrutalist(categories, products, panelServers, sshNodes, pa
       <div class="bru-cat-list">
         ${categories.map((c, i) => `
           <div class="bru-cat-row bru-card-anim" style="animation-delay:${Math.min(i * 30, 250)}ms">
-            <span class="bru-cat-name">${esc(c.name)}</span>
+            <span class="bru-cat-name">${catIndentHtml(c)}${esc(c.name)}</span>
             <span class="bru-flag ${c.is_active ? 'bru-flag-ok' : 'bru-flag-no'}">${c.is_active ? 'فعال' : 'غیرفعال'}</span>
             <div class="bru-cat-actions">
-              <button class="btn btn-sm" data-toggle-cat="${c.id}">${c.is_active ? 'غیرفعال کن' : 'فعال کن'}</button>
+              ${catOrderButtonsHtml(c, categories)}
+        <button class="btn btn-sm" data-toggle-cat="${c.id}">${c.is_active ? 'غیرفعال کن' : 'فعال کن'}</button>
               <button class="btn btn-danger btn-sm" data-del-cat="${c.id}">حذف</button>
             </div>
           </div>
         `).join('') || `<div class="empty-state"><div class="icon">${svg('empty')}</div>دسته‌بندی‌ای نیست</div>`}
       </div>`;
-    $('#add-cat').addEventListener('click', () => openModal('دسته‌بندی جدید', `
-      <div class="form-grid"><input class="input" id="cat-name" placeholder="نام دسته‌بندی">
-      <button class="btn btn-primary" id="cat-save">ثبت</button></div>`, (b, close) => {
-      $('#cat-save', b).addEventListener('click', async () => {
-        const name = $('#cat-name', b).value.trim(); if (!name) return;
-        try { await apiPost('/categories', { name }); toast('اضافه شد.'); close(); renderCatalog(); } catch (e) { handleErr(e); }
-      });
-    }));
+    $('#add-cat').addEventListener('click', () => openCategoryCreateModal(categories));
     $$('[data-toggle-cat]', body).forEach(b => b.addEventListener('click', async () => {
       try { await apiPost(`/categories/${b.dataset.toggleCat}/toggle`); renderCatalog(); } catch (e) { handleErr(e); }
     }));
@@ -4463,6 +4551,7 @@ function renderCatalogBrutalist(categories, products, panelServers, sshNodes, pa
       if (!confirm('حذف شود؟ (محصولات این دسته هم حذف می‌شوند)')) return;
       try { await apiDelete(`/categories/${b.dataset.delCat}`); toast('حذف شد.'); renderCatalog(); } catch (e) { handleErr(e); }
     }));
+    wireCategoryActions(body, categories);
     return;
   }
 
@@ -4496,12 +4585,14 @@ function renderCatalogBrutalist(categories, products, panelServers, sshNodes, pa
 
   $('#add-prod').addEventListener('click', () => openModal('محصول جدید', `
     <div class="form-grid">
-      <select class="input" id="prod-cat">${categories.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
+      <select class="input" id="prod-cat">${categories.map(c => `<option value="${c.id}">${esc(c.path || c.name)}</option>`).join('')}</select>
       <input class="input" id="prod-name" placeholder="نام محصول">
       <div class="form-row"><input class="input" id="prod-price" type="number" placeholder="قیمت اصلی (تومان)">
       <input class="input" id="prod-duration" type="number" placeholder="مدت (روز)" value="30"></div>
       ${productDiscountFieldsHtml('prod', null)}
       <textarea class="input" id="prod-desc" placeholder="توضیحات (اختیاری)" rows="2"></textarea>
+      ${productBtnStyleHtml('prod', '')}
+      <textarea class="input" id="prod-ai-desc" placeholder="🤖 توضیح برای هوش مصنوعی (راهنمای خرید؛ به کاربر نمایش داده نمی‌شود)" rows="2"></textarea>
       ${productProvisionFieldsHtml(panelServers, sshNodes)}
       ${productPaymentMethodsFieldsHtml(paymentMethods)}
       <button class="btn btn-primary" id="prod-save">ثبت</button>
@@ -4519,7 +4610,7 @@ function renderCatalogBrutalist(categories, products, panelServers, sshNodes, pa
       try {
         await apiPost('/products', {
           category_id: Number($('#prod-cat', b).value), name, price: disc.price, compare_price: disc.compare_price, discount_days: disc.discount_days, discount_max_uses: disc.discount_max_uses,
-          description: $('#prod-desc', b).value, duration_days: prov.duration_days,
+          description: $('#prod-desc', b).value, btn_style: readProductBtnStyle(b, 'prod'), ai_description: $('#prod-ai-desc', b)?.value || '', duration_days: prov.duration_days,
           provision_server_id: prov.provision_server_id, provision_target_values: prov.provision_target_values, extra_panel_target_values: prov.extra_panel_target_values, provision_ssh_node_id: prov.provision_ssh_node_id, provision_ssh_protocol: prov.provision_ssh_protocol, extra_panel_ids: prov.extra_panel_ids, extra_ssh_node_ids: prov.extra_ssh_node_ids,
           auto_provision_volume_gb: prov.auto_provision_volume_gb, payment_methods, base_users: prov.base_users, extra_user_price: prov.extra_user_price, max_users: prov.max_users, renew_rules: prov.renew_rules,
         });
@@ -4794,7 +4885,7 @@ function discountExtraFieldsHtml(categories, products) {
         <input class="input" id="code-maxdiscount" type="number" placeholder="خالی = بدون سقف"></label>
       <select class="input" id="code-scope">
         <option value="">🌐 بدون محدودیت (همه‌ی محصولات)</option>
-        ${categories.length ? `<optgroup label="فقط یک دسته‌بندی خاص">${categories.map(c => `<option value="cat:${c.id}">📁 ${esc(c.name)}</option>`).join('')}</optgroup>` : ''}
+        ${categories.length ? `<optgroup label="فقط یک دسته‌بندی خاص">${categories.map(c => `<option value="cat:${c.id}">📁 ${esc(c.path || c.name)}</option>`).join('')}</optgroup>` : ''}
         ${products.length ? `<optgroup label="فقط یک محصول خاص">${products.map(p => `<option value="prod:${p.id}">📦 ${esc(p.name)}</option>`).join('')}</optgroup>` : ''}
         ${products.length ? `<option value="mprod">🧩 چند محصول خاص (انتخاب زیر)</option>` : ''}
       </select>
@@ -5878,7 +5969,7 @@ async function renderSalesSettings() {
     <div class="card">
       <h3>📢 عضویت اجباری در کانال</h3>
       <label class="field field-row"><span>فعال</span>${_swSpan('fj_enabled', forceJoin.enabled)}</label>
-      <label class="field"><span>آیدی کانال (مثل ‎@my_channel)</span><input class="input" data-fkey="fj_channel" type="text" value="${esc(forceJoin.channel || '')}" style="direction:ltr;text-align:left"></label>
+      <label class="field"><span>آیدی کانال‌ها (مثل ‎@my_channel) — هر کانال در یک خط، بدون محدودیت تعداد</span><textarea class="input" data-fkey="fj_channel" rows="4" style="direction:ltr;text-align:left">${esc((forceJoin.channels || (forceJoin.channel ? [forceJoin.channel] : [])).join('\n'))}</textarea></label>
       <div class="card-sub">این تنظیم روی ربات اصلی، مینی‌اپ، و تمام بات‌های نمایندگی به‌طور یکسان اعمال می‌شود.</div>
       <button class="btn btn-primary btn-sm" id="save-forcejoin">ذخیره</button>
     </div>
@@ -6260,6 +6351,84 @@ async function renderResellersBotsTab() {
   bindResellersSubtabs(content());
   $$('[data-manage]', content()).forEach(btn =>
     btn.addEventListener('click', () => openResellerBotManageModal(bots.find(b => b.id === Number(btn.dataset.manage)))));
+  mountResellerRevenueReport(bots);
+}
+
+const resellerRevenueState = { start: '', end: '', botId: '' };
+
+function mountResellerRevenueReport(bots) {
+  const host = document.createElement('div');
+  host.className = 'card';
+  host.id = 'rrev-card';
+  content().appendChild(host);
+  const st = resellerRevenueState;
+  const addDays = (s, n) => new Date(new Date(s + 'T00:00:00Z').getTime() + n * 86400000).toISOString().slice(0, 10);
+  const jDay = s => parseInt(new Intl.DateTimeFormat('en-u-ca-persian', { day: 'numeric', timeZone: 'UTC' }).format(new Date(s + 'T00:00:00Z')), 10);
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Tehran' });
+  const monthStart = addDays(today, -(jDay(today) - 1));
+  const prevEnd = addDays(monthStart, -1);
+  const presets = [
+    ['امروز', today, today],
+    ['۷ روز اخیر', addDays(today, -6), today],
+    ['۳۰ روز اخیر', addDays(today, -29), today],
+    ['این ماه', monthStart, today],
+    ['ماه قبل', addDays(prevEnd, -(jDay(prevEnd) - 1)), prevEnd],
+  ];
+  if (!st.start || !st.end) { st.start = presets[1][1]; st.end = today; }
+  const load = async () => {
+    host.innerHTML = '<div class="empty-state">در حال بارگذاری...</div>';
+    try {
+      const q = `start=${st.start}&end=${st.end}` + (st.botId ? `&bot_id=${st.botId}` : '');
+      drawResellerRevenue(host, await apiGet(`/reseller-bots/revenue?${q}`), bots, presets, load);
+    } catch (e) { host.innerHTML = ''; handleErr(e); }
+  };
+  load();
+}
+
+function drawResellerRevenue(host, data, bots, presets, reload) {
+  const st = resellerRevenueState;
+  const unit = '<span style="font-size:12px;font-weight:600">تومان</span>';
+  const botName = b => esc(b.owner_name || ('#' + b.id)) + (b.bot_username ? ` <span style="opacity:.6">@${esc(b.bot_username)}</span>` : '');
+  const bar = (v, max) => `<div style="height:8px;border-radius:8px;background:rgba(127,127,127,.18);overflow:hidden"><div style="height:100%;border-radius:8px;background:var(--brand,#8B5CF6);width:${v ? Math.max(3, Math.round(v / max * 100)) : 0}%"></div></div>`;
+  const byDay = !!st.botId && data.days;
+  const list = byDay ? data.days : data.bots;
+  const maxRev = Math.max(1, ...list.map(x => x.revenue));
+  host.innerHTML = `
+    <div class="card-head"><h3>فروش نماینده‌ها</h3>
+      <span class="card-sub">سفارش‌های تاییدشده، به تومان، به وقت تهران.</span></div>
+    <div class="form-row" style="gap:8px;flex-wrap:wrap;margin-bottom:8px">
+      <label class="field" style="margin:0"><span>از تاریخ <b class="mono">${fmtDateOnly(st.start)}</b></span><input type="date" class="input" id="rrev-start" value="${st.start}"></label>
+      <label class="field" style="margin:0"><span>تا تاریخ <b class="mono">${fmtDateOnly(st.end)}</b></span><input type="date" class="input" id="rrev-end" value="${st.end}"></label>
+    </div>
+    <div class="tabs" style="margin-bottom:8px;flex-wrap:wrap">${presets.map(([l, s, e], i) =>
+      `<button class="tab-btn ${s === st.start && e === st.end ? 'active' : ''}" data-rrev-preset="${i}">${l}</button>`).join('')}</div>
+    <select class="input" id="rrev-bot" style="max-width:260px;margin-bottom:12px">
+      <option value="">همه‌ی نماینده‌ها (تفکیک نماینده)</option>
+      ${bots.map(b => `<option value="${b.id}" ${String(b.id) === String(st.botId) ? 'selected' : ''}>${esc(b.owner_name || ('#' + b.id))}${b.bot_username ? ' (@' + esc(b.bot_username) + ')' : ''} (تفکیک روز)</option>`).join('')}
+    </select>
+    <div class="card stat-card" style="margin-bottom:12px"><span class="value mono">${fmt(data.total.revenue)} ${unit}</span><span class="label">جمع فروش، ${fmt(data.total.orders)} سفارش</span></div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>${byDay ? 'روز' : 'نماینده'}</th><th>فروش</th><th>سفارش</th>${byDay ? '' : '<th>سهم</th>'}<th style="min-width:90px"></th></tr></thead>
+      <tbody>${list.map(x => `<tr ${byDay ? '' : `data-rrev-pick="${x.id}" style="cursor:pointer"`}>
+        <td>${byDay ? fmtDateOnly(x.date) : botName(x)}</td>
+        <td class="mono"><b>${fmt(x.revenue)}</b></td>
+        <td class="mono">${fmt(x.orders)}</td>
+        ${byDay ? '' : `<td class="mono">${fmt(data.total.revenue ? Math.round(x.revenue / data.total.revenue * 100) : 0)}٪</td>`}
+        <td>${bar(x.revenue, maxRev)}</td>
+      </tr>`).join('') || `<tr><td colspan="5" class="empty-state">موردی نیست</td></tr>`}</tbody>
+    </table></div>`;
+  const setRange = (s, e) => { st.start = s; st.end = e; reload(); };
+  $$('[data-rrev-preset]', host).forEach(b => b.addEventListener('click', () => {
+    const [, s, e] = presets[Number(b.dataset.rrevPreset)]; setRange(s, e);
+  }));
+  const onDate = () => {
+    const s = $('#rrev-start', host).value, e = $('#rrev-end', host).value;
+    if (s && e && s <= e) setRange(s, e); else toast('بازه نامعتبر است.');
+  };
+  $('#rrev-start', host).addEventListener('change', onDate);
+  $('#rrev-end', host).addEventListener('change', onDate);
+  $('#rrev-bot', host).addEventListener('change', e => { st.botId = e.target.value; reload(); });
+  $$('[data-rrev-pick]', host).forEach(el => el.addEventListener('click', () => { st.botId = el.dataset.rrevPick; reload(); }));
 }
 
 function openResellerBotManageModal(bot) {
@@ -7024,6 +7193,7 @@ function panelAddFormHtml() {
       <div class="form-row"><input class="input" id="p-user" placeholder="یوزرنیم"><input class="input" id="p-pass" type="password" placeholder="پسورد"></div>
       <input class="input" id="p-template" placeholder="نام کاربری نمونه (برای دریافت قالب)" style="display:none">
       <p id="p-hint" style="display:none;font-size:12px;color:var(--muted,#8892a6);margin:0"></p>
+      <select class="input" id="p-cat"><option value="">🗂 بدون دسته‌بندی</option>${(window.__panelCats || []).map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
       <button class="btn btn-primary" id="p-save">ثبت</button>
     </div>`;
 }
@@ -7075,6 +7245,7 @@ function wirePanelAddForm(body, close) {
       const r = await apiPost('/panel-servers', {
         name, panel_type, api_url,
         api_username: userInp.value, api_password: passInp.value,
+        panel_category_id: Number($('#p-cat', body)?.value) || undefined,
         template_username: PANEL_TEMPLATE_BASED_TYPES.includes(panel_type) ? templateInp.value.trim() : undefined,
       });
       serverId = r.id; warning = r.warning || '';
@@ -7506,10 +7677,14 @@ async function renderSSHManagement() {
   $('#ssh-reconcile')?.addEventListener('click',async e=>{const btn=e.currentTarget;btn.disabled=true;try{const r=await apiPost('/ssh/reconcile-once',{});const results=r.results||[];const failed=results.filter(x=>!x.enforcement_complete).length;const stale=results.filter(x=>x.state==='stale').length;toast(failed?`پایش انجام شد؛ ${failed} استخر نیازمند بررسی است.`:(stale?`${stale} استخر به‌علت گزارش مصرف قدیمی در حالت امن باقی ماند.`:'پایش سهمیه انجام شد.'));await renderSSHManagement();}catch(err){handleErr(err);btn.disabled=false;}});
 }
 
+let panelCatFilter = 'all';
+
 async function renderPanels() {
   const servers = await apiGet('/panel-servers');
-  if (loadTheme().theme === 'brutalist') return renderPanelsBrutalist(servers);
-  if (loadTheme().theme === 'bento') return renderPanelsBento(servers);
+  const pcats = await apiGet('/panel-categories').catch(() => []);
+  window.__panelCats = pcats;
+  if (loadTheme().theme === 'brutalist') { renderPanelsBrutalist(servers); enhancePanelCategories(servers, pcats); return; }
+  if (loadTheme().theme === 'bento') { renderPanelsBento(servers); enhancePanelCategories(servers, pcats); return; }
   setContent(`
     <div class="toolbar"><button class="btn btn-primary btn-sm" id="add-panel">+ پنل جدید</button></div>
     <div class="card"><div class="table-wrap"><table>
@@ -7568,6 +7743,90 @@ async function renderPanels() {
   $$('[data-retemplate]', content()).forEach(b => b.addEventListener('click', () => openPanelRetemplateModal(Number(b.dataset.retemplate))));
   wirePanelReorder(servers);
   wirePanelDeleteButtons();
+  enhancePanelCategories(servers, pcats);
+}
+
+
+// ---------------------------------------------------------------- دسته‌بندی پنل‌ها --
+// مستقل از تم: فیلتر دسته، انتخاب دسته‌ی هر پنل و مدیریت دسته‌ها روی DOM همان صفحه اضافه می‌شود.
+function enhancePanelCategories(servers, pcats) {
+  const root = content();
+  const rowOf = id => { const b = root.querySelector(`[data-edit="${id}"]`); return b ? b.closest('tr, .bn-card, .bru-server-card') : null; };
+  const countOf = cid => servers.filter(s => (cid === 'none' ? !s.panel_category_id : Number(s.panel_category_id) === Number(cid))).length;
+  if (panelCatFilter !== 'all' && panelCatFilter !== 'none' && !pcats.some(c => String(c.id) === String(panelCatFilter))) panelCatFilter = 'all';
+
+  const chips = [['all', `همه (${servers.length})`], ...pcats.map(c => [String(c.id), `${c.name} (${countOf(c.id)})`])];
+  if (pcats.length) chips.push(['none', `بدون دسته (${countOf('none')})`]);
+  const bar = document.createElement('div');
+  bar.className = 'toolbar';
+  bar.style.cssText = 'flex-wrap:wrap;gap:6px;margin:0 0 12px';
+  bar.innerHTML = `${chips.map(([v, l]) => `<button class="btn btn-sm ${String(panelCatFilter) === v ? 'btn-primary' : ''}" data-pcat-filter="${esc(v)}">${esc(l)}</button>`).join('')}
+    <button class="btn btn-sm" id="pcat-manage">🗂 مدیریت دسته‌بندی‌ها</button>`;
+  root.insertBefore(bar, root.firstChild);
+
+  servers.forEach(s => {
+    const row = rowOf(s.id);
+    if (!row) return;
+    row.dataset.pcat = s.panel_category_id ? String(s.panel_category_id) : 'none';
+    const host = root.querySelector(`[data-edit="${s.id}"]`).parentElement;
+    const sel = document.createElement('select');
+    sel.className = 'input';
+    sel.dataset.panelCat = s.id;
+    sel.title = 'دسته‌بندی پنل';
+    sel.style.cssText = 'width:auto;min-width:110px;padding:4px 8px;font-size:12px;margin-inline-start:4px';
+    sel.innerHTML = `<option value="">🗂 بدون دسته</option>${pcats.map(c => `<option value="${c.id}" ${Number(s.panel_category_id) === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}`;
+    sel.addEventListener('change', async () => {
+      try { await apiPost(`/panel-servers/${s.id}/category`, { category_id: sel.value ? Number(sel.value) : null }); toast('دسته‌بندی پنل ذخیره شد.'); renderPanels(); }
+      catch (e) { handleErr(e); }
+    });
+    host.appendChild(sel);
+  });
+
+  const applyFilter = () => {
+    servers.forEach(s => {
+      const row = rowOf(s.id);
+      if (row) row.style.display = (panelCatFilter === 'all' || row.dataset.pcat === String(panelCatFilter)) ? '' : 'none';
+    });
+  };
+  applyFilter();
+  $$('[data-pcat-filter]', bar).forEach(b => b.addEventListener('click', () => { panelCatFilter = b.dataset.pcatFilter; renderPanels(); }));
+  $('#pcat-manage', bar).addEventListener('click', () => openPanelCategoriesModal(pcats));
+}
+
+function openPanelCategoriesModal(pcats) {
+  const rowsHtml = pcats.map((c, i) => `
+    <div class="field-row" style="gap:6px;align-items:center">
+      <span style="flex:1">${esc(c.name)}</span>
+      <button class="btn btn-xs" data-pc-up="${c.id}" ${i === 0 ? 'disabled' : ''}>▲</button>
+      <button class="btn btn-xs" data-pc-down="${c.id}" ${i === pcats.length - 1 ? 'disabled' : ''}>▼</button>
+      <button class="btn btn-xs" data-pc-edit="${c.id}">✏️</button>
+      <button class="btn btn-xs btn-danger" data-pc-del="${c.id}">🗑</button>
+    </div>`).join('') || '<div class="card-sub">هنوز دسته‌بندی‌ای ساخته نشده.</div>';
+  openModal('دسته‌بندی پنل‌ها', `
+    <div class="form-grid">
+      <div style="display:grid;gap:8px">${rowsHtml}</div>
+      <div class="form-row"><input class="input" id="pc-new" placeholder="نام دسته‌بندی جدید (مثلاً آلمان)"><button class="btn btn-primary" id="pc-add">+ افزودن</button></div>
+    </div>`, (b, close) => {
+    const done = () => { close(); renderPanels(); };
+    $('#pc-add', b).addEventListener('click', async () => {
+      const name = $('#pc-new', b).value.trim(); if (!name) return;
+      try { await apiPost('/panel-categories', { name }); toast('اضافه شد.'); done(); } catch (e) { handleErr(e); }
+    });
+    $$('[data-pc-up],[data-pc-down]', b).forEach(btn => btn.addEventListener('click', async () => {
+      const id = btn.dataset.pcUp || btn.dataset.pcDown;
+      try { await apiPost(`/panel-categories/${id}/move`, { direction: btn.dataset.pcUp ? 'up' : 'down' }); done(); } catch (e) { handleErr(e); }
+    }));
+    $$('[data-pc-edit]', b).forEach(btn => btn.addEventListener('click', async () => {
+      const cat = pcats.find(c => c.id === Number(btn.dataset.pcEdit));
+      const name = (prompt('نام جدید دسته‌بندی:', cat ? cat.name : '') || '').trim();
+      if (!name) return;
+      try { await apiPut(`/panel-categories/${cat.id}`, { name }); toast('ویرایش شد.'); done(); } catch (e) { handleErr(e); }
+    }));
+    $$('[data-pc-del]', b).forEach(btn => btn.addEventListener('click', async () => {
+      if (!confirm('حذف شود؟ (پنل‌های این دسته حذف نمی‌شوند؛ فقط «بدون دسته» می‌شوند)')) return;
+      try { await apiDelete(`/panel-categories/${btn.dataset.pcDel}`); toast('حذف شد.'); done(); } catch (e) { handleErr(e); }
+    }));
+  });
 }
 
 function openPanelEditModal(server) {
@@ -7790,22 +8049,7 @@ const SETTINGS_GROUPS = [
   { tab: 'content', title: '🗺 نقشه زنده شبکه — مکان سرورها (دستی)', fields: [
     { key: 'netmap_locations', label: 'مکان سرورها', type: 'netmap_simple' },
   ]},
-  { tab: 'content', title: '🔗 برندینگ و پیش‌نمایش صفحه لینک ساب', fields: [
-    { key: 'dsub_brand', label: 'نام برند صفحه لینک ساب', type: 'text' },
-    { key: 'dsub_logo_url', label: 'لوگوی صفحه لینک ساب', type: 'text' },
-    { key: 'dsub_notice', label: 'اعلان بالای صفحه', type: 'textarea' },
-    { key: 'dsub_support_url', label: 'لینک پشتیبانی صفحه ساب', type: 'text' },
-    { key: 'dsub_footer_text', label: 'متن پایین صفحه', type: 'text' },
-    { key: 'dsub_theme', label: 'تم صفحه ساب', type: 'select', options: [['auto','خودکار'],['light','روشن'],['dark','تیره']] },
-    { key: 'dsub_show_configs', label: 'نمایش کانفیگ‌ها', type: 'bool' },
-    { key: 'dsub_show_chart', label: 'نمایش نمودار مصرف', type: 'bool' },
-    { key: 'dsub_show_qr', label: 'نمایش QR', type: 'bool' },
-    { key: 'dsub_show_apps', label: 'نمایش برنامه‌ها', type: 'bool' },
-    { key: 'dsub_show_faq', label: 'نمایش بخش عیب‌یابی', type: 'bool' },
-    { key: 'dsub_custom_template_enabled', label: 'استفاده از قالب اختصاصی (HTML) برای صفحه ساب', type: 'bool' },
-    { key: '_dsub_template_tools', label: 'ابزار قالب اختصاصی', type: 'sub_template_tools' },
-    { key: 'dsub_custom_template', label: 'کد HTML قالب اختصاصی (باید شامل __DATA__ باشد؛ خالی = قالب پیش‌فرض)', type: 'code' },
-  ]},
+
 
   // ------------------------------------------------------------ پرداخت و مالی
   { tab: 'payment', title: 'کارت بانکی', fields: [
@@ -10226,6 +10470,90 @@ document.addEventListener('click', async e => {
 });
 
 
+
+async function renderSubscriptionPageSettings() {
+  const s = await apiGet('/settings');
+  const val = k => s[k] ?? '';
+  const field = (key, label, type='text', hint='') => `
+    <label class="field"><span>${label}</span>
+      <input class="input" data-key="${key}" data-type="${type}" type="${type === 'number' ? 'number' : 'text'}" value="${esc(val(key))}">
+      ${hint ? `<small class="card-sub">${hint}</small>` : ''}
+    </label>`;
+  const area = (key, label, rows=3) => `<label class="field"><span>${label}</span><textarea class="input" data-key="${key}" data-type="textarea" rows="${rows}">${esc(val(key))}</textarea></label>`;
+  const select = (key,label,options) => `<label class="field"><span>${label}</span><select class="input" data-key="${key}" data-type="select">${options.map(([v,l])=>`<option value="${v}" ${String(val(key))===v?'selected':''}>${l}</option>`).join('')}</select></label>`;
+  const toggle = (key,label) => `<label class="field field-row"><span>${label}</span><button type="button" class="switch" data-key="${key}" data-on="${val(key)==='1'?'1':'0'}"><i></i></button></label>`;
+  setContent(`
+    <div class="hero"><div><h2>تنظیمات صفحه اشتراک</h2><p class="card-sub">مدیریت کامل ظاهر، محتوا و رفتار لینک ساب اختصاصی</p></div></div>
+    <div class="card" style="margin-bottom:16px"><div class="card-head"><h3>🔌 وضعیت و آدرس سرویس</h3></div><div class="form-grid">
+      ${select('dsub_enabled','فعال بودن لینک ساب اختصاصی',[['0','غیرفعال'],['1','فعال']])}
+      ${select('dsub_web_page','نمایش صفحه وب در مرورگر',[['0','غیرفعال'],['1','فعال']])}
+      ${field('dsub_base_url','آدرس پایه سرور ساب','text','خالی = استفاده از مقدار تنظیم‌شده در فایل .env')}
+    </div></div>
+    <div class="card" style="margin-bottom:16px"><div class="card-head"><h3>🎨 ظاهر و قالب صفحه</h3></div>
+      <div class="form-grid">
+        ${select('dsub_style','سبک نمایش',[['minimal','مینیمال'],['modern','مدرن'],['glass','شیشه‌ای'],['cyberpunk','سایبرپانک'],['classic','کلاسیک']])}
+        ${select('dsub_theme','حالت رنگ',[['auto','خودکار'],['light','روشن'],['dark','تیره']])}
+        ${field('dsub_accent_color','رنگ اصلی (HEX)','text','مثلاً #6366F1')}
+        ${field('dsub_secondary_color','رنگ مکمل (HEX)','text','مثلاً #06B6D4')}
+        ${select('dsub_card_style','استایل کارت‌ها',[['rounded','گرد'],['soft','ملایم'],['sharp','گوشه‌دار']])}
+        ${select('dsub_density','تراکم محتوا',[['comfortable','راحت'],['compact','فشرده']])}
+      </div>
+      <div class="card-sub">پیش‌نمایش نمونه</div>
+      <iframe id="sub-page-preview-frame" src="/api/settings/sub-page-preview?preview=1" title="پیش‌نمایش صفحه اشتراک" style="width:100%;height:560px;border:1px solid var(--border);border-radius:14px;background:#fff"></iframe>
+      <button class="btn btn-ghost btn-sm" id="sub-page-preview-open" type="button">باز کردن پیش‌نمایش در تب جدید</button>
+    </div>
+    <div class="card" style="margin-bottom:16px"><div class="card-head"><h3>🏷️ برندینگ و اطلاعات</h3></div><div class="form-grid">
+      ${field('dsub_brand','نام برند صفحه')}${field('dsub_logo_url','آدرس لوگو (HTTPS)')}
+      ${area('dsub_notice','اعلان بالای صفحه')}${field('dsub_support_url','لینک پشتیبانی')}
+      ${field('dsub_footer_text','متن پایین صفحه')}
+    </div></div>
+    <div class="card" style="margin-bottom:16px"><div class="card-head"><h3>🧩 بخش‌های قابل نمایش</h3></div><div class="form-grid">
+      ${toggle('dsub_show_configs','نمایش کانفیگ‌ها')}${toggle('dsub_show_chart','نمایش نمودار مصرف')}
+      ${toggle('dsub_show_qr','نمایش QR')}${toggle('dsub_show_apps','نمایش برنامه‌ها')}
+      ${toggle('dsub_show_faq','نمایش راهنمای عیب‌یابی')}
+    </div></div>
+    <div class="card" style="margin-bottom:16px"><div class="card-head"><h3>⚙️ تنظیمات پیشرفته</h3></div><div class="form-grid">
+      ${field('dsub_profile_title','عنوان پروفایل داخل اپ')}
+      ${field('dsub_update_interval','فاصله بروزرسانی (ساعت)','number')}
+      ${select('dsub_info_line','خط اول ساب',[['0','خاموش'],['1','روشن']])}
+      ${field('dsub_info_line_text','متن خط اول ساب')}
+      ${toggle('dsub_expired_placeholder','نمایش کانفیگ نمایشی برای سرویس پایان‌یافته')}
+      ${area('dsub_expired_text','متن سرویس منقضی')}${area('dsub_limited_text','متن اتمام حجم')}
+      ${field('dsub_cache_ttl','مدت کش (ثانیه)','number')}
+      ${toggle('dsub_usage_sampling','ثبت نمونه مصرف')}${toggle('dsub_log_enabled','ثبت لاگ دسترسی')}
+    </div></div>
+    <div class="card" style="margin-bottom:16px"><div class="card-head"><h3>📱 برنامه‌ها، سوالات و قالب HTML</h3></div>
+      <div class="form-grid">
+        ${area('dsub_faq','سوالات متداول (هر خط: سوال | جواب)',5)}
+        ${area('dsub_custom_apps','برنامه‌های سفارشی (هر خط: platform|name|description|add_prefix|download_url)',5)}
+        ${field('dsub_apps_hidden','برنامه‌های مخفی (مثلاً ios:Streisand,android:Hiddify)')}
+        ${field('dsub_apps_rec','برنامه پیشنهادی هر سیستم‌عامل (مثلاً ios:Hiddify,android:v2rayNG)')}
+        ${toggle('dsub_custom_template_enabled','استفاده از قالب HTML اختصاصی')}
+        ${area('dsub_custom_template','کد HTML قالب اختصاصی',12)}
+      </div>
+      <div class="form-grid" style="margin-top:10px">
+        <button class="btn btn-ghost sub-tpl-guide-btn" type="button">راهنمای قالب</button>
+        <button class="btn btn-ghost sub-tpl-default-btn" type="button">پر کردن قالب پیش‌فرض</button>
+        <label class="btn btn-ghost" style="cursor:pointer">آپلود فایل HTML<input class="sub-tpl-upload-input" type="file" accept=".html,text/html" hidden></label>
+      </div>
+    </div>
+    <div class="settings-save-bar"><button class="btn btn-primary btn-block" id="subscription-page-save">ذخیره تنظیمات صفحه اشتراک</button></div>
+  `);
+  const root = content();
+  bindSettingsGroupEvents(root);
+  bindSubscriptionLivePreview(root);
+  $('#subscription-page-save',root).addEventListener('click',()=>collectAndSaveSettings(root,$('#subscription-page-save',root)));
+  $$('.sub-tpl-guide-btn',root).forEach(btn=>btn.addEventListener('click',()=>openModal('راهنمای قالب اختصاصی',_subTemplateGuideHtml(),null,{wide:true})));
+  $$('.sub-tpl-default-btn',root).forEach(btn=>btn.addEventListener('click',async()=>{
+    try { const r=await fetch('/api/settings/sub-page-template/default',{credentials:'same-origin'}); if(!r.ok) throw new Error('HTTP '+r.status); $('textarea[data-key="dsub_custom_template"]',root).value=await r.text(); toast('قالب پیش‌فرض بارگذاری شد؛ ذخیره را بزن.'); } catch(e){handleErr(e);}
+  }));
+  $$('.sub-tpl-upload-input',root).forEach(input=>input.addEventListener('change',async()=>{
+    const file=input.files&&input.files[0]; input.value=''; if(!file)return;
+    if(file.size>400000){toast('حجم فایل بیش از ۴۰۰ کیلوبایت است.');return;}
+    try{const t=await file.text();if(!t.includes('__DATA__')){toast('قالب باید شامل __DATA__ باشد.');return;} $('textarea[data-key="dsub_custom_template"]',root).value=t;toast('قالب بارگذاری شد؛ ذخیره را بزن.');}catch(e){handleErr(e);}
+  }));
+}
+
 async function renderSettings() {
   const [settings, rate, mainMenuDisplay, gateways, methods, c2cCards, c2cWebhook, c2cInvoices, mobileTokens] = await Promise.all([
     apiGet('/settings'),
@@ -10306,7 +10634,7 @@ function bindSubscriptionLivePreview(root) {
     notice: get('dsub_notice'),
     support: get('dsub_support_url') || '',
     footer: get('dsub_footer_text'),
-    theme: get('dsub_theme') || 'auto',
+    theme: get('dsub_theme') || 'auto', style: get('dsub_style') || 'minimal', accent: get('dsub_accent_color') || '#6366F1', secondary: get('dsub_secondary_color') || '#06B6D4', cardStyle: get('dsub_card_style') || 'rounded', density: get('dsub_density') || 'comfortable',
     show: {
       configs: get('dsub_show_configs') !== '0', chart: get('dsub_show_chart') !== '0',
       qr: get('dsub_show_qr') !== '0', apps: get('dsub_show_apps') !== '0', faq: get('dsub_show_faq') !== '0'
