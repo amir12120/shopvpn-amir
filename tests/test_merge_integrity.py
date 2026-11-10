@@ -143,6 +143,11 @@ UPSTREAM_FEATURE_MODULES = (
     "emoji_prefs.py",
     "stealth_auto_install.py",
     "panel_providers/stealth_provider.py",
+    # --- upstream batch: phone-prefix verification, saved user groups,
+    # --- subscriptions page and auto banners ---
+    "phone_gate.py",
+    "db/user_groups.py",
+    "db/subscriptions.py",
 )
 
 # Upstream keeps re-uploading these with a module-level `from i18n import tr`
@@ -1214,3 +1219,44 @@ def test_stealth_install_scripts_do_not_touch_the_fork_install_flow():
     assert "while IFS= read -r h" in cleanup
     assert "journalctl --vacuum-size=" in cleanup
     assert "SHOPVPN_JOURNAL_MAX" in cleanup
+
+
+def test_phone_gate_user_groups_and_subscriptions_are_wired():
+    """Upstream 9.1.0 features must be reachable, not just present as files."""
+    phone_gate = (ROOT / "phone_gate.py").read_text(encoding="utf-8")
+    assert "class PhoneGateMiddleware" in phone_gate
+    assert "def is_enabled(" in phone_gate
+    assert "def match_country(" in phone_gate
+    assert "def describe_allowed(" in phone_gate
+    bot_manager = (ROOT / "bot_manager.py").read_text(encoding="utf-8")
+    assert "from phone_gate import PhoneGateMiddleware" in bot_manager
+    assert "PhoneGateMiddleware(db)" in bot_manager
+    assert "outer_middleware(" in bot_manager
+    miniapp = (ROOT / "miniapp/server.py").read_text(encoding="utf-8")
+    assert "import phone_gate" in miniapp
+    assert '@app.get("/api/phone/status")' in miniapp
+    assert '@app.post("/api/phone/request")' in miniapp
+    handlers_user = (ROOT / "handlers_user.py").read_text(encoding="utf-8")
+    assert "import phone_gate" in handlers_user
+    assert "def phone_gate_contact(" in handlers_user
+
+    db_init = (ROOT / "db/__init__.py").read_text(encoding="utf-8")
+    assert "from .user_groups import UserGroupsMixin" in db_init
+    assert "from .subscriptions import SubscriptionsMixin" in db_init
+    user_groups = (ROOT / "db/user_groups.py").read_text(encoding="utf-8")
+    assert "class UserGroupsMixin" in user_groups
+    assert "def list_user_groups(" in user_groups
+    subscriptions = (ROOT / "db/subscriptions.py").read_text(encoding="utf-8")
+    assert "def search_subscriptions(" in subscriptions
+
+    server = (ROOT / "admin_panel/server.py").read_text(encoding="utf-8")
+    for route in ('@app.get("/api/subscriptions")',
+                  '@app.post("/api/subscriptions/ssh/{account_id}/action")',
+                  '@app.get("/api/user-groups")',
+                  '@app.post("/api/user-groups")'):
+        assert route in server, f"missing upstream route {route}"
+    constants = (ROOT / "db/constants.py").read_text(encoding="utf-8")
+    assert "DEFAULT_AUTO_BANNERS" in constants
+    app_js = (ROOT / "admin_panel/static/app.js").read_text(encoding="utf-8")
+    assert "stealthNodeSettingsModal" in app_js
+    assert "function renderSSHInstall()" in app_js  # fork's SSH install page survived

@@ -1,25 +1,20 @@
 # -*- coding: utf-8 -*-
-"""نصب خودکار نود «Stealth VLESS» روی سرور تازه (Debian/Ubuntu، root).
+"""نصب خودکار نود Stealth VLESS روی سرور Debian/Ubuntu فقط با IP، رمز root و دامنه.
 
-upstream روت‌های `/api/stealth/nodes/auto-install` و
-`/api/stealth/nodes/install-jobs/{job_id}` را در `admin_panel/server.py` صدا می‌زند
-اما ماژول `stealth_auto_install` را در مخزن جا انداخته است. این فایل همان قرارداد
-را با همان الگوی `ssh_auto_install.py` پیاده می‌کند:
-
-- `InstallError`، `start_install(db, ...) -> job_id`، `get_job(job_id)`
-- آپلود `deploy/install-shopvpn-stealth.py` و `deploy/shopvpn-stealth-agent.py`
-  روی سرور و اجرای نصاب با آرگومان‌های امن (بدون shell injection)
-- خواندن آدرس API و توکن از `/etc/shopvpn-stealth/node.json` روی سرور
-- ثبت پنل با `panel_type="stealth"` و تست اتصال
-
-رمز root و کلید خصوصی فقط داخل closure تسک می‌مانند و هیچ‌جا لاگ نمی‌شوند.
+پنل با asyncssh وصل می‌شود، نصاب deploy/install-shopvpn-stealth.py را اجرا می‌کند،
+node.json را می‌خواند و نود را به‌عنوان پنل از نوع stealth ثبت و تست می‌کند.
+رمز root فقط در حافظه استفاده می‌شود و ذخیره یا لاگ نمی‌شود.
 """
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
 import os
 import re
-import secrets
+import shlex
+import time
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -28,32 +23,27 @@ _FILES = (
     "deploy/install-shopvpn-stealth.py",
     "deploy/shopvpn-stealth-agent.py",
 )
-REMOTE_DIR = "/tmp/shopvpn-stealth-install"
-NODE_JSON = "/etc/shopvpn-stealth/node.json"
-ALLOWED_TRANSPORTS = ("ws", "httpupgrade", "grpc", "xhttp")
-ALLOWED_DECOYS = ("movie", "proxy")
-ALLOWED_CERTS = ("letsencrypt", "file", "self")
-
+ALL_TRANSPORTS = ("ws", "httpupgrade", "grpc", "xhttp")
+_DOMAIN_RE = re.compile(r"^(?=.{4,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+_EMAIL_RE = re.compile(r"^[^@\s'\"\\;|&$`<>]+@[^@\s'\"\\;|&$`<>]+\.[^@\s'\"\\;|&$`<>]+$")
+_HOST_RE = re.compile(r"^[A-Za-z0-9.:\-]{2,255}$")
+_JOBS: dict = {}
 _MAX_JOBS = 30
-_JOBS = {}
 
 
 class InstallError(Exception):
-    """خطای قابل‌نمایش برای ادمین؛ پیامش مستقیم به HTTPException می‌رود."""
+    pass
 
 
 def _new_job() -> dict:
-    job = {
-        "id": secrets.token_hex(8),
-        "status": "running",
-        "log": [],
-        "panel_id": None,
-        "warning": None,
-        "error": None,
-    }
-    _JOBS[job["id"]] = job
-    while len(_JOBS) > _MAX_JOBS:
+    now = time.time()
+    for key in [k for k, v in _JOBS.items() if now - v["created"] > 3600]:
+        _JOBS.pop(key, None)
+    while len(_JOBS) >= _MAX_JOBS:
         _JOBS.pop(next(iter(_JOBS)))
+    job = {"id": uuid.uuid4().hex, "status": "running", "log": [], "created": now,
+           "node_id": None, "warning": None, "error": None}
+    _JOBS[job["id"]] = job
     return job
 
 
@@ -61,76 +51,63 @@ def get_job(job_id: str):
     job = _JOBS.get(job_id)
     if not job:
         return None
-    return {k: job[k] for k in ("id", "status", "log", "panel_id", "warning", "error")}
+    return {k: job[k] for k in ("id", "status", "log", "node_id", "warning", "error")}
 
 
 def _log(job, text: str):
     job["log"].append(str(text)[:400])
 
 
-def _clean_domain(value: str) -> str:
-    domain = (value or "").strip().lower()
-    if not re.fullmatch(r"[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?", domain) or "." not in domain:
-        raise InstallError("دامنه نامعتبر است (مثلاً cdn.example.com).")
-    return domain
-
-
-def start_install(db, *, name, host, ssh_port=22, password=None, private_key=None, domain,
-                  decoy="movie", proxy_url=None, cert="letsencrypt", email="",
-                  transports=None, port=443, title="Stealth", site_name="CineVault") -> str:
-    """یک جاب پس‌زمینه می‌سازد و شناسه‌اش را برمی‌گرداند."""
-    name = (name or "").strip()
-    host = (host or "").strip()
-    if not name:
-        raise InstallError("نام نود الزامی است.")
-    if not host:
-        raise InstallError("آدرس سرور (IP یا هاست) الزامی است.")
+def start_install(db, *, name, host, ssh_port, password=None, private_key=None, domain, decoy="movie",
+                  proxy_url=None, cert="letsencrypt", email="", transports=None, port=443,
+                  title="Stealth", site_name="CineVault") -> str:
+    """Create a background job and return its id. Secrets live only inside the task closure."""
     if not (password or private_key):
-        raise InstallError("رمز root یا کلید خصوصی را وارد کنید.")
-    domain = _clean_domain(domain)
-
-    wanted = [t for t in ALLOWED_TRANSPORTS if t in (transports or ["ws", "httpupgrade", "grpc"])]
+        raise InstallError("رمز root یا کلید خصوصی لازم است.")
+    if not _HOST_RE.match(host or ""):
+        raise InstallError("آی‌پی یا آدرس سرور نامعتبر است.")
+    if not 1 <= int(ssh_port) <= 65535:
+        raise InstallError("پورت SSH نامعتبر است.")
+    if not _DOMAIN_RE.match(domain or ""):
+        raise InstallError("دامنه نامعتبر است.")
+    if decoy not in ("movie", "proxy"):
+        raise InstallError("نوع سایت جعلی نامعتبر است.")
+    if decoy == "proxy" and not re.match(r"^https?://[A-Za-z0-9.\-]+(:\d+)?/?$", proxy_url or ""):
+        raise InstallError("آدرس سایت واقعی برای آینه نامعتبر است (فقط https://domain).")
+    if cert not in ("letsencrypt", "self"):
+        raise InstallError("نوع گواهی نامعتبر است.")
+    if cert == "letsencrypt" and not _EMAIL_RE.match(email or ""):
+        raise InstallError("برای Let's Encrypt ایمیل معتبر لازم است.")
+    wanted = [t for t in ALL_TRANSPORTS if t in (transports or [])]
     if not wanted:
-        raise InstallError("حداقل یک ترنسپورت (ws، httpupgrade، grpc یا xhttp) انتخاب کنید.")
-    if str(decoy) not in ALLOWED_DECOYS:
-        raise InstallError("نوع سایت جعلی باید movie یا proxy باشد.")
-    if str(cert) not in ALLOWED_CERTS:
-        raise InstallError("نوع گواهی باید letsencrypt، file یا self باشد.")
-    if str(decoy) == "proxy":
-        if not proxy_url or not re.match(r"^https?://[^/\s]+", proxy_url):
-            raise InstallError("برای سایت جعلی proxy، آدرس معتبر (https://...) لازم است.")
-    try:
-        ssh_port = int(ssh_port)
-        port = int(port)
-    except (TypeError, ValueError) as exc:
-        raise InstallError("پورت نامعتبر است.") from exc
-    if not 1 <= ssh_port <= 65535 or not 1 <= port <= 65535:
-        raise InstallError("پورت نامعتبر است.")
-
+        raise InstallError("حداقل یک ترنسپورت انتخاب کنید.")
+    if not 1 <= int(port) <= 65535 or int(port) == int(ssh_port):
+        raise InstallError("پورت عمومی نامعتبر است.")
+    title = (title or "Stealth").strip()[:40]
+    site_name = (site_name or "CineVault").strip()[:40]
+    if not re.fullmatch(r"[A-Za-z0-9 _.\-]+", title) or not re.fullmatch(r"[A-Za-z0-9 _.\-]+", site_name):
+        raise InstallError("عنوان یا نام سایت فقط می‌تواند حروف لاتین، عدد، فاصله و - _ . باشد.")
     job = _new_job()
 
     async def _runner():
         try:
-            await _install(db, job, name=name, host=host, ssh_port=ssh_port, password=password,
-                           private_key=private_key, domain=domain, decoy=str(decoy),
-                           proxy_url=(proxy_url or "").strip() or None, cert=str(cert),
-                           email=(email or "").strip(), transports=wanted, port=port,
-                           title=(title or "Stealth").strip(), site_name=(site_name or "CineVault").strip())
+            await _install(db, job, name, host, int(ssh_port), password, private_key, domain, decoy,
+                           proxy_url, cert, email, wanted, int(port), title, site_name)
             job["status"] = "done"
         except InstallError as exc:
             job["status"] = "error"
             job["error"] = str(exc)
-        except Exception as exc:  # هرگز رمز یا کلید را لو نده
+        except Exception as exc:
             logger.exception("Stealth node auto-install failed")
             job["status"] = "error"
             job["error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
 
     task = asyncio.get_running_loop().create_task(_runner())
-    job["_task"] = task  # مرجع نگه داشته شود تا جمع‌آوری نشود
+    job["_task"] = task
     return job["id"]
 
 
-async def _install(db, job, *, name, host, ssh_port, password, private_key, domain, decoy,
+async def _install(db, job, name, host, ssh_port, password, private_key, domain, decoy,
                    proxy_url, cert, email, transports, port, title, site_name):
     try:
         import asyncssh
@@ -148,7 +125,7 @@ async def _install(db, job, *, name, host, ssh_port, password, private_key, doma
         kwargs["password"] = password
         kwargs["client_keys"] = None
 
-    _log(job, f"اتصال به {host}:{ssh_port} ...")
+    _log(job, "در حال اتصال به سرور...")
     try:
         conn = await asyncssh.connect(**kwargs)
     except asyncssh.PermissionDenied as exc:
@@ -157,13 +134,13 @@ async def _install(db, job, *, name, host, ssh_port, password, private_key, doma
         raise InstallError(f"اتصال SSH برقرار نشد: {type(exc).__name__}") from exc
 
     async with conn:
-        async def run(cmd, timeout=1800, check=True):
+        async def run(cmd, timeout=600, check=True):
             try:
                 res = await asyncio.wait_for(conn.run(cmd, check=False), timeout)
             except asyncio.TimeoutError as exc:
                 raise InstallError("زمان اجرای دستور روی سرور تمام شد.") from exc
             if check and res.exit_status != 0:
-                tail = ((res.stderr or "") + (res.stdout or "")).strip()[-400:]
+                tail = ((res.stdout or "") + (res.stderr or "")).strip()[-600:]
                 raise InstallError(f"دستور روی سرور شکست خورد: {tail}")
             return (res.stdout or "").strip()
 
@@ -171,69 +148,60 @@ async def _install(db, job, *, name, host, ssh_port, password, private_key, doma
         if "debian" not in osr and "ubuntu" not in osr:
             raise InstallError("فقط Debian/Ubuntu پشتیبانی می‌شود.")
 
-        _log(job, "آپلود نصاب و ایجنت...")
-        await run(f"rm -rf {REMOTE_DIR} && mkdir -p {REMOTE_DIR}/deploy")
+        _log(job, "آپلود فایل‌های نصاب...")
+        await run("rm -rf /tmp/shopvpn-install && mkdir -p /tmp/shopvpn-install/deploy")
         async with conn.start_sftp_client() as sftp:
             for rel in _FILES:
                 local = os.path.join(_PROJECT_ROOT, rel)
                 if not os.path.isfile(local):
                     raise InstallError(f"فایل نصب روی پنل پیدا نشد: {rel}")
-                await sftp.put(local, f"{REMOTE_DIR}/{rel}")
+                await sftp.put(local, f"/tmp/shopvpn-install/{rel}")
 
-        # آرگومان‌ها با shlex.quote امن می‌شوند؛ هیچ ورودی کاربر خام اجرا نمی‌شود.
-        import shlex
-        argv = [
-            "python3", f"{REMOTE_DIR}/deploy/install-shopvpn-stealth.py",
-            "--domain", domain,
-            "--port", str(port),
-            "--transports", ",".join(transports),
-            "--decoy", decoy,
-            "--cert", cert,
-            "--title", title,
-            "--site-name", site_name,
+        _log(job, "نصب پیش‌نیازها (ممکن است چند دقیقه طول بکشد)...")
+        await run("export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && "
+                  "apt-get install -y -qq python3 curl openssl ca-certificates", timeout=900)
+
+        args = [
+            "--domain", domain, "--port", str(port), "--transports", ",".join(transports),
+            "--decoy", decoy, "--cert", cert, "--title", title, "--site-name", site_name,
         ]
-        if proxy_url:
-            argv += ["--proxy-url", proxy_url]
-        if email:
-            argv += ["--email", email]
-        cmd = " ".join(shlex.quote(a) for a in argv)
-
-        _log(job, f"اجرای نصاب (دامنه {domain}، ترنسپورت {', '.join(transports)}) — چند دقیقه طول می‌کشد...")
-        await run(cmd, timeout=2400)
-
-        _log(job, "خواندن آدرس API و توکن از سرور...")
-        raw = await run(f"cat {NODE_JSON}", check=False)
+        if decoy == "proxy":
+            args += ["--proxy-url", proxy_url]
+        if cert == "letsencrypt":
+            args += ["--email", email]
+        _log(job, "نصب xray، nginx، سایت جعلی و گواهی TLS (چند دقیقه)...")
+        cmd = "cd /tmp/shopvpn-install && python3 deploy/install-shopvpn-stealth.py " \
+              + " ".join(shlex.quote(a) for a in args) + " 2>&1 </dev/null"
+        out = await run(cmd, timeout=1800, check=False)
+        raw = await run("cat /etc/shopvpn-stealth/node.json", check=False)
         try:
             node = json.loads(raw)
-        except ValueError as exc:
-            raise InstallError(f"فایل {NODE_JSON} روی سرور خوانده نشد.") from exc
-        api_path = str(node.get("api_path") or "").strip()
-        api_token = str(node.get("api_token") or "").strip()
-        if not api_path or not api_token:
-            raise InstallError("آدرس API یا توکن در node.json پیدا نشد.")
+        except ValueError:
+            node = None
+        marker = "نصب کامل شد"
+        if not node or marker not in out:
+            raise InstallError("نصب روی سرور کامل نشد. خروجی سرور:\n" + out[-700:])
+        await run("rm -rf /tmp/shopvpn-install", check=False)
 
-        api_url = f"https://{domain}" + ("" if port == 443 else f":{port}") + f"/{api_path}"
-        _log(job, "ثبت پنل Stealth در دیتابیس...")
-        panel_id = db.add_panel_server(name, "stealth", api_url, "stealth", api_token, None)
+    api_path = str(node.get("api_path") or "").strip("/")
+    api_token = str(node.get("api_token") or "")
+    if not api_path or not api_token:
+        raise InstallError("فایل node.json روی سرور ناقص است (api_path یا api_token).")
+    api_url = f"https://{domain}{'' if port == 443 else ':%d' % port}/{api_path}"
 
-        _log(job, "تست اتصال به ایجنت...")
-        ok = False
-        err = ""
-        for _ in range(5):
-            try:
-                ok, err = await get_provider(db.get_panel_server(panel_id)).check_connection()
-                if ok:
-                    break
-            except Exception as exc:
-                err = f"{type(exc).__name__}: {str(exc)[:160]}"
-            await asyncio.sleep(2)
-        if not ok:
-            job["panel_id"] = panel_id
-            raise InstallError(
-                "نود نصب شد ولی تست اتصال ناموفق بود. پنل با شناسه "
-                f"{panel_id} ثبت شد؛ فایروال/کلادفلر پورت {port} را بررسی کنید."
-                + (f" ({err})" if err else "")
-            )
-
-    job["panel_id"] = panel_id
-    _log(job, "نود Stealth آماده است ✅")
+    _log(job, "ثبت نود در پنل و تست اتصال...")
+    server_id = db.add_panel_server(name, "stealth", api_url, "stealth", api_token, None)
+    job["node_id"] = server_id
+    ok, err = False, ""
+    for _ in range(6):
+        ok, err = await get_provider(db.get_panel_server(server_id)).check_connection()
+        if ok:
+            break
+        await asyncio.sleep(5)
+    if not ok:
+        db.delete_panel_server(server_id)
+        job["node_id"] = None
+        raise InstallError(
+            f"نصب روی سرور انجام شد ولی پنل به نود وصل نشد: {err}. DNS دامنه (و کلادفلر/پورت {port}) را بررسی کنید؛ "
+            f"آدرس API و توکن در /etc/shopvpn-stealth/node.json روی سرور هست و می‌توانید نود را دستی در «پنل‌های VPN» اضافه کنید.")
+    _log(job, "نود آماده است ✅")

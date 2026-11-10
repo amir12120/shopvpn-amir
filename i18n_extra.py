@@ -3011,3 +3011,33 @@ EXTRA_DYNAMIC_PHRASES.extend([
     ('🎨 رنگ دکمه این دسته: {x}', '🎨 Button color for this category: {x}'),
     ('✅ افزودن محصول در «{x}»', '✅ Add a product in "{x}"'),
 ])
+
+
+EXTRA_PHRASES.update({
+    ('📍 آن\u200cپین شروع شد.', '📍 Unpin started.'),
+    ('⏳ ارسال هنوز در حال انجام است؛ بعد از پایانش آن\u200cپین کن.', '⏳ A broadcast is still running; unpin it after it finishes.'),
+    ('ℹ️ پیام پین\u200cشده\u200cای از ارسال\u200cهای همگانی ثبت نشده.', 'ℹ️ No pinned broadcast message was recorded.'),
+    ('📍 آن\u200cپین آخرین ارسال تمام شد.', '📍 The last broadcast was unpinned.'),
+    ('✅ شماره\u200cی شما تایید شد؛ حالا می\u200cتوانید خرید کنید.', '✅ Your phone number is verified; you can buy now.'),
+    ('⛔️ فقط شماره\u200cی حساب تلگرام خودتان پذیرفته می\u200cشود. با دکمه\u200cی «اشتراک\u200cگذاری شماره موبایل» ارسال کنید.', '⛔️ Only the number of your own Telegram account is accepted. Send it with the “Share phone number” button.'),
+    ('برای خرید ابتدا باید شماره موبایل خود را تایید کنید.', 'To buy, verify your phone number first.'),
+    ('⛔️ شما به این بخش از تیکت\u200cها دسترسی ندارید.', '⛔️ You do not have access to this ticket section.'),
+    ('گروه کاربران پیدا نشد.', 'User group not found.'),
+    ('حداقل یک کاربر و حداکثر ۵۰۰ کاربر را انتخاب کن.', 'Select at least one user and at most 500.'),
+    ('همه\u200cی کاربران انتخاب\u200cشده عضو فعلی این گروه نیستند؛ فهرست را تازه\u200cسازی کن.', 'Some selected users are not current members of this group; refresh the list.'),
+    ('گروهی با این نام از قبل وجود دارد.', 'A group with this name already exists.'),
+    ('رنگ دکمه نامعتبر است.', 'Invalid button color.'),
+    ('مبلغ باید غیرصفر و حداکثر ۱۰۰ میلیون تومان باشد.', 'The amount must be non-zero and at most 100 million Toman.'),
+    ('عملیات گروهی نامعتبر است.', 'Invalid bulk operation.'),
+    ('متن پیام باید بین ۱ تا ۴۰۰۰ کاراکتر باشد.', 'The message text must be between 1 and 4000 characters.'),
+    ('حداکثر ۵۰ بنر مجاز است.', 'At most 50 banners are allowed.'),
+    ('برای خرید باید شماره موبایل خود را تایید کنید.', 'To buy, verify your phone number first.'),
+    ('ارسال پیام به چت بات ناموفق بود؛ ابتدا بات را استارت کنید.', 'Sending the message to the bot chat failed; start the bot first.'),
+    ('⛔️ پیش\u200cشماره\u200cی این شماره مجاز نیست. شماره\u200cهای مجاز: {x}', '⛔️ This phone prefix is not allowed. Allowed numbers: {x}'),
+    ('📱 برای خرید، شماره موبایل خود را فقط با دکمه\u200cی «اشتراک\u200cگذاری شماره موبایل» پایین ارسال کنید.\n\nشماره\u200cهای مجاز: {x}\n\n⚠️ شماره\u200cی تایپ\u200cشده یا شماره\u200cی افراد دیگر پذیرفته نمی\u200cشود.', '📱 To buy, send your phone number only with the “Share phone number” button below.\n\nAllowed numbers: {x}\n\n⚠️ A typed number or someone else’s number is not accepted.'),
+    ('حداکثر {x} بنر مجاز است.', 'At most {x} banners are allowed.'),
+})
+
+EXTRA_DYNAMIC_PHRASES += [
+
+]

@@ -3593,7 +3593,7 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
     async def cb_admin_pending_orders(call: CallbackQuery):
         if not admin_only(call.from_user.id):
             return await call.answer()
-        orders = (await asyncio.to_thread(db.get_pending_orders))
+        orders = (await asyncio.to_thread(db.get_orders_awaiting_review))
         if not orders:
             await call.answer(db.get_text('handlers_admin.auto_8045a61a', 'سفارش در انتظاری وجود ندارد.'), show_alert=True)
             return
@@ -12447,6 +12447,37 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
         await call.answer()
         await call.message.answer(text, reply_markup=kb.admin_broadcast_target_kb())
 
+    @router.callback_query(F.data == "adm_broadcast_unpin")
+    async def cb_admin_broadcast_unpin(call: CallbackQuery, bot: Bot):
+        if not full_admin_only(call.from_user.id):
+            return await deny_support(call)
+        if _bc_job_active():
+            await call.answer(tr("⏳ ارسال هنوز در حال انجام است؛ بعد از پایانش آن‌پین کن."), show_alert=True)
+            return
+        pins = await asyncio.to_thread(db.pop_latest_broadcast_pins)
+        if not pins:
+            await call.answer(tr("ℹ️ پیام پین‌شده‌ای از ارسال‌های همگانی ثبت نشده."), show_alert=True)
+            return
+        await call.answer(tr("📍 آن‌پین شروع شد."))
+        ok = failed = 0
+        for row in pins:
+            for _attempt in range(3):
+                try:
+                    await bot.unpin_chat_message(row["chat_id"], row["message_id"])
+                    ok += 1
+                    break
+                except TelegramRetryAfter as e:
+                    await asyncio.sleep(e.retry_after + 1)
+                except Exception:
+                    failed += 1
+                    break
+            await asyncio.sleep(0.05)
+        await asyncio.to_thread(db.log_admin_action, call.from_user.id, "broadcast_unpin", f"ok={ok}, failed={failed}")
+        await call.message.answer(
+            f"{tr('📍 آن‌پین آخرین ارسال تمام شد.')}\n{tr('✅ موفق')}: {ok}\n{tr('❌ ناموفق')}: {failed}",
+            reply_markup=kb.admin_broadcast_target_kb(),
+        )
+
     @router.callback_query(F.data == "adm_broadcast_stop")
     async def cb_admin_broadcast_stop(call: CallbackQuery, state: FSMContext):
         if not full_admin_only(call.from_user.id):
@@ -12788,6 +12819,7 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
                             try:
                                 await bot.pin_chat_message(uid, sent.message_id, disable_notification=True)
                                 job["pinned"] += 1
+                                await asyncio.to_thread(db.add_broadcast_pin, int(job["started"]), uid, sent.message_id)
                             except Exception:
                                 pass
                         break
@@ -16045,10 +16077,14 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
 
     async def _apply_report_group(bot: Bot, chat_id: int) -> str:
         try:
-            created = await report_router.setup_group(bot, db, chat_id)
+            rep = await report_router.setup_group(bot, db, chat_id)
         except report_router.SetupError as e:
             return f"❌ {e}"
-        return f"✅ گروه گزارش فعال شد ({created} تاپیک جدید ساخته شد)."
+        text = f"✅ گروه گزارش فعال شد ({rep.created + rep.recreated} تاپیک جدید ساخته شد)."
+        if rep.pending:
+            text += (f"\n⏳ {rep.pending} تاپیک دیگر به‌خاطر محدودیت سرعت تلگرام در پس‌زمینه و با فاصله ساخته می‌شود؛ "
+                     "همه‌ی تاپیک‌ها ساخته خواهند شد و تا آن موقع گزارش‌هایشان در «سایر» می‌نشیند.")
+        return text
 
     @router.message(AdminReportGroup.waiting_chat_id)
     async def process_report_group_id(message: Message, state: FSMContext, bot: Bot):

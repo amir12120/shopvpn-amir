@@ -651,7 +651,8 @@ def service_inquiry_card_kb(cb_id: str, fields: list) -> InlineKeyboardMarkup:
 
 def service_detail_kb(db, cb_id: str, kind: str, deletable: bool, show_links: bool = False,
                        enabled: bool = True, auto_renew: bool = False, is_test: bool = False,
-                       can_add_users: bool = False) -> InlineKeyboardMarkup:
+                       can_add_users: bool = False, is_invoiceable: bool = False,
+                       is_gift: bool = False) -> InlineKeyboardMarkup:
     """دکمه‌های صفحه‌ی جزئیات یک سرویس.
     kind == 'custom' (کاربر واقعی روی پنل): هر سه نوع تمدید + قطع دسترسی +
     بروزرسانی + کیوآر + فعال/غیرفعال + تغییر نام + تمدید خودکار + انتقال +
@@ -2235,7 +2236,7 @@ def _hub_counts(db) -> dict:
     if hit and now - hit[0] < 15.0:
         return hit[1]
     counts = {}
-    for hub, method in (("products", "get_pending_orders"), ("finance", "get_pending_topups")):
+    for hub, method in (("products", "get_orders_awaiting_review"), ("finance", "get_pending_topups")):
         try:
             counts[hub] = len(getattr(db, method)() or [])
         except Exception:
@@ -2708,6 +2709,7 @@ def admin_broadcast_target_kb() -> InlineKeyboardMarkup:
         [b("🧪 ارسال به کاربران فقط دارای اکانت تست", "adm_broadcast_target:test_only")],
         [b("📣 ارسال به کانال", "adm_broadcast_channel")],
         [b("❌ لغو ارسال", "adm_broadcast_stop"), b("⏳ وضعیت ارسال", "adm_broadcast_status")],
+        [b("📍 آن‌پین آخرین ارسال", "adm_broadcast_unpin")],
         [b("🎯 هدف‌گیری‌های دیگر", "adm_broadcast_adv")],
         [b("⬅️ بازگشت", "adm_cat:marketing")],
     ])

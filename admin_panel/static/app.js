@@ -395,6 +395,8 @@ const NAV_GROUPS = [
   ] },
   { id: 'customers', label: 'مشتریان و پشتیبانی', items: [
     { key: 'users', label: 'کاربران', icon: 'users', role: 'any' },
+    { key: 'subscriptions', label: 'اشتراک‌های فعال', icon: 'check', role: 'any' },
+    { key: 'user-groups', label: 'گروه‌بندی کاربران', icon: 'layers', role: 'any' },
     { key: 'tickets', label: 'تیکت‌ها', icon: 'tickets', role: 'any',
       subs: [['all', 'همه'], ['open', 'باز'], ['answered', 'پاسخ‌داده‌شده'], ['closed', 'بسته']] },
     { key: 'support', label: 'چت زنده', icon: 'support', role: 'any' },
@@ -1166,6 +1168,8 @@ async function renderPage(tab) {
       case 'orders': return await renderOrders();
       case 'topups': return await renderTopups();
       case 'users': return await renderUsers();
+      case 'subscriptions': return await renderSubscriptions();
+      case 'user-groups': return await renderUserGroups();
       case 'catalog': return await renderCatalog();
       case 'discounts': return await renderDiscounts();
       case 'tickets': return await renderTickets();
@@ -3159,6 +3163,214 @@ function renderTopupsBrutalist(topups, canAct) {
   }));
 }
 
+/* ======================================================= user groups === */
+let userGroupsState = { groupId: null, q: '', page: 1, selected: new Set() };
+const USER_GROUP_FIELDS = [
+  ['joined_at', 'تاریخ عضویت', 'date'],
+  ['purchase_date', 'تاریخ خرید تاییدشده (هر خرید)', 'date'],
+  ['last_purchase_at', 'تاریخ آخرین خرید تاییدشده', 'date'],
+  ['last_service_at', 'تاریخ آخرین ایجاد سرویس', 'date'],
+  ['service_expiry_at', 'تاریخ انقضای سرویس', 'date'],
+  ['purchase_count', 'تعداد خریدهای تاییدشده', 'number'],
+  ['total_purchase', 'مجموع مبلغ خرید (تومان)', 'number'],
+  ['wallet_balance', 'موجودی کیف پول (تومان)', 'number'],
+  ['topup_total', 'مجموع شارژ تاییدشده (تومان)', 'number'],
+  ['active_services', 'تعداد سرویس فعال', 'number'],
+  ['referrals_count', 'تعداد زیرمجموعه', 'number'],
+  ['telegram_id', 'آیدی عددی تلگرام', 'number'],
+  ['username', 'یوزرنیم', 'text'],
+  ['first_name', 'نام کاربر', 'text'],
+  ['is_blocked', 'وضعیت مسدودی', 'bool'],
+  ['phone_verified', 'وضعیت تایید موبایل', 'bool'],
+  ['service_type', 'نوع سرویس', 'service_type'],
+  ['service_status', 'وضعیت سرویس', 'service_status'],
+];
+const USER_GROUP_FIELD_META = Object.fromEntries(USER_GROUP_FIELDS.map(x => [x[0], { label: x[1], type: x[2] }]));
+const USER_GROUP_OPS = [
+  ['eq', 'برابر باشد'], ['ne', 'برابر نباشد'], ['contains', 'شامل باشد'], ['starts', 'شروع شود با'],
+  ['gt', 'بزرگ‌تر از'], ['gte', 'بزرگ‌تر یا مساوی'], ['lt', 'کوچک‌تر از'], ['lte', 'کوچک‌تر یا مساوی'],
+  ['between', 'بین دو مقدار'], ['empty', 'خالی باشد'], ['not_empty', 'خالی نباشد'],
+];
+function userGroupRuleValueHtml(field, value) {
+  const type = USER_GROUP_FIELD_META[field]?.type || 'text';
+  if (type === 'bool') return `<select class="input ug-value"><option value="1" ${String(value) === '1' || value === true ? 'selected' : ''}>بله</option><option value="0" ${String(value) === '0' || value === false ? 'selected' : ''}>خیر</option></select>`;
+  if (type === 'service_type') return `<select class="input ug-value"><option value="vpn">VPN (هر نوع)</option><option value="custom" ${value === 'custom' ? 'selected' : ''}>VPN اختصاصی</option><option value="bank" ${value === 'bank' ? 'selected' : ''}>بانک کانفیگ</option><option value="ssh" ${value === 'ssh' ? 'selected' : ''}>SSH</option><option value="none" ${value === 'none' ? 'selected' : ''}>بدون سرویس</option><option value="any" ${value === 'any' ? 'selected' : ''}>دارای هر سرویس</option></select>`;
+  if (type === 'service_status') return `<select class="input ug-value"><option value="active" ${value === 'active' ? 'selected' : ''}>دارای سرویس فعال</option><option value="expired" ${value === 'expired' ? 'selected' : ''}>فقط سرویس منقضی/غیرفعال</option><option value="none" ${value === 'none' ? 'selected' : ''}>بدون سرویس</option><option value="any" ${value === 'any' ? 'selected' : ''}>دارای سرویس</option></select>`;
+  const inputType = type === 'date' ? 'date' : type === 'number' ? 'number' : 'text';
+  return `<input class="input ug-value" type="${inputType}" value="${esc(value ?? '')}" placeholder="${type === 'date' ? 'تاریخ' : type === 'number' ? 'عدد' : 'مقدار'}">`;
+}
+function userGroupRuleRowHtml(rule = {}, idx = 0) {
+  const field = USER_GROUP_FIELD_META[rule.field] ? rule.field : 'joined_at';
+  const type = USER_GROUP_FIELD_META[field].type;
+  const validOps = {
+    text: ['eq','ne','contains','starts','empty','not_empty'],
+    number: ['eq','ne','gt','gte','lt','lte','between'],
+    date: ['eq','ne','gt','gte','lt','lte','between','empty','not_empty'],
+    bool: ['eq','ne'], service_type: ['eq','ne'], service_status: ['eq','ne'],
+  };
+  const allowedOps = USER_GROUP_OPS.filter(([op]) => (validOps[type] || validOps.text).includes(op));
+  return `<div class="ug-rule" data-index="${idx}">
+    <select class="input ug-field">${USER_GROUP_FIELDS.map(([v,l]) => `<option value="${v}" ${v === field ? 'selected' : ''}>${l}</option>`).join('')}</select>
+    <select class="input ug-op">${allowedOps.map(([v,l]) => `<option value="${v}" ${v === (rule.op || (type === 'date' ? 'gte' : 'eq')) ? 'selected' : ''}>${l}</option>`).join('')}</select>
+    <div class="ug-value-wrap">${userGroupRuleValueHtml(field, rule.value)}</div>
+    ${rule.op === 'between' ? `<input class="input ug-value2" type="${type === 'date' ? 'date' : 'number'}" value="${esc(rule.value2 ?? '')}" placeholder="تا">` : '<span class="ug-value2-placeholder"></span>'}
+    <button class="btn btn-ghost btn-sm ug-remove" type="button" title="حذف شرط">✕</button>
+  </div>`;
+}
+function groupRulesDescription(rules) {
+  const conditions = (rules && rules.conditions) || [];
+  if (!conditions.length) return 'بدون شرط؛ شامل همه‌ی کاربران';
+  const opNames = Object.fromEntries(USER_GROUP_OPS.map(([v,l]) => [v,l]));
+  const parts = conditions.map(r => {
+    const f = USER_GROUP_FIELD_META[r.field]?.label || r.field;
+    const v = r.field === 'service_type' ? ({vpn:'VPN',custom:'VPN اختصاصی',bank:'بانک کانفیگ',ssh:'SSH',none:'بدون سرویس',any:'هر سرویس'}[r.value] || r.value)
+      : r.field === 'service_status' ? ({active:'فعال',expired:'منقضی/غیرفعال',none:'بدون سرویس',any:'دارای سرویس'}[r.value] || r.value)
+      : r.field === 'is_blocked' || r.field === 'phone_verified' ? (String(r.value) === '1' ? 'بله' : 'خیر') : r.value;
+    return `${f} ${opNames[r.op] || ''} ${r.op === 'empty' || r.op === 'not_empty' ? '' : esc(v ?? '')}`;
+  });
+  return parts.join(rules.match === 'any' ? ' یا ' : ' و ');
+}
+async function renderUserGroups() {
+  if (userGroupsState.groupId) return renderUserGroupMembers();
+  const groups = await apiGet('/user-groups');
+  setContent(`
+    <div class="toolbar ug-toolbar"><div><h2 style="margin:0">گروه‌بندی کاربران</h2><div class="card-sub">ساخت گروه‌های پویا با شرط‌های دلخواه؛ اعضا با اطلاعات به‌روز دیتابیس محاسبه می‌شوند.</div></div>${hasPerm('users') ? '<button class="btn btn-primary" id="ug-create">＋ ساخت گروه جدید</button>' : ''}</div>
+    <div class="ug-grid">${groups.map(g => `<div class="card ug-card">
+      <div class="ug-card-head"><div><h3>${esc(g.name)}</h3><span class="badge">${fmt(g.member_count)} عضو</span></div><span class="ug-card-icon">👥</span></div>
+      <p class="card-sub">${esc(g.description || 'بدون توضیحات')}</p>
+      <div class="ug-rules-summary">${groupRulesDescription(g.rules)}</div>
+      <div class="ug-card-actions"><button class="btn btn-primary btn-sm" data-ug-open="${g.id}">مشاهده اعضا</button>${hasPerm('users') ? `<button class="btn btn-ghost btn-sm" data-ug-edit="${g.id}">ویرایش</button><button class="btn btn-ghost btn-sm" data-ug-delete="${g.id}">حذف</button>` : ''}</div>
+      <div class="ug-card-date">آخرین ویرایش: ${fmtDate(g.updated_at)}</div>
+    </div>`).join('') || `<div class="card empty-state">هنوز گروهی ساخته نشده است. برای شروع، «ساخت گروه جدید» را بزن.</div>`}</div>
+  `);
+  $('#ug-create')?.addEventListener('click', () => openUserGroupEditor());
+  $$('[data-ug-open]', content()).forEach(b => b.addEventListener('click', () => { userGroupsState.groupId = Number(b.dataset.ugOpen); userGroupsState.q = ''; userGroupsState.page = 1; userGroupsState.selected = new Set(); renderUserGroups(); }));
+  $$('[data-ug-edit]', content()).forEach(b => b.addEventListener('click', async () => { try { openUserGroupEditor(await apiGet(`/user-groups/${Number(b.dataset.ugEdit)}`)); } catch (e) { handleErr(e); } }));
+  $$('[data-ug-delete]', content()).forEach(b => b.addEventListener('click', async () => {
+    const id = Number(b.dataset.ugDelete); const g = groups.find(x => x.id === id);
+    if (!confirm(`گروه «${g?.name || ''}» حذف شود؟ کاربران و سرویس‌های آن تغییری نمی‌کنند.`)) return;
+    try { await apiDelete(`/user-groups/${id}`); toast('گروه حذف شد.'); renderUserGroups(); } catch (e) { handleErr(e); }
+  }));
+}
+function openUserGroupEditor(group = null) {
+  const isEdit = !!group;
+  let conditions = (group?.rules?.conditions || []).map(x => ({...x}));
+  if (!conditions.length) conditions = [{field:'joined_at',op:'gte',value:'',value2:''}];
+  openModal(isEdit ? 'ویرایش گروه کاربران' : 'ساخت گروه کاربران', `
+    <div class="ug-editor">
+      <label class="field"><span>نام گروه</span><input class="input" id="ug-name" maxlength="80" value="${esc(group?.name || '')}" placeholder="مثلاً خریداران ماه جاری"></label>
+      <label class="field"><span>توضیحات (اختیاری)</span><input class="input" id="ug-description" maxlength="500" value="${esc(group?.description || '')}" placeholder="هدف یا کاربرد این گروه"></label>
+      <div class="ug-condition-title"><b>شرط‌های عضویت</b><select class="input" id="ug-match"><option value="all" ${group?.rules?.match !== 'any' ? 'selected' : ''}>همه‌ی شرط‌ها برقرار باشند</option><option value="any" ${group?.rules?.match === 'any' ? 'selected' : ''}>حداقل یکی از شرط‌ها برقرار باشد</option></select></div>
+      <div id="ug-condition-list">${conditions.map(userGroupRuleRowHtml).join('')}</div>
+      <button class="btn btn-ghost btn-sm" id="ug-add-condition">＋ افزودن شرط</button>
+      <p class="card-sub">تاریخ‌ها با قالب روز/ماه/سال انتخاب می‌شوند. برای لینک یا نام سرویس، از جستجوی داخل گروه استفاده کن.</p>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px"><button class="btn btn-primary" id="ug-save">${isEdit ? 'ذخیره تغییرات' : 'ساخت گروه'}</button></div>
+    </div>
+  `, (body, close) => {
+    const list = $('#ug-condition-list', body);
+    const redraw = () => {
+      list.innerHTML = conditions.map(userGroupRuleRowHtml).join('');
+      $$('.ug-field', list).forEach(sel => sel.addEventListener('change', () => {
+        const row = sel.closest('.ug-rule'); const idx = Number(row.dataset.index); conditions[idx] = {field:sel.value,op:'eq',value:'',value2:''}; redraw();
+      }));
+      $$('.ug-value', list).forEach(input => input.addEventListener('change', () => { conditions[Number(input.closest('.ug-rule').dataset.index)].value = input.value; }));
+      $$('.ug-value2', list).forEach(input => input.addEventListener('change', () => { conditions[Number(input.closest('.ug-rule').dataset.index)].value2 = input.value; }));
+      $$('.ug-op', list).forEach(sel => sel.addEventListener('change', () => {
+        const row = sel.closest('.ug-rule'); const idx = Number(row.dataset.index);
+        conditions[idx].value = $('.ug-value', row)?.value ?? conditions[idx].value;
+        conditions[idx].value2 = $('.ug-value2', row)?.value ?? conditions[idx].value2;
+        conditions[idx].op = sel.value; redraw();
+      }));
+      $$('.ug-remove', list).forEach(btn => btn.addEventListener('click', () => { conditions.splice(Number(btn.closest('.ug-rule').dataset.index),1); redraw(); }));
+    };
+    redraw();
+    $('#ug-add-condition', body).addEventListener('click', () => { if (conditions.length >= 20) return toast('حداکثر ۲۰ شرط مجاز است.', true); conditions.push({field:'joined_at',op:'gte',value:'',value2:''}); redraw(); });
+    $('#ug-save', body).addEventListener('click', async () => {
+      const name = $('#ug-name', body).value.trim();
+      if (!name) return toast('نام گروه را وارد کن.', true);
+      const rules = {match:$('#ug-match', body).value,conditions:[]};
+      $$('.ug-rule', list).forEach(row => {
+        const field = $('.ug-field', row).value, op = $('.ug-op', row).value;
+        const value = $('.ug-value', row)?.value ?? '';
+        const value2 = $('.ug-value2', row)?.value ?? '';
+        if (op === 'empty' || op === 'not_empty' || value !== '') rules.conditions.push({field,op,value,value2});
+      });
+      const payload = {name,description:$('#ug-description', body).value.trim(),rules};
+      try {
+        if (isEdit) await apiPut(`/user-groups/${group.id}`, payload); else await apiPost('/user-groups', payload);
+        toast(isEdit ? 'گروه به‌روزرسانی شد.' : 'گروه ساخته شد.'); close(); userGroupsState.groupId = null; renderUserGroups();
+      } catch (e) { handleErr(e); }
+    });
+  }, {wide:true});
+}
+async function renderUserGroupMembers() {
+  const id = Number(userGroupsState.groupId);
+  const [groups, res] = await Promise.all([apiGet('/user-groups'), apiGet(`/user-groups/${id}/members?q=${encodeURIComponent(userGroupsState.q)}&page=${userGroupsState.page}`)]);
+  const group = groups.find(g => Number(g.id) === id);
+  if (!group) { userGroupsState.groupId = null; return renderUserGroups(); }
+  const pages = Math.max(Math.ceil(res.total / res.limit), 1);
+  const selected = userGroupsState.selected;
+  setContent(`
+    <div class="ug-detail-head"><div><button class="btn btn-ghost btn-sm" id="ug-back">← همه گروه‌ها</button><h2 style="margin:9px 0 4px">${esc(group.name)}</h2><div class="card-sub">${esc(group.description || groupRulesDescription(group.rules))}</div></div><div class="ug-detail-actions"><span class="badge">${fmt(res.total)} عضو</span>${hasPerm('users') ? '<button class="btn btn-ghost btn-sm" id="ug-edit-current">ویرایش گروه</button>' : ''}<button class="btn btn-ghost btn-sm" id="ug-export">خروجی CSV</button></div></div>
+    <div class="ug-rules-summary" style="margin:12px 0 16px">شرط‌ها: ${groupRulesDescription(group.rules)}</div>
+    <div class="toolbar"><input class="input" id="ug-member-search" value="${esc(userGroupsState.q)}" placeholder="جستجو در گروه: آیدی عددی، یوزرنیم، لینک اشتراک، نام کانفیگ..."/><button class="btn btn-ghost" id="ug-search">جستجو</button><button class="btn btn-ghost" id="ug-refresh">به‌روزرسانی</button></div>
+    <div class="card">
+      <div class="ug-selected-bar">${hasPerm('users') ? '<label><input type="checkbox" id="ug-select-page"> انتخاب اعضای همین صفحه</label>' : ''}<span>${selected.size} انتخاب شده</span>
+        ${hasPerm('users') ? `<button class="btn btn-sm" data-ug-action="message" ${selected.size ? '' : 'disabled'}>ارسال پیام</button>
+        <button class="btn btn-sm" data-ug-action="block" ${selected.size ? '' : 'disabled'}>مسدودسازی</button>
+        <button class="btn btn-sm" data-ug-action="unblock" ${selected.size ? '' : 'disabled'}>رفع مسدودی</button>
+        <button class="btn btn-sm" data-ug-action="wallet" ${selected.size ? '' : 'disabled'}>تغییر کیف پول</button>` : ''}
+      </div>
+      <div class="table-wrap"><table><thead><tr><th></th><th>آیدی</th><th>کاربر</th><th>وضعیت</th><th>خریدها</th><th>مجموع خرید</th><th>سرویس فعال</th><th>عضویت</th><th>آخرین خرید</th><th>جزئیات</th></tr></thead><tbody>
+        ${res.items.map(u => `<tr><td>${hasPerm('users') ? `<input type="checkbox" class="ug-user-check" value="${u.telegram_id}" ${selected.has(Number(u.telegram_id)) ? 'checked' : ''}>` : ''}</td><td class="mono">${u.telegram_id}</td><td>${esc(u.first_name || '—')} ${u.username ? `<span class="card-sub">@${esc(u.username)}</span>` : ''}</td><td>${u.is_blocked ? '<span class="badge badge-rejected">مسدود</span>' : '<span class="badge badge-approved">فعال</span>'}</td><td class="mono">${fmt(u.purchase_count)}</td><td class="mono">${fmt(u.total_purchase)}</td><td class="mono">${fmt(u.active_services)}</td><td class="mono">${fmtDate(u.joined_at)}</td><td class="mono">${fmtDate(u.last_purchase_at)}</td><td><button class="btn btn-ghost btn-sm" data-ug-detail="${u.telegram_id}">مشاهده</button></td></tr>`).join('') || '<tr><td colspan="10" class="empty-state">کاربری با این شرط‌ها یا عبارت جستجو پیدا نشد.</td></tr>'}
+      </tbody></table></div>
+      <div class="pager">${Array.from({length:pages},(_,i)=>i+1).map(p=>`<button class="btn btn-sm ${p===userGroupsState.page?'btn-primary':''}" data-ug-page="${p}">${p}</button>`).join('')}</div>
+    </div>
+  `);
+  $('#ug-back').addEventListener('click', () => { userGroupsState.groupId = null; userGroupsState.selected = new Set(); renderUserGroups(); });
+  $('#ug-edit-current')?.addEventListener('click', () => openUserGroupEditor(group));
+  const runSearch = () => { userGroupsState.q = $('#ug-member-search').value.trim(); userGroupsState.page = 1; renderUserGroupMembers(); };
+  $('#ug-search').addEventListener('click', runSearch);
+  $('#ug-member-search').addEventListener('keydown', e => { if (e.key === 'Enter') runSearch(); });
+  $('#ug-refresh').addEventListener('click', () => renderUserGroupMembers());
+  $('#ug-select-page').addEventListener('change', e => {
+    res.items.forEach(u => e.target.checked ? selected.add(Number(u.telegram_id)) : selected.delete(Number(u.telegram_id)));
+    renderUserGroupMembers();
+  });
+  $$('.ug-user-check', content()).forEach(ch => ch.addEventListener('change', () => { ch.checked ? selected.add(Number(ch.value)) : selected.delete(Number(ch.value)); renderUserGroupMembers(); }));
+  $$('[data-ug-page]', content()).forEach(b => b.addEventListener('click', () => { userGroupsState.page = Number(b.dataset.ugPage); renderUserGroupMembers(); }));
+  $$('[data-ug-detail]', content()).forEach(b => b.addEventListener('click', () => showUserDetail(Number(b.dataset.ugDetail))));
+  $$('[data-ug-action]', content()).forEach(b => b.addEventListener('click', async () => {
+    const action = b.dataset.ugAction, ids = [...selected]; if (!ids.length) return;
+    let payload = {action,user_ids:ids};
+    if (action === 'message') {
+      const message = prompt(`متن پیام برای ${ids.length} کاربر:`); if (!message?.trim()) return; payload.message = message.trim();
+    } else if (action === 'wallet') {
+      const raw = prompt(`مبلغ تغییر برای هر یک از ${ids.length} کاربر (تومان؛ برای کسر مبلغ منفی وارد کن):`); if (raw === null) return; payload.amount = Number(raw);
+      if (!Number.isInteger(payload.amount) || payload.amount === 0) return toast('مبلغ نامعتبر است.', true);
+    } else if (!confirm(`آیا ${action === 'block' ? 'مسدودسازی' : 'رفع مسدودی'} ${ids.length} کاربر انجام شود؟`)) return;
+    try {
+      const result = await apiPost(`/user-groups/${id}/actions`, payload);
+      toast(`عملیات انجام شد: ${result.succeeded} موفق، ${result.failed} ناموفق`);
+      userGroupsState.selected = new Set(); renderUserGroupMembers();
+    } catch (e) { handleErr(e); }
+  }));
+  $('#ug-export').addEventListener('click', async () => {
+    try {
+      const allRows = [];
+      const pageCount = Math.max(1, Math.min(200, Math.ceil(res.total / 25)));
+      for (let page = 1; page <= pageCount; page++) {
+        const all = await apiGet(`/user-groups/${id}/members?q=${encodeURIComponent(userGroupsState.q)}&page=${page}`);
+        allRows.push(...all.items);
+      }
+      const rows = [['telegram_id','username','first_name','is_blocked','purchase_count','total_purchase','active_services','joined_at','last_purchase_at'], ...allRows.map(u => [u.telegram_id,u.username||'',u.first_name||'',u.is_blocked?1:0,u.purchase_count,u.total_purchase,u.active_services,u.joined_at||'',u.last_purchase_at||''])];
+      const csv = '\uFEFF' + rows.map(r => r.map(v => `"${String(v ?? '').replace(/"/g,'""')}"`).join(',')).join('\r\n');
+      const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})); a.download = `user-group-${id}.csv`; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1500);
+      if (res.total > 5000) toast('به‌دلیل محدودیت خروجی، ۵۰۰۰ عضو اول دانلود شدند.');
+    } catch (e) { handleErr(e); }
+  });
+}
+
 /* ============================================================= users === */
 let usersState = { q: '', status: 'all', page: 1, sort: 'newest' };
 const USERS_STATUS_LABEL = { all: 'همه', active: 'فعال', expired: 'منقضی', blocked: 'مسدود' };
@@ -3214,6 +3426,231 @@ async function renderUsers() {
     try { await apiPost(`/users/${b.dataset.unblock}/unblock`); toast('رفع مسدودیت شد.'); renderUsers(); } catch (e) { handleErr(e); }
   }));
   $$('[data-detail]', content()).forEach(b => b.addEventListener('click', () => showUserDetail(Number(b.dataset.detail))));
+}
+
+/* ============================================== active subscriptions === */
+// لیست سراسری همه‌ی اشتراک‌ها (شخصی/پنل مستقیم، تست، بانک کانفیگ و SSH) با جستجو بر اساس
+// نام اشتراک، آی‌دی عددی کاربر یا یوزرنیم تلگرام و مدیریت کامل اشتراک و کاربر از یک‌جا.
+let subsState = { q: '', kind: 'all', status: 'active', sort: 'newest', page: 1 };
+let subsItems = [];
+const SUBS_KIND_LABEL = { custom: '🛡 شخصی', test: '🧪 تست', bank: '🏦 بانک کانفیگ', ssh: '🖥 SSH' };
+const SUBS_STATE_BADGE = { active: ['badge-approved', 'فعال'], expired: ['badge-pending', 'منقضی'], disabled: ['badge-rejected', 'غیرفعال'] };
+const SUBS_SORTS = [['newest', 'جدیدترین'], ['oldest', 'قدیمی‌ترین'], ['expiry_asc', 'نزدیک‌ترین انقضا'], ['expiry_desc', 'دورترین انقضا'], ['name', 'نام اشتراک']];
+
+function subsKindKey(it) { return it.kind === 'custom' && it.is_test ? 'test' : it.kind; }
+function subsUserLabel(it) { return it.user_username ? '@' + it.user_username : (it.user_first_name || String(it.user_id)); }
+function subsRemaining(iso) {
+  if (!iso || !String(iso).trim()) return 'نامحدود';
+  const t = Date.parse(String(iso).trim().replace(' ', 'T'));
+  if (isNaN(t)) return fmtDate(iso);
+  const days = Math.ceil((t - Date.now()) / 86400000);
+  return days > 0 ? `${fmt(days)} روز مانده` : (days === 0 ? 'امروز' : `${fmt(-days)} روز پیش منقضی شد`);
+}
+
+async function renderSubscriptions() {
+  const qs = `q=${encodeURIComponent(subsState.q)}&kind=${subsState.kind}&status=${subsState.status}&sort=${subsState.sort}&page=${subsState.page}`;
+  const res = await apiGet(`/subscriptions?${qs}`);
+  const pages = Math.max(Math.ceil(res.total / res.limit), 1);
+  if (subsState.page > pages) { subsState.page = pages; return renderSubscriptions(); }
+  subsItems = res.items;
+  const c = res.counts || {};
+  const allCount = (c.active || 0) + (c.expired || 0) + (c.disabled || 0);
+  const chip = (v, l, n) => `<button class="btn btn-sm ${subsState.status === v ? 'btn-primary' : ''}" data-sub-status="${v}">${l} (${fmt(n)})</button>`;
+  setContent(`
+    <div class="toolbar">
+      <input class="input" id="subs-search" placeholder="جستجو: نام اشتراک، آیدی عددی کاربر، یوزرنیم..." value="${esc(subsState.q)}">
+      <button class="btn btn-sm btn-primary" id="subs-search-btn">${svg('search')} جستجو</button>
+      <select class="input" id="subs-kind">
+        ${[['all', 'همه‌ی انواع'], ['custom', SUBS_KIND_LABEL.custom], ['test', SUBS_KIND_LABEL.test], ['bank', SUBS_KIND_LABEL.bank], ['ssh', SUBS_KIND_LABEL.ssh]].map(([v, l]) => `<option value="${v}" ${v === subsState.kind ? 'selected' : ''}>${l}</option>`).join('')}
+      </select>
+      <select class="input" id="subs-sort">
+        ${SUBS_SORTS.map(([v, l]) => `<option value="${v}" ${v === subsState.sort ? 'selected' : ''}>${l}</option>`).join('')}
+      </select>
+    </div>
+    <div class="toolbar" style="flex-wrap:wrap;gap:6px">
+      ${chip('active', 'فعال', c.active || 0)}${chip('expired', 'منقضی', c.expired || 0)}${chip('disabled', 'غیرفعال', c.disabled || 0)}${chip('all', 'همه', allCount)}
+    </div>
+    <div class="card">
+      <div class="table-wrap"><table>
+        <thead><tr><th>اشتراک</th><th>کاربر</th><th>حجم / مدت</th><th>انقضا</th><th>وضعیت</th><th>عملیات</th></tr></thead>
+        <tbody>${res.items.map((it, i) => {
+          const [bc, bl] = SUBS_STATE_BADGE[it.state] || ['badge-muted', it.state];
+          const kindKey = subsKindKey(it);
+          return `<tr>
+            <td><b>${esc(it.name)}</b><div style="opacity:.7;font-size:12px">${SUBS_KIND_LABEL[kindKey] || kindKey}${it.extra ? ' · ' + esc(it.extra) : ''}${it.auto_renew ? ' · 🔁' : ''}</div></td>
+            <td><a href="#" data-sub-user="${it.user_id}">${esc(subsUserLabel(it))}</a><div class="mono" style="font-size:12px;opacity:.7">${it.user_id}${it.user_blocked ? ' · 🚫 مسدود' : ''}</div></td>
+            <td class="mono">${it.kind === 'custom' ? `${it.volume_gb ? fmt(it.volume_gb) + ' گیگ' : 'نامحدود'} / ${it.duration_days > 0 ? fmt(it.duration_days) + ' روز' : 'نامحدود'}` : '—'}</td>
+            <td class="mono">${it.expires_at && String(it.expires_at).trim() ? fmtDate(it.expires_at) : '—'}<div style="opacity:.7;font-size:12px">${esc(subsRemaining(it.expires_at))}</div></td>
+            <td><span class="badge ${bc}">${bl}</span></td>
+            <td>
+              <button class="btn btn-ghost btn-sm" data-sub-manage="${i}">مدیریت</button>
+              ${it.link ? `<button class="btn btn-ghost btn-sm" data-sub-copy="${i}">کپی لینک</button>` : ''}
+            </td>
+          </tr>`;
+        }).join('') || `<tr><td colspan="6" class="empty-state"><div class="icon">${svg('empty')}</div>اشتراکی یافت نشد</td></tr>`}</tbody>
+      </table></div>
+      <div class="pager">
+        <button class="btn btn-sm" id="subs-prev" ${subsState.page <= 1 ? 'disabled' : ''}>قبلی</button>
+        <span class="mono" style="align-self:center">صفحه ${fmt(subsState.page)} از ${fmt(pages)} · ${fmt(res.total)} اشتراک</span>
+        <button class="btn btn-sm" id="subs-next" ${subsState.page >= pages ? 'disabled' : ''}>بعدی</button>
+      </div>
+    </div>
+  `);
+  const doSearch = () => { subsState.q = $('#subs-search').value.trim(); subsState.page = 1; renderSubscriptions(); };
+  $('#subs-search').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+  $('#subs-search-btn').addEventListener('click', doSearch);
+  $('#subs-kind').addEventListener('change', e => { subsState.kind = e.target.value; subsState.page = 1; renderSubscriptions(); });
+  $('#subs-sort').addEventListener('change', e => { subsState.sort = e.target.value; subsState.page = 1; renderSubscriptions(); });
+  $$('[data-sub-status]', content()).forEach(b => b.addEventListener('click', () => { subsState.status = b.dataset.subStatus; subsState.page = 1; renderSubscriptions(); }));
+  $('#subs-prev').addEventListener('click', () => { subsState.page = Math.max(1, subsState.page - 1); renderSubscriptions(); });
+  $('#subs-next').addEventListener('click', () => { subsState.page += 1; renderSubscriptions(); });
+  $$('[data-sub-user]', content()).forEach(a => a.addEventListener('click', e => { e.preventDefault(); showUserDetail(Number(a.dataset.subUser)); }));
+  $$('[data-sub-manage]', content()).forEach(b => b.addEventListener('click', () => openSubscriptionManager(subsItems[Number(b.dataset.subManage)])));
+  $$('[data-sub-copy]', content()).forEach(b => b.addEventListener('click', async () => {
+    const it = subsItems[Number(b.dataset.subCopy)];
+    try { await navigator.clipboard.writeText(it.link); toast('لینک کپی شد.'); } catch (e) { toast('کپی ناموفق بود.', true); }
+  }));
+}
+
+function openSubscriptionManager(it) {
+  if (!it) return;
+  const canManage = hasPerm('users');
+  const kindKey = subsKindKey(it);
+  const [bc, bl] = SUBS_STATE_BADGE[it.state] || ['badge-muted', it.state];
+  const act = (a, label, cls = '') => `<button class="btn btn-sm ${cls}" data-sm-act="${a}">${label}</button>`;
+  let subBtns = '';
+  if (canManage) {
+    if (it.kind === 'custom' && !it.is_test) {
+      subBtns = act('toggle', it.state === 'disabled' ? '✅ فعال‌سازی' : '⏸ غیرفعال‌سازی')
+        + act('rename', '✏️ تغییر نام')
+        + (it.duration_days > 0 ? act('autorenew', it.auto_renew ? '🔁 خاموش‌کردن تمدید خودکار' : '🔁 روشن‌کردن تمدید خودکار') : '')
+        + act('transfer', '📤 انتقال به کاربر دیگر')
+        + act('cut', '✂️ قطع دسترسی و لینک جدید')
+        + act('history', '🕘 تاریخچه')
+        + act('delete', '🗑 حذف', 'btn-danger');
+    } else if (it.kind === 'custom') {
+      subBtns = act('history', '🕘 تاریخچه') + act('delete', '🗑 حذف', 'btn-danger');
+    } else if (it.kind === 'bank') {
+      subBtns = act('toggle', it.state === 'disabled' ? '✅ فعال‌سازی' : '⏸ غیرفعال‌سازی')
+        + act('history', '🕘 فعالیت‌ها')
+        + act('delete', '🗑 حذف', 'btn-danger');
+    } else if (it.kind === 'ssh') {
+      subBtns = act('toggle', it.state === 'disabled' ? '✅ فعال‌سازی' : '⏸ غیرفعال‌سازی')
+        + act('delete', '🗑 حذف', 'btn-danger');
+    }
+  }
+  const userBtns = act('user-detail', '👤 پروفایل و مدیریت کامل کاربر', 'btn-primary')
+    + (canManage ? (it.user_blocked ? act('unblock', '✅ رفع مسدودی کاربر') : act('block', '🚫 مسدودسازی کاربر', 'btn-danger'))
+      + act('message', '✉️ ارسال پیام') + act('wallet', '💰 تغییر کیف پول') : '');
+  const rows = [
+    ['نام اشتراک', esc(it.name)],
+    ['نوع', `${SUBS_KIND_LABEL[kindKey] || kindKey}${it.extra ? ' · ' + esc(it.extra) : ''}`],
+    ['کاربر', `${esc(subsUserLabel(it))} <span class="mono">(${it.user_id})</span>`],
+    ['وضعیت', `<span class="badge ${bc}">${bl}</span>${it.auto_renew ? ' · تمدید خودکار فعال' : ''}`],
+    ['حجم / مدت', it.kind === 'custom' ? `${it.volume_gb ? fmt(it.volume_gb) + ' گیگ' : 'نامحدود'} / ${it.duration_days > 0 ? fmt(it.duration_days) + ' روز' : 'نامحدود'}` : '—'],
+    ['ساخت', it.created_at ? fmtDate(it.created_at) : '—'],
+    ['انقضا', `${it.expires_at && String(it.expires_at).trim() ? fmtDate(it.expires_at) : '—'} (${esc(subsRemaining(it.expires_at))})`],
+    ['موجودی کیف پول کاربر', `${fmt(it.user_wallet)} تومان`],
+  ];
+  openModal(`مدیریت اشتراک: ${esc(it.name)}`, `
+    <div class="table-wrap"><table><tbody>${rows.map(([k, v]) => `<tr><th style="width:38%">${k}</th><td>${v}</td></tr>`).join('')}</tbody></table></div>
+    ${it.link ? `<label class="field"><span>لینک اشتراک</span><div style="display:flex;gap:6px"><input class="input mono" readonly dir="ltr" value="${esc(it.link)}" id="sm-link"><button class="btn btn-sm" data-sm-act="copy">کپی</button></div></label>` : ''}
+    ${subBtns ? `<h4 class="ud-section-title">عملیات اشتراک</h4><div style="display:flex;flex-wrap:wrap;gap:8px">${subBtns}</div>` : ''}
+    <h4 class="ud-section-title">عملیات کاربر</h4><div style="display:flex;flex-wrap:wrap;gap:8px">${userBtns}</div>
+  `, (body, close) => {
+    $$('[data-sm-act]', body).forEach(btn => btn.addEventListener('click', async () => {
+      try {
+        const done = await runSubscriptionAction(it, btn.dataset.smAct, close);
+        if (done) { toast('انجام شد.'); close(); renderSubscriptions(); }
+      } catch (e) { handleErr(e); }
+    }));
+  }, { wide: true });
+}
+
+// خروجی true یعنی عملیات تغییر داده و لیست باید تازه شود؛ false یعنی چیزی تغییر نکرده.
+async function runSubscriptionAction(it, action, close) {
+  const id = it.id, uid = it.user_id;
+  if (action === 'copy') { await navigator.clipboard.writeText(it.link); toast('لینک کپی شد.'); return false; }
+  if (action === 'user-detail') { close(); showUserDetail(Number(uid)); return false; }
+  if (action === 'block') { if (!confirm('این کاربر مسدود شود؟')) return false; await apiPost(`/users/${uid}/block`); return true; }
+  if (action === 'unblock') { await apiPost(`/users/${uid}/unblock`); return true; }
+  if (action === 'message') {
+    const text = (prompt('متن پیام برای کاربر:') || '').trim();
+    if (!text) return false;
+    await apiPost(`/users/${uid}/message`, { text });
+    toast('پیام ارسال شد.');
+    return false;
+  }
+  if (action === 'wallet') {
+    const raw = prompt('مبلغ تغییر کیف پول به تومان (عدد منفی = کسر):');
+    const delta = Number(String(raw || '').replace(/[,\s]/g, ''));
+    if (!raw || !Number.isFinite(delta) || !delta) return false;
+    await apiPost(`/users/${uid}/wallet`, { delta });
+    return true;
+  }
+  if (it.kind === 'custom') {
+    if (action === 'toggle') { await apiPost(`/custom-configs/${id}/toggle`); return true; }
+    if (action === 'rename') {
+      const newName = prompt('نام جدید کانفیگ (فقط حروف انگلیسی، عدد و آندرلاین، ۳ تا ۲۰ کاراکتر):');
+      if (!newName) return false;
+      await apiPost(`/custom-configs/${id}/rename`, { new_name: newName });
+      return true;
+    }
+    if (action === 'autorenew') { await apiPost(`/custom-configs/${id}/auto-renew`, { enabled: !it.auto_renew }); return true; }
+    if (action === 'transfer') {
+      const targetId = prompt('آی‌دی عددی تلگرام کاربر مقصد:');
+      if (!targetId || !/^\d+$/.test(targetId.trim())) { if (targetId) toast('آی‌دی عددی نامعتبر است.', true); return false; }
+      if (!confirm('این عملیات غیرقابل بازگشت است. ادامه می‌دهید؟')) return false;
+      await apiPost(`/custom-configs/${id}/transfer`, { target_telegram_id: parseInt(targetId.trim(), 10) });
+      return true;
+    }
+    if (action === 'cut') {
+      if (!confirm('لینک فعلی از کار می‌افتد و لینک جدیدی با همان حجم/زمان باقی‌مانده صادر می‌شود. ادامه می‌دهید؟')) return false;
+      await apiPost(`/custom-configs/${id}/cut-access`);
+      return true;
+    }
+    if (action === 'history') {
+      const rows = await apiGet(`/custom-configs/${id}/history`);
+      openModal('تاریخچه‌ی سرویس', rows.length
+        ? `<div class="table-wrap"><table><thead><tr><th>رویداد</th><th>جزئیات</th><th>تاریخ</th></tr></thead><tbody>${rows.map(r => `<tr><td>${esc(SVC_EVENT_LABEL[r.event_type] || r.event_type)}</td><td>${esc(r.detail || '-')}</td><td class="mono">${fmtDate(r.created_at)}</td></tr>`).join('')}</tbody></table></div>`
+        : `<div class="empty-state">${svg('empty')}<div>تاریخچه‌ای ثبت نشده.</div></div>`);
+      return false;
+    }
+    if (action === 'delete') {
+      if (!confirm('این سرویس برای همیشه از پنل VPN و از این کاربر حذف می‌شود و غیرقابل بازگشت است. ادامه می‌دهید؟')) return false;
+      await apiDelete(`/custom-configs/${id}`);
+      return true;
+    }
+  }
+  if (it.kind === 'bank') {
+    if (action === 'toggle') { await apiPost(`/user-configs/${id}/disable`, { disabled: it.state !== 'disabled' }); return true; }
+    if (action === 'history') {
+      const rows = await apiGet(`/user-configs/${id}/activity`);
+      openModal('فعالیت‌های کانفیگ', rows.length
+        ? `<div class="table-wrap"><table><thead><tr><th>رویداد</th><th>جزئیات</th><th>تاریخ</th></tr></thead><tbody>${rows.map(r => `<tr><td>${esc(r.action)}</td><td>${esc(r.details || '-')}</td><td class="mono">${fmtDate(r.created_at)}</td></tr>`).join('')}</tbody></table></div>`
+        : `<div class="empty-state">${svg('empty')}<div>فعالیتی ثبت نشده.</div></div>`);
+      return false;
+    }
+    if (action === 'delete') {
+      if (!confirm('این کانفیگ برای همیشه حذف می‌شود و این عملیات غیرقابل بازگشت است. ادامه می‌دهید؟')) return false;
+      await apiDelete(`/user-configs/${id}`);
+      return true;
+    }
+  }
+  if (it.kind === 'ssh') {
+    const sshAct = action === 'toggle' ? (it.state === 'disabled' ? 'enable' : 'disable') : action;
+    if (!['enable', 'disable', 'delete'].includes(sshAct)) return false;
+    if (sshAct === 'delete' && !confirm('حساب SSH حذف شود؟')) return false;
+    try {
+      await apiPost(`/subscriptions/ssh/${encodeURIComponent(it.sid)}/action`, { action: sshAct });
+    } catch (e) {
+      if (sshAct === 'delete' && confirm(`${e.message}\n\nحذف اجباری (فقط از پنل، بدون تماس با نود) انجام شود؟`)) {
+        await apiPost(`/subscriptions/ssh/${encodeURIComponent(it.sid)}/action`, { action: 'delete', force: true });
+      } else { throw e; }
+    }
+    return true;
+  }
+  return false;
 }
 
 /* ---------------------------------------------------------- users: bento */
@@ -3878,12 +4315,22 @@ function openCategoryCreateModal(categories, presetParent = null) {
     });
   });
 }
+// رنگ دکمه‌ی دسته‌بندی در بات/مینی‌اپ (خالی = پیش‌فرض)
+const CAT_COLOR_OPTIONS = [['', '⚪ پیش‌فرض', ''], ['primary', '🔵 آبی', '#2563eb'], ['success', '🟢 سبز', '#16a34a'], ['danger', '🔴 قرمز', '#dc2626']];
+function catColorValue(c) { return String((c && c.button_color) || ''); }
+function catColorHex(v) { const o = CAT_COLOR_OPTIONS.find(x => x[0] === String(v || '')); return o ? o[2] : ''; }
+function catColorSelectHtml(c, attrs = '') {
+  const cur = catColorValue(c);
+  const hex = catColorHex(cur);
+  return `<select class="input" ${attrs} title="رنگ دکمه‌ی این دسته در بات" style="width:auto;min-width:96px;padding:4px 6px;${hex ? `border-inline-start:6px solid ${hex}` : ''}">${CAT_COLOR_OPTIONS.map(([v, l]) => `<option value="${v}" ${v === cur ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
+}
 function catOrderButtonsHtml(c, categories, cls = 'btn btn-sm') {
   const sibs = categories.filter(x => (x.parent_id || null) === (c.parent_id || null));
   const i = sibs.findIndex(x => x.id === c.id);
   return `<button class="${cls}" data-cat-up="${c.id}" ${i <= 0 ? 'disabled' : ''} title="بالا">▲</button>
     <button class="${cls}" data-cat-down="${c.id}" ${i === sibs.length - 1 ? 'disabled' : ''} title="پایین">▼</button>
     <button class="${cls}" data-add-subcat="${c.id}" title="افزودن زیردسته">＋ زیردسته</button>
+    ${catColorSelectHtml(c, `data-cat-color="${c.id}"`)}
     <button class="${cls}" data-edit-cat="${c.id}">✏️ ویرایش</button>`;
 }
 function wireCategoryActions(body, categories, basePath = '/categories') {
@@ -3894,6 +4341,11 @@ function wireCategoryActions(body, categories, basePath = '/categories') {
     try { await apiPost(`${basePath}/${id}/move`, { direction }); reload(); } catch (e) { handleErr(e); }
   }));
   $$('[data-add-subcat]', body).forEach(btn => btn.addEventListener('click', () => openCategoryCreateModal(categories, Number(btn.dataset.addSubcat))));
+  $$('[data-cat-color]', body).forEach(sel => sel.addEventListener('change', async () => {
+    const cat = categories.find(x => x.id === Number(sel.dataset.catColor));
+    if (!cat) return;
+    try { await apiPut(`${basePath}/${cat.id}`, { name: cat.name, button_color: sel.value }); toast('رنگ دکمه ذخیره شد.'); reload(); } catch (e) { handleErr(e); }
+  }));
   $$('[data-edit-cat]', body).forEach(btn => btn.addEventListener('click', () => {
     const cat = categories.find(x => x.id === Number(btn.dataset.editCat));
     if (!cat) return;
@@ -3902,7 +4354,8 @@ function wireCategoryActions(body, categories, basePath = '/categories') {
       <label class="field"><span>📂 دسته‌ی والد</span><select class="input" id="cat-edit-parent">${catParentOptionsHtml(categories, cat.parent_id, cat.id)}</select></label>
       ${basePath === '/categories' ? `
       <label class="field"><span>😀 ایموجی دکمه‌ی دسته در بات (خالی = پیش‌فرض، - = بدون ایموجی)</span><input class="input" id="cat-edit-emoji" maxlength="16" value="${esc(cat.emoji || '')}"></label>
-      <label class="field"><span>🏷 ایموجی محصولات این دسته در بات (خالی = پیش‌فرض، - = بدون ایموجی)</span><input class="input" id="cat-edit-prod-emoji" maxlength="16" value="${esc(cat.product_emoji || '')}"></label>` : ''}
+      <label class="field"><span>🏷 ایموجی محصولات این دسته در بات (خالی = پیش‌فرض، - = بدون ایموجی)</span><input class="input" id="cat-edit-prod-emoji" maxlength="16" value="${esc(cat.product_emoji || '')}"></label>
+      <label class="field"><span>🎨 رنگ دکمه‌ی این دسته (در بات و مینی‌اپ)</span>${catColorSelectHtml(cat, 'id="cat-edit-color"')}</label>` : ''}
       <button class="btn btn-primary" id="cat-edit-save">ذخیره</button></div>`, (b, close) => {
       $('#cat-edit-save', b).addEventListener('click', async () => {
         const name = $('#cat-edit-name', b).value.trim();
@@ -3912,6 +4365,7 @@ function wireCategoryActions(body, categories, basePath = '/categories') {
         if (basePath === '/categories') {
           payload.emoji = $('#cat-edit-emoji', b).value.trim();
           payload.product_emoji = $('#cat-edit-prod-emoji', b).value.trim();
+          payload.button_color = $('#cat-edit-color', b).value;
         }
         try { await apiPut(`${basePath}/${cat.id}`, payload); toast('ویرایش شد.'); close(); reload(); } catch (e) { handleErr(e); }
       });
@@ -4046,7 +4500,8 @@ function productProvisionFieldsHtml(panelServers, sshNodes = [], prefill = null)
   const isMulti = extraPanels.length + extraNodes.length > 0;
   const selPanels = isMulti ? [Number(prefill.provision_server_id || 0), ...extraPanels].filter(Boolean) : [];
   const selNodes = isMulti ? [Number(prefill.provision_ssh_node_id || 0), ...extraNodes].filter(Boolean) : [];
-  const target = isMulti ? 'multi' : (prefill && prefill.provision_ssh_node_id ? (prefill.provision_server_id ? 'both' : 'ssh') : 'vpn');
+  const selectedProvisionPanel = panelServers.find(s => Number(s.id) === Number(prefill && prefill.provision_server_id));
+  const target = isMulti ? 'multi' : (prefill && prefill.provision_ssh_node_id ? (prefill.provision_server_id ? 'both' : 'ssh') : (selectedProvisionPanel && selectedProvisionPanel.panel_type === 'stealth' ? 'vless' : 'vpn'));
   const comboLocked = !catalogDsubEnabled;
   const durUnlimited = !!(prefill && prefill.duration_days === 0);
   const volUnlimited = !!(prefill && prefill.auto_provision_volume_gb === 0);
@@ -4056,7 +4511,7 @@ function productProvisionFieldsHtml(panelServers, sshNodes = [], prefill = null)
       <label style="display:flex;align-items:center;gap:4px"><input type="radio" name="prod-source" value="direct" ${isDirect ? 'checked' : ''}> ساخت خودکار</label>
     </div>
     <div id="prod-direct-fields" class="form-grid" style="display:${isDirect ? '' : 'none'}">
-      <label class="field"><span>نوع مقصد</span><select class="input" id="prod-target-type"><option value="vpn" ${target === 'vpn' ? 'selected' : ''}>پنل VPN</option>${sshNodes.length || (prefill && prefill.provision_ssh_node_id) ? `<option value="ssh" ${target === 'ssh' ? 'selected' : ''}>نود SSH (Linux Agent)</option><option value="both" ${target === 'both' ? 'selected' : ''} ${comboLocked && target !== 'both' ? 'disabled' : ''}>ترکیبی VPN + SSH (حجم و زمان مشترک)${comboLocked ? ' — نیازمند ساب اختصاصی فعال' : ''}</option>` : ''}<option value="multi" ${target === 'multi' ? 'selected' : ''} ${comboLocked && target !== 'multi' ? 'disabled' : ''}>چند پنل / چند نود (حجم و زمان مشترک)${comboLocked ? ' — نیازمند ساب اختصاصی فعال' : ''}</option></select><span class="card-sub" id="prod-multi-hint" style="display:${comboLocked ? '' : 'none'}">ترکیب و چند مقصدی فقط وقتی ساب اختصاصی فعال باشد کار می‌کند.</span></label>
+      <label class="field"><span>نوع مقصد</span><select class="input" id="prod-target-type"><option value="vpn" ${target === 'vpn' ? 'selected' : ''}>پنل VPN</option>${panelServers.some(s => s.panel_type === 'stealth') ? `<option value="vless" ${target === 'vless' ? 'selected' : ''}>نود VLESS</option>` : ''}${sshNodes.length || (prefill && prefill.provision_ssh_node_id) ? `<option value="ssh" ${target === 'ssh' ? 'selected' : ''}>نود SSH (Linux Agent)</option><option value="both" ${target === 'both' ? 'selected' : ''} ${comboLocked && target !== 'both' ? 'disabled' : ''}>ترکیبی VPN + SSH (حجم و زمان مشترک)${comboLocked ? ' — نیازمند ساب اختصاصی فعال' : ''}</option>` : ''}<option value="multi" ${target === 'multi' ? 'selected' : ''} ${comboLocked && target !== 'multi' ? 'disabled' : ''}>چند پنل / چند نود (حجم و زمان مشترک)${comboLocked ? ' — نیازمند ساب اختصاصی فعال' : ''}</option></select><span class="card-sub" id="prod-multi-hint" style="display:${comboLocked ? '' : 'none'}">ترکیب و چند مقصدی فقط وقتی ساب اختصاصی فعال باشد کار می‌کند.</span></label>
       <div id="prod-multi-fields" style="display:${target === 'multi' ? '' : 'none'}">
         <div class="card-sub">پنل‌های VPN (هر تعداد)</div>
         ${panelServers.map(s2 => `<label class="field field-row"><span>${esc(s2.name)}</span><input type="checkbox" class="prod-multi-panel" value="${s2.id}" ${selPanels.includes(Number(s2.id)) ? 'checked' : ''}></label>`).join('') || '<div class="card-sub">پنلی نیست</div>'}
@@ -4065,7 +4520,7 @@ function productProvisionFieldsHtml(panelServers, sshNodes = [], prefill = null)
         ${sshNodes.map(n2 => `<label class="field field-row"><span>${esc(n2.name)} · ${esc(n2.host || '')}</span><input type="checkbox" class="prod-multi-node" value="${n2.id}" data-protocols="${esc((n2.protocols || ['ssh']).join(','))}" ${selNodes.includes(Number(n2.id)) ? 'checked' : ''}></label>`).join('') || '<div class="card-sub">نودی نیست</div>'}
         <span class="card-sub">حجم و زمان بین همه‌ی مقصدها مشترک است و خروجی همه در یک لینک ساب اختصاصی ادغام می‌شود.</span>
       </div>
-      <div id="prod-vpn-fields" style="display:${(target === 'ssh' || target === 'multi') ? 'none' : ''}"><label class="field"><span>پنل VPN</span><select class="input" id="prod-server">${panelServers.map(s => `<option value="${s.id}" ${prefill && Number(prefill.provision_server_id) === Number(s.id) ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label><div id="prod-target-picker"></div></div>
+      <div id="prod-vpn-fields" style="display:${(target === 'ssh' || target === 'multi') ? 'none' : ''}"><label class="field"><span id="prod-server-label">${target === 'vless' ? 'نود VLESS' : 'پنل VPN'}</span><select class="input" id="prod-server">${panelServers.map(s => `<option value="${s.id}" data-panel-type="${esc(s.panel_type || '')}" ${prefill && Number(prefill.provision_server_id) === Number(s.id) ? 'selected' : ''}>${s.panel_type === 'stealth' ? 'VLESS · ' : ''}${esc(s.name)}</option>`).join('')}</select></label><div id="prod-target-picker"></div></div>
       <div id="prod-ssh-fields" style="display:${(target === 'ssh' || target === 'both' || target === 'multi') ? '' : 'none'}"><label class="field" id="prod-ssh-node-field" style="display:${target === 'multi' ? 'none' : ''}"><span>نود SSH</span><select class="input" id="prod-ssh-node">${sshNodes.map(n => `<option value="${n.id}" data-protocols="${esc((n.protocols || ['ssh']).join(','))}" ${prefill && Number(prefill.provision_ssh_node_id) === Number(n.id) ? 'selected' : ''}>${esc(n.name)} · ${esc(n.host || '')}</option>`).join('')}</select><span class="card-sub">فقط Linux Agent فعال با حسابداری معتبر پشتیبانی می‌شود.</span></label>
       <div id="prod-proto-wrap" style="display:${(target === 'multi' || target === 'both') ? '' : 'none'}">
         <div class="card-sub">پروتکل‌های حساب SSH (هر تعداد)</div>
@@ -4134,6 +4589,24 @@ function wireProductProvisionToggle(b) {
     if (df) df.style.display = $('input[name="prod-source"]:checked', b).value === 'direct' ? '' : 'none';
   }));
   const targetType = $('#prod-target-type', b);
+  const syncPanelOptions = () => {
+    const sel = $('#prod-server', b);
+    if (!sel) return;
+    const tt = targetType ? targetType.value : 'vpn';
+    const allowed = tt === 'vless' ? 'stealth-only' : (tt === 'vpn' ? 'non-stealth' : null);
+    const current = sel.value;
+    let first = '';
+    [...sel.options].forEach(opt => {
+      const typ = opt.dataset.panelType || '';
+      const show = !allowed || (allowed === 'stealth-only' ? typ === 'stealth' : typ !== 'stealth');
+      opt.hidden = !show;
+      opt.disabled = !show;
+      if (show && !first) first = opt.value;
+    });
+    if (sel.selectedOptions[0]?.disabled) sel.value = first;
+    const label = $('#prod-server-label', b);
+    if (label) label.textContent = tt === 'vless' ? 'نود VLESS' : (tt === 'vpn' ? 'پنل VPN' : 'پنل VPN / VLESS');
+  };
   const syncUserLimit = () => {
     const wrap = $('#prod-user-limit-fields', b);
     if (!wrap) return;
@@ -4141,7 +4614,7 @@ function wireProductProvisionToggle(b) {
     const serverData = (window.__productPanelServers || []);
     let ids = [];
     if (tt === 'multi') ids = $$('.prod-multi-panel:checked', b).map(c => Number(c.value));
-    else if (tt === 'both' || tt === 'vpn') { const v = Number($('#prod-server', b)?.value || 0); if (v) ids=[v]; }
+    else if (tt === 'both' || tt === 'vpn' || tt === 'vless') { const v = Number($('#prod-server', b)?.value || 0); if (v) ids=[v]; }
     const rows = ids.map(id => serverData.find(s => Number(s.id) === id)).filter(Boolean);
     const supported = rows.length > 0 && rows.every(s => !!s.supports_user_limit);
     wrap.style.display = supported ? '' : 'none';
@@ -4191,6 +4664,8 @@ function wireProductProvisionToggle(b) {
   }
   if (targetType) targetType.addEventListener('change', () => {
     const t = targetType.value;
+    syncPanelOptions();
+    if ($('#prod-server', b)) loadProductPanelTargetPicker(b, $('#prod-server', b).value, []).catch(() => {});
     if ($('#prod-vpn-fields', b)) $('#prod-vpn-fields', b).style.display = (t === 'ssh' || t === 'multi') ? 'none' : '';
     if ($('#prod-ssh-fields', b)) $('#prod-ssh-fields', b).style.display = (t === 'ssh' || t === 'both' || t === 'multi') ? '' : 'none';
     if ($('#prod-ssh-node-field', b)) $('#prod-ssh-node-field', b).style.display = t === 'multi' ? 'none' : '';
@@ -4221,6 +4696,7 @@ function wireProductProvisionToggle(b) {
     });
     loadProductPanelTargetPicker(b, prodServer.value, productTargetValuesFromConfig(window.__productPrefillTargetConfig, prodServer.value)).catch(() => {});
   }
+  syncPanelOptions();
   syncUserLimit();
   const volUnlimitedCb = $('#prod-volume-unlimited', b);
   if (volUnlimitedCb) volUnlimitedCb.addEventListener('change', () => {
@@ -4519,7 +4995,7 @@ async function renderCatalog() {
         </div>
         ${esc(p.name)}
       </td><td>${esc(p.category_name)}</td><td class="mono">${fmt(p.price)}</td>
-      <td class="mono">${p.is_auto_provision ? `<span class="chip">${((p.extra_panel_ids || []).length + (p.extra_ssh_node_ids || []).length) ? 'چندمقصدی' : (p.provision_ssh_node_id ? 'SSH خودکار' : (p.provision_server_id ? 'VPN مستقیم' : 'خودکار'))}</span>` : fmt(p.stock)}</td>
+      <td class="mono">${p.is_auto_provision ? `<span class="chip">${((p.extra_panel_ids || []).length + (p.extra_ssh_node_ids || []).length) ? 'چندمقصدی' : (p.provision_ssh_node_id ? 'SSH خودکار' : (p.provision_server_id ? (p.provision_panel_type === 'stealth' ? 'VLESS خودکار' : 'VPN مستقیم') : 'خودکار'))}</span>` : fmt(p.stock)}</td>
       <td>${p.is_active ? '<span class="badge badge-approved">فعال</span>' : '<span class="badge badge-rejected">غیرفعال</span>'}</td>
       <td>
         ${!p.is_auto_provision ? `<button class="btn btn-sm" data-configs="${p.id}">بانک کانفیگ</button>` : ''}
@@ -4653,7 +5129,7 @@ function renderCatalogBento(categories, products, panelServers, sshNodes, paymen
             <span class="bw-value mono" style="font-size:18px">${fmt(p.price)} ت</span>
           </div>
           <div class="bn-row-title" style="font-size:14px">${esc(p.name)}</div>
-          <div class="bn-row-sub">${esc(p.category_name)} · ${p.provision_ssh_node_id ? 'SSH خودکار' : (p.provision_server_id ? 'VPN مستقیم' : (p.is_auto_provision ? 'خودکار' : 'موجودی: '+fmt(p.stock)))}</div>
+          <div class="bn-row-sub">${esc(p.category_name)} · ${p.provision_ssh_node_id ? 'SSH خودکار' : (p.provision_server_id ? (p.provision_panel_type === 'stealth' ? 'VLESS خودکار' : 'VPN مستقیم') : (p.is_auto_provision ? 'خودکار' : 'موجودی: '+fmt(p.stock)))}</div>
           ${bnPill(p.is_active ? 'فعال' : 'غیرفعال', p.is_active ? 'ok' : 'no')}
           <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
             ${!p.is_auto_provision ? `<button class="bn-btn bn-btn-ghost" data-configs="${p.id}">بانک کانفیگ</button>` : ''}
@@ -6477,30 +6953,84 @@ async function renderSalesSettings() {
 
 /* ======================================================== banners === */
 
+const BANNER_NAV_OPTIONS = [
+  ['store', '🛒 فروشگاه (خرید سرویس)'], ['services', '🛡 سرویس‌های من'], ['wallet', '💳 کیف پول'],
+  ['profile', '👤 حساب کاربری'], ['support', '💬 پشتیبانی'], ['referral', '🤝 دعوت دوستان'],
+  ['test', '🧪 کانفیگ تست رایگان'], ['wheel', '🎡 چرخ شانس'], ['home', '🏠 صفحه‌ی خانه'],
+];
+const BANNER_BG_PRESETS = [
+  'linear-gradient(120deg, #0d1a12, #123a20 55%, #17532c)',
+  'linear-gradient(120deg, #2b1608, #4d2510 55%, #7a3a14)',
+  'linear-gradient(120deg, #0d1420, #142845 55%, #1c3f6e)',
+  'linear-gradient(120deg, #150c22, #2a1440 55%, #431f66)',
+  'linear-gradient(120deg, #2a0d16, #4d1027 55%, #7a1b45)',
+  'linear-gradient(120deg, #1a1405, #3d2f0a 55%, #5e480f)',
+];
+
 async function renderBanners() {
-  const banners = await apiGet('/banners');
+  let list = await apiGet('/banners');
+
   const rowHtml = (b, i) => `
     <div class="card" data-banner-row="${i}" style="margin-bottom:10px">
-      <label class="field"><span>متن بنر</span><input class="input" data-b-text value="${esc(b.text || '')}"></label>
-      <label class="field"><span>آدرس تصویر (اختیاری)</span>
-        <div style="display:flex;gap:8px;align-items:center">
-          <input class="input" data-b-image value="${esc(b.image_url || '')}" style="direction:ltr;text-align:left" placeholder="/static/uploads/banners/...">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <strong>بنر ${i + 1}${b.kind === 'expiry' ? ' ⏰ (خودکار: انقضای سرویس — {n} = تعداد سرویس‌ها)' : b.kind === 'referral' ? ' 🤝 (خودکار: دعوت دوستان)' : ''}${b.enabled === false ? ' (غیرفعال)' : ''}</strong>
+        <div style="display:flex;gap:6px">
+          <button type="button" class="btn btn-sm" data-b-up ${i === 0 ? 'disabled' : ''}>▲</button>
+          <button type="button" class="btn btn-sm" data-b-down ${i === list.length - 1 ? 'disabled' : ''}>▼</button>
+          <button type="button" class="btn btn-sm btn-danger" data-b-remove ${b.kind ? 'disabled title="بنر خودکار است؛ غیرفعالش کن"' : ''}>🗑</button>
+        </div>
+      </div>
+      <div data-b-preview style="border-radius:12px;padding:12px 14px;margin-bottom:10px;color:#fff;min-height:48px;${b.image ? `background:url('${b.image}') center/cover no-repeat` : `background:${esc(b.bg || BANNER_BG_PRESETS[0])}`}">
+        ${b.image && b.image_only ? '' : `<span style="font-size:20px">${esc(b.icon || '')}</span> <b>${esc(b.title || 'بنر جدید')}</b>`}
+      </div>
+      <label class="field"><span>آیکون (اموجی)</span><input class="input" data-b-icon maxlength="4" value="${esc(b.icon || '')}"></label>
+      <label class="field"><span>عنوان بنر</span><input class="input" data-b-title maxlength="40" value="${esc(b.title || '')}"></label>
+      <label class="field"><span>توضیح کوتاه</span><input class="input" data-b-sub maxlength="120" value="${esc(b.sub || '')}"></label>
+      <label class="field"><span>متن دکمه</span><input class="input" data-b-cta maxlength="30" value="${esc(b.cta || '')}"></label>
+      <label class="field"><span>با ضربه‌زدن، کاربر منتقل شود به</span>
+        <select class="input" data-b-nav>${BANNER_NAV_OPTIONS.map(([v, l]) => `<option value="${v}" ${v === b.nav ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      </label>
+      <label class="field"><span>پس‌زمینه (گرادیان/رنگ CSS)</span>
+        <input class="input" data-b-bg value="${esc(b.bg || '')}" style="direction:ltr;text-align:left">
+      </label>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+        ${BANNER_BG_PRESETS.map((bg) => `<button type="button" data-b-preset="${esc(bg)}" style="width:28px;height:28px;border-radius:8px;border:1px solid var(--border,#444);background:${bg};cursor:pointer"></button>`).join('')}
+      </div>
+      <label class="field"><span>عکس آماده (اختیاری، زیر ۲ مگابایت، پیشنهاد ۱۲۰۰×۴۰۰)</span>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <input type="file" accept="image/*" data-b-upload hidden>
-          <button type="button" class="btn btn-sm" data-b-pick>آپلود تصویر</button>
+          <button type="button" class="btn btn-sm" data-b-pick>📤 آپلود عکس</button>
+          ${b.image ? '<button type="button" class="btn btn-sm btn-danger" data-b-clear-image>🗑 حذف عکس</button>' : ''}
         </div>
       </label>
-      ${b.image_url ? `<img src="${b.image_url}" style="max-height:80px;border-radius:8px;margin-top:6px">` : ''}
+      ${b.image ? `<label class="field field-row"><span>فقط عکس نمایش داده شود</span>${_swSpan('b_imageonly_' + i, !!b.image_only)}</label>` : ''}
       <label class="field field-row"><span>فعال</span>${_swSpan('b_enabled_' + i, b.enabled !== false)}</label>
-      <button class="btn btn-sm btn-danger" data-b-remove style="margin-top:8px">حذف این بنر</button>
     </div>`;
 
-  const draw = (list) => {
+  const collect = (root) => $$('#banners-list [data-banner-row]', root).map((row, i) => {
+    const prev = list[Number(row.dataset.bannerRow)] || {};
+    return {
+      id: prev.id || null,
+      kind: prev.kind || null,
+      icon: $('[data-b-icon]', row).value,
+      title: $('[data-b-title]', row).value.trim(),
+      sub: $('[data-b-sub]', row).value.trim(),
+      cta: $('[data-b-cta]', row).value.trim(),
+      nav: $('[data-b-nav]', row).value,
+      bg: $('[data-b-bg]', row).value.trim(),
+      image: prev.image || '',
+      image_only: prev.image ? _swOn(root, 'b_imageonly_' + row.dataset.bannerRow) : false,
+      enabled: _swOn(root, 'b_enabled_' + row.dataset.bannerRow),
+    };
+  });
+
+  const draw = () => {
     setContent(`
       <div class="card">
         <h3>🖼 بنرهای فروشگاه (مینی‌اپ)</h3>
-        <div class="card-sub">این بنرها در صفحه‌ی اصلی مینی‌اپ به‌صورت چرخشی نمایش داده می‌شوند.</div>
+        <div class="card-sub">این بنرها در صفحه‌ی اصلی مینی‌اپ به‌صورت چرخشی نمایش داده می‌شوند (حداکثر ۵۰ بنر). تغییرات اینجا و در مینی‌اپ یکسان است.</div>
       </div>
-      <div id="banners-list">${list.map(rowHtml).join('')}</div>
+      <div id="banners-list">${list.length ? list.map(rowHtml).join('') : '<div class="card">هنوز بنری اضافه نشده.</div>'}</div>
       <div style="display:flex;gap:8px">
         <button class="btn btn-sm" id="banner-add">➕ افزودن بنر</button>
         <button class="btn btn-primary btn-sm" id="banner-save">ذخیره‌ی همه</button>
@@ -6508,9 +7038,12 @@ async function renderBanners() {
     `);
     const root = content();
     _bindSwitches(root);
+    const sync = () => { list = collect(root); };
+
     $$('#banners-list [data-banner-row]', root).forEach((row) => {
-      const pick = $('[data-b-pick]', row), fileInput = $('[data-b-upload]', row);
-      pick.addEventListener('click', () => fileInput.click());
+      const idx = Number(row.dataset.bannerRow);
+      const fileInput = $('[data-b-upload]', row);
+      $('[data-b-pick]', row).addEventListener('click', () => fileInput.click());
       fileInput.addEventListener('change', async () => {
         const file = fileInput.files[0];
         if (!file) return;
@@ -6520,34 +7053,39 @@ async function renderBanners() {
           const res = await fetch('/api/banners/upload-image', { method: 'POST', credentials: 'include', body: fd });
           const data = await res.json();
           if (!res.ok) throw new Error(formatApiError(data.detail));
-          $('[data-b-image]', row).value = data.url;
-          toast('تصویر آپلود شد؛ برای ذخیره‌ی نهایی روی «ذخیره‌ی همه» بزن.');
+          sync();
+          list[idx].image = data.image;
+          list[idx].image_only = true;
+          draw();
         } catch (e) { toast(e.message, true); }
       });
-      $('[data-b-remove]', row).addEventListener('click', () => {
-        const idx = Number(row.dataset.bannerRow);
-        list = list.filter((_, i) => i !== idx);
-        draw(list);
-      });
+      const clr = $('[data-b-clear-image]', row);
+      if (clr) clr.addEventListener('click', () => { sync(); list[idx].image = ''; list[idx].image_only = false; draw(); });
+      $$('[data-b-preset]', row).forEach((btn) => btn.addEventListener('click', () => {
+        $('[data-b-bg]', row).value = btn.dataset.bPreset;
+        if (!list[idx].image) $('[data-b-preview]', row).style.background = btn.dataset.bPreset;
+      }));
+      $('[data-b-remove]', row).addEventListener('click', () => { sync(); if (list[idx] && list[idx].kind) return; list.splice(idx, 1); draw(); });
+      $('[data-b-up]', row).addEventListener('click', () => { sync(); if (idx > 0) { [list[idx - 1], list[idx]] = [list[idx], list[idx - 1]]; draw(); } });
+      $('[data-b-down]', row).addEventListener('click', () => { sync(); if (idx < list.length - 1) { [list[idx + 1], list[idx]] = [list[idx], list[idx + 1]]; draw(); } });
     });
-    $('#banner-add').addEventListener('click', () => { list = [...list, { text: '', image_url: null, enabled: true }]; draw(list); });
+
+    $('#banner-add').addEventListener('click', () => {
+      sync();
+      list.push({ id: null, icon: '✨', title: 'بنر جدید', sub: '', cta: 'مشاهده', nav: 'store', bg: BANNER_BG_PRESETS[0], image: '', image_only: false, enabled: true });
+      draw();
+    });
     $('#banner-save').addEventListener('click', async () => {
-      const rows = $$('#banners-list [data-banner-row]', root);
-      const payload = rows.map((row, i) => ({
-        text: $('[data-b-text]', row).value.trim(),
-        image_url: $('[data-b-image]', row).value.trim() || null,
-        enabled: _swOn(root, 'b_enabled_' + i),
-      })).filter(b => b.text);
+      sync();
       try {
-        const res = await apiPost('/banners', { banners: payload });
+        const res = await apiPost('/banners', { banners: list });
         toast('بنرها ذخیره شدند.');
         list = res.banners;
-        draw(list);
+        draw();
       } catch (e) { handleErr(e); }
     });
   };
-  let list = banners;
-  draw(list);
+  draw();
 }
 
 async function renderResellers() {
@@ -7467,7 +8005,7 @@ function stealthAutoBoxHtml(withName) {
       <button class="btn btn-primary" id="sa-install" type="button">نصب و راه‌اندازی خودکار</button>
     </div>
     <pre id="sa-log" class="mono" style="display:none;white-space:pre-wrap;margin-top:8px"></pre>
-    <p class="card-sub">سرور باید Ubuntu/Debian تازه باشد. xray (فقط VLESS)، nginx، سایت جعلی، گواهی TLS و ثبت در پنل خودکار انجام می‌شود. رمز root فقط برای همین نصب استفاده می‌شود و ذخیره نمی‌شود. بعد از نصب، نود در بخش «پنل‌های VPN» با نوع Stealth VLESS دیده می‌شود.</p>`;
+    <p class="card-sub">سرور باید Ubuntu/Debian تازه باشد. xray (فقط VLESS)، nginx، سایت جعلی، گواهی TLS و ثبت در پنل خودکار انجام می‌شود. رمز root فقط برای همین نصب استفاده می‌شود و ذخیره نمی‌شود. بعد از نصب، نود در همین بخش «نودها و سهمیه SSH» و همچنین «پنل‌های VPN» با نوع Stealth VLESS قابل مدیریت و انتخاب برای ساخت محصول است.</p>`;
 }
 
 function wireStealthAutoBox(root, getName, onDone) {
@@ -7826,9 +8364,47 @@ ss -lntp | grep 8765</pre></div>
   $('#ssh-install-copy')?.addEventListener('click',async()=>{const text=$('#ssh-install-commands')?.textContent||'';try{await navigator.clipboard.writeText(text);toast('دستورات نصب کپی شد.');}catch(_){toast('کپی خودکار انجام نشد؛ دستورات را دستی انتخاب کن.',true);}});
 }
 
+async function stealthNodeSettingsModal(node, reload) {
+  let settings;
+  try { settings = await apiGet(`/panel-servers/${Number(node.id)}/stealth-settings`); }
+  catch (err) { handleErr(err); return; }
+  openModal(`تنظیمات نود VLESS «${esc(node.name)}»`, `
+    <div class="form-grid">
+      <div class="card-sub" style="grid-column:1/-1">مشخصات نصب‌شده: <b dir="ltr">${esc(settings.domain || '—')}:${Number(settings.port || 443)}</b> · ترنسپورت‌ها: ${(settings.transports || []).map(esc).join('، ') || '—'}</div>
+      <label class="field"><span>نام نود در پنل</span><input class="input" id="vless-set-name" maxlength="80" value="${esc(node.name || '')}"></label>
+      <label class="field"><span>آدرس API</span><input class="input" id="vless-set-url" dir="ltr" value="${esc(node.api_url || '')}"></label>
+      <label class="field"><span>نام کاربری API</span><input class="input" id="vless-set-user" dir="ltr" value="stealth"></label>
+      <label class="field"><span>توکن API جدید (اختیاری)</span><input class="input" id="vless-set-token" type="password" autocomplete="new-password" placeholder="برای حفظ توکن فعلی خالی بگذارید" dir="ltr"></label>
+      <button class="btn" id="vless-set-connection">ذخیره اتصال پنل</button>
+      <div class="divider" style="grid-column:1/-1"></div>
+      <label class="field"><span>عنوان نمایشی لینک‌ها</span><input class="input" id="vless-set-title" maxlength="40" value="${esc(settings.title || 'Stealth')}"></label>
+      <label class="field"><span>Fingerprint</span><select class="input" id="vless-set-fp">${['chrome','firefox','safari','random','randomized'].map(x=>`<option value="${x}" ${settings.fingerprint===x?'selected':''}>${x}</option>`).join('')}</select></label>
+      <label class="field"><span>SNI</span><input class="input" id="vless-set-sni" dir="ltr" value="${esc(settings.sni || settings.domain || '')}"></label>
+      <label class="field"><span>Host / Authority</span><input class="input" id="vless-set-host" dir="ltr" value="${esc(settings.host || settings.domain || '')}"></label>
+      <p class="card-sub" style="grid-column:1/-1">تغییر عنوان، Fingerprint، SNI و Host روی لینک‌های جدید اشتراک اعمال می‌شود. دامنه، پورت، گواهی TLS و ترنسپورت‌ها در حال حاضر از طریق نصب/بازپیکربندی سرور تغییر می‌کنند.</p>
+      <button class="btn btn-primary" id="vless-set-save">ذخیره تنظیمات نود</button>
+    </div>`, (el, close) => {
+      el.querySelector('#vless-set-connection').addEventListener('click', async e => {
+        const btn=e.currentTarget; btn.disabled=true;
+        const body={name:el.querySelector('#vless-set-name').value.trim(),api_url:el.querySelector('#vless-set-url').value.trim(),api_username:el.querySelector('#vless-set-user').value.trim()||'stealth'};
+        const token=el.querySelector('#vless-set-token').value;
+        if(token) body.api_password=token;
+        if(!body.name||!/^https?:\/\//i.test(body.api_url)){toast('نام و آدرس معتبر API را وارد کنید.',true);btn.disabled=false;return;}
+        try { await apiPut(`/panel-servers/${Number(node.id)}`,body); toast('اتصال پنل ذخیره شد.'); await reload(); }
+        catch(err){handleErr(err);btn.disabled=false;}
+      });
+      el.querySelector('#vless-set-save').addEventListener('click', async e => {
+        const btn=e.currentTarget; btn.disabled=true;
+        const body={title:el.querySelector('#vless-set-title').value.trim(),fingerprint:el.querySelector('#vless-set-fp').value,sni:el.querySelector('#vless-set-sni').value.trim(),host:el.querySelector('#vless-set-host').value.trim()};
+        try { await apiPut(`/panel-servers/${Number(node.id)}/stealth-settings`,body); toast('تنظیمات نود VLESS ذخیره شد.'); close(); await reload(); }
+        catch(err){handleErr(err);btn.disabled=false;}
+      });
+    }, { wide: true });
+}
 async function renderSSHManagement() {
-  const d = await apiGet('/ssh/overview');
+  const [d, panelServers] = await Promise.all([apiGet('/ssh/overview'), apiGet('/panel-servers').catch(() => [])]);
   const nodes = d.nodes || [], pools = d.pools || [], accounts = d.accounts || [];
+  const vlessNodes = (panelServers || []).filter(s => s.panel_type === 'stealth');
   const fmtBytes = n => {
     n = Number(n || 0);
     if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
@@ -7848,8 +8424,25 @@ async function renderSSHManagement() {
       <td class="mono" style="direction:ltr;text-align:right">${esc(n.host)}:${Number(n.port)}${(n.hosts||[]).filter(h=>h.enabled!==false).map(h=>`<div style="font-size:11px;opacity:.8">↪ ${esc(SSH_PROTO_LABELS[h.protocol]||h.protocol)}: ${esc(h.address)}${h.port?':'+Number(h.port):''}</div>`).join('')}</td>
       <td>${(n.protocols||['ssh']).map(p=>`<span class="chip">${esc(SSH_PROTO_LABELS[p]||p)}${p==='openvpn'&&n.ovpn_port?` · ${Number(n.ovpn_port)}/${esc(n.ovpn_proto||'udp')}`:''}${p==='wireguard'&&n.wg_port?` · ${Number(n.wg_port)}/udp`:''}${p==='ssh'&&n.ssh_port_custom?` · ${Number(n.ssh_port_min)}-${Number(n.ssh_port_max)}`:''}</span>`).join(' ')}</td>
       <td>${esc(statusFa(n.status))}${n.last_error ? `<div style="font-size:11px;color:#FB7185;margin-top:4px">${esc(n.last_error)}</div>` : ''}</td>
-      <td style="white-space:nowrap"><button class="btn btn-sm" data-ssh-test-node="${Number(n.id)}">تست اتصال</button> ${(n.protocols||['ssh']).length<3&&n.node_type==='linux'?`<button class="btn btn-sm" data-ssh-add-proto="${Number(n.id)}">+ پروتکل</button> `:''}<button class="btn btn-sm" data-ssh-hosts-node="${Number(n.id)}">هاست‌ها</button> <button class="btn btn-sm" data-ssh-rename-node="${Number(n.id)}" data-ssh-node-name="${esc(n.name)}">تغییر نام</button> <button class="btn btn-danger btn-sm" data-ssh-del-node="${Number(n.id)}">حذف</button></td>
+      <td><button class="btn btn-sm" data-ssh-test-node="${Number(n.id)}">تست اتصال</button> ${(n.protocols||['ssh']).length<3&&n.node_type==='linux'?`<button class="btn btn-sm" data-ssh-add-proto="${Number(n.id)}">+ پروتکل</button> `:''}<button class="btn btn-sm" data-ssh-hosts-node="${Number(n.id)}">هاست‌ها</button> <button class="btn btn-sm" data-ssh-rename-node="${Number(n.id)}" data-ssh-node-name="${esc(n.name)}">تغییر نام</button> <button class="btn btn-danger btn-sm" data-ssh-del-node="${Number(n.id)}">حذف</button></td>
     </tr>`).join('') || '<tr><td colspan="5" class="empty-state">هنوز نودی ثبت نشده است.</td></tr>'}</tbody></table></div></div>`;
+
+  const vlessNodesHtml = `<div class="card" style="margin-top:12px"><div style="padding:12px 14px 0"><b>نودهای VLESS</b><p class="card-sub">نصب، اتصال، تنظیمات API و وضعیت استفاده از نودهای VLESS از همین بخش مدیریت می‌شود.</p></div><div class="table-wrap"><table>
+    <thead><tr><th>نام</th><th>آدرس API</th><th>وضعیت</th><th>مصرف</th><th>عملیات</th></tr></thead>
+    <tbody>${vlessNodes.map(n=>`<tr>
+      <td><b>${esc(n.name)}</b><div class="card-sub">Stealth VLESS · #${Number(n.id)}</div></td>
+      <td class="mono" dir="ltr">${esc(n.api_url || '')}</td>
+      <td>${n.is_active ? (n.health_status === 'error' ? 'خطا' : 'فعال') : 'غیرفعال'}${n.health_error ? `<div class="card-sub" style="color:#FB7185">${esc(n.health_error)}</div>` : ''}</td>
+      <td><span class="chip">${n.used_for_custom_config ? 'کانفیگ شخصی' : 'بدون کانفیگ شخصی'}</span> <span class="chip">${n.used_for_test_config ? 'کانفیگ تست' : 'بدون تست'}</span></td>
+      <td>
+        <button class="btn btn-sm" data-vless-test="${Number(n.id)}">تست اتصال</button>
+        <button class="btn btn-sm" data-vless-edit="${Number(n.id)}">تنظیمات</button>
+        <button class="btn btn-sm" data-vless-toggle="${Number(n.id)}">${n.is_active ? 'غیرفعال‌سازی' : 'فعال‌سازی'}</button>
+        <button class="btn btn-sm" data-vless-usage="custom" data-vless-id="${Number(n.id)}">${n.used_for_custom_config ? 'قطع کانفیگ شخصی' : 'کانفیگ شخصی'}</button>
+        <button class="btn btn-sm" data-vless-usage="test" data-vless-id="${Number(n.id)}">${n.used_for_test_config ? 'قطع تست' : 'کانفیگ تست'}</button>
+        <button class="btn btn-danger btn-sm" data-vless-delete="${Number(n.id)}">حذف</button>
+      </td>
+    </tr>`).join('') || '<tr><td colspan="5" class="empty-state">هنوز نود VLESS ثبت نشده است.</td></tr>'}</tbody></table></div></div>`;
 
   const accountsHtml = `<div class="card"><div class="table-wrap"><table>
     <thead><tr><th>نام کاربری</th><th>پروتکل</th><th>سرور</th><th>کاربر</th><th>استخر</th><th>وضعیت</th><th>عملیات</th></tr></thead>
@@ -7860,7 +8453,7 @@ async function renderSSHManagement() {
       <td>${Number(a.user_id)}</td>
       <td>${a.quota_pool_id ? '#'+Number(a.quota_pool_id) : '—'}</td>
       <td>${esc(statusFa(a.status))}</td>
-      <td style="white-space:nowrap"><button class="btn btn-sm" data-ssh-account-action="enable" data-ssh-account-id="${esc(a.account_id)}">فعال</button> <button class="btn btn-sm" data-ssh-account-action="disable" data-ssh-account-id="${esc(a.account_id)}">غیرفعال</button> <button class="btn btn-danger btn-sm" data-ssh-account-action="delete" data-ssh-account-id="${esc(a.account_id)}">حذف</button></td>
+      <td><button class="btn btn-sm" data-ssh-account-action="enable" data-ssh-account-id="${esc(a.account_id)}">فعال</button> <button class="btn btn-sm" data-ssh-account-action="disable" data-ssh-account-id="${esc(a.account_id)}">غیرفعال</button> <button class="btn btn-danger btn-sm" data-ssh-account-action="delete" data-ssh-account-id="${esc(a.account_id)}">حذف</button></td>
     </tr>`).join('') || '<tr><td colspan="7" class="empty-state">هنوز حسابی ثبت نشده است.</td></tr>'}</tbody></table></div></div>`;
 
   const poolsHtml = `<div class="card"><div class="table-wrap"><table>
@@ -7871,7 +8464,7 @@ async function renderSSHManagement() {
       <td>${esc(statusFa(p.status))}</td><td>${(p.members||[]).length}</td>
     </tr>`}).join('') || '<tr><td colspan="6" class="empty-state">استخر سهمیه‌ای وجود ندارد.</td></tr>'}</tbody></table></div></div>`;
 
-  setContent(tabBar + (sshTab==='nodes' ? nodesHtml : sshTab==='accounts' ? accountsHtml : poolsHtml));
+  setContent(tabBar + (sshTab==='nodes' ? nodesHtml + vlessNodesHtml : sshTab==='accounts' ? accountsHtml : poolsHtml));
 
   $$('[data-ssh-tab]',content()).forEach(b=>b.addEventListener('click',()=>{sshTab=b.dataset.sshTab;renderSSHManagement();}));
 
@@ -7993,6 +8586,11 @@ async function renderSSHManagement() {
   $$('[data-ssh-hosts-node]',content()).forEach(btn=>btn.addEventListener('click',()=>{const node=nodes.find(n=>Number(n.id)===Number(btn.dataset.sshHostsNode));if(node)sshHostsModal(node,renderSSHManagement);}));
   $$('[data-ssh-del-node]',content()).forEach(btn=>btn.addEventListener('click',async()=>{if(!confirm('این نود حذف شود؟'))return;btn.disabled=true;const nid=Number(btn.dataset.sshDelNode);try{await apiDelete(`/ssh/nodes/${nid}`);toast('نود حذف شد.');await renderSSHManagement();}catch(err){if(/حساب SSH فعال/.test(err.message||'')&&confirm(err.message+'\n\nاگر سرور این نود حذف شده یا از دسترس خارج است، نود و همه‌ی حساب‌هایش فقط از پنل پاک می‌شوند (روی سرور تغییری داده نمی‌شود). ادامه می‌دهید؟')){try{await apiDelete(`/ssh/nodes/${nid}?force=true`);toast('نود و حساب‌هایش از پنل حذف شد.');await renderSSHManagement();return;}catch(err2){handleErr(err2);}}else{handleErr(err);}btn.disabled=false;}}));
   $$('[data-ssh-test-node]',content()).forEach(btn=>btn.addEventListener('click',async()=>{btn.disabled=true;try{const r=await apiPost(`/ssh/nodes/${Number(btn.dataset.sshTestNode)}/test`,{});toast(r.ok?'اتصال Agent موفق بود.':'پاسخ Agent معتبر نیست.');await renderSSHManagement();}catch(err){handleErr(err);btn.disabled=false;}}));
+  $$('[data-vless-test]',content()).forEach(btn=>btn.addEventListener('click',async()=>{btn.disabled=true;try{const r=await apiPost(`/panel-servers/${Number(btn.dataset.vlessTest)}/test`,{});toast(r.ok?'اتصال نود VLESS موفق بود.':'اتصال نود VLESS ناموفق بود.');await renderSSHManagement();}catch(err){handleErr(err);btn.disabled=false;}}));
+  $$('[data-vless-edit]',content()).forEach(btn=>btn.addEventListener('click',()=>{const node=vlessNodes.find(n=>Number(n.id)===Number(btn.dataset.vlessEdit));if(node)stealthNodeSettingsModal(node,renderSSHManagement);}));
+  $$('[data-vless-toggle]',content()).forEach(btn=>btn.addEventListener('click',async()=>{btn.disabled=true;try{await apiPost(`/panel-servers/${Number(btn.dataset.vlessToggle)}/toggle`,{});toast('وضعیت نود تغییر کرد.');await renderSSHManagement();}catch(err){handleErr(err);btn.disabled=false;}}));
+  $$('[data-vless-usage]',content()).forEach(btn=>btn.addEventListener('click',async()=>{btn.disabled=true;try{await apiPost(`/panel-servers/${Number(btn.dataset.vlessId)}/usage/${btn.dataset.vlessUsage}`,{});toast('تنظیم مصرف نود ذخیره شد.');await renderSSHManagement();}catch(err){handleErr(err);btn.disabled=false;}}));
+  $$('[data-vless-delete]',content()).forEach(btn=>btn.addEventListener('click',async()=>{if(!confirm('نود VLESS حذف شود؟ سرویس‌ها و محصولات متصل را بررسی کنید.'))return;btn.disabled=true;try{await apiDelete(`/panel-servers/${Number(btn.dataset.vlessDelete)}`);toast('نود VLESS حذف شد.');await renderSSHManagement();}catch(err){handleErr(err);btn.disabled=false;}}));
   $$('[data-ssh-account-action]',content()).forEach(btn=>btn.addEventListener('click',async()=>{const action=btn.dataset.sshAccountAction;if(action==='delete'&&!confirm('حساب SSH حذف شود؟'))return;btn.disabled=true;const url=`/ssh/accounts/${encodeURIComponent(btn.dataset.sshAccountId)}/action`;try{await apiPost(url,{action});toast('عملیات انجام شد.');await renderSSHManagement();}catch(err){if(action==='delete'&&err.status===502&&confirm(err.message+'\n\nحذف اجباری فقط از پنل انجام شود؟ (روی سرور نود تغییری داده نمی‌شود)')){try{await apiPost(url,{action,force:true});toast('حساب فقط از پنل حذف شد.');await renderSSHManagement();return;}catch(err2){handleErr(err2);}}else{handleErr(err);}btn.disabled=false;}}));
   $('#ssh-reconcile')?.addEventListener('click',async e=>{const btn=e.currentTarget;btn.disabled=true;try{const r=await apiPost('/ssh/reconcile-once',{});const results=r.results||[];const failed=results.filter(x=>!x.enforcement_complete).length;const stale=results.filter(x=>x.state==='stale').length;toast(failed?`پایش انجام شد؛ ${failed} استخر نیازمند بررسی است.`:(stale?`${stale} استخر به‌علت گزارش مصرف قدیمی در حالت امن باقی ماند.`:'پایش سهمیه انجام شد.'));await renderSSHManagement();}catch(err){handleErr(err);btn.disabled=false;}});
 }
@@ -8017,15 +8615,13 @@ async function renderPanels() {
           ${panelHealthHtml(s)}
         </td>
         <td>
-          <label style="display:flex;gap:4px;align-items:center;font-size:12px"><input type="checkbox" data-usage="custom" data-usage-id="${s.id}" ${s.used_for_custom_config ? 'checked' : ''}> کانفیگ شخصی</label>
-          <label style="display:flex;gap:4px;align-items:center;font-size:12px"><input type="checkbox" data-usage="test" data-usage-id="${s.id}" ${s.used_for_test_config ? 'checked' : ''}> کانفیگ تست</label>
+          <label style="display:flex;gap:4px;align-items:center;font-size:12px;white-space:nowrap"><input type="checkbox" data-usage="custom" data-usage-id="${s.id}" ${s.used_for_custom_config ? 'checked' : ''}> کانفیگ شخصی</label>
+          <label style="display:flex;gap:4px;align-items:center;font-size:12px;white-space:nowrap"><input type="checkbox" data-usage="test" data-usage-id="${s.id}" ${s.used_for_test_config ? 'checked' : ''}> کانفیگ تست</label>
         </td>
-        <td style="white-space:nowrap">
+        <td>
           <button class="btn btn-sm" data-move-up="${s.id}" title="یک پله بالا">↑</button>
           <button class="btn btn-sm" data-move-down="${s.id}" title="یک پله پایین">↓</button>
-          <button class="btn btn-sm" data-move-up="${s.id}">↑</button>
-            <button class="btn btn-sm" data-move-down="${s.id}">↓</button>
-            <button class="btn btn-sm" data-test="${s.id}">تست اتصال</button>
+          <button class="btn btn-sm" data-test="${s.id}">تست اتصال</button>
           <button class="btn btn-sm" data-edit="${s.id}">ویرایش</button>
           ${PANEL_INBOUND_SELECT_TYPES.includes(s.panel_type) ? `<button class="btn btn-sm" data-edit-inbounds="${s.id}">Inbound ها</button>` : ''}
           ${PANEL_TEMPLATE_BASED_TYPES.includes(s.panel_type) ? `<button class="btn btn-sm" data-retemplate="${s.id}">قالب جدید</button>` : ''}
@@ -8462,6 +9058,10 @@ const SETTINGS_GROUPS = [
   ]},
 
   // ------------------------------------------------------ سرویس‌های ویژه
+  { tab: 'sales', title: '📱 تایید شماره موبایل برای خرید', fields: [
+    { key: 'phone_verify_enabled', label: 'خرید فقط با شماره‌ی تاییدشده (اشتراک‌گذاری با دکمه‌ی تلگرام) — بات و مینی‌اپ', type: 'bool' },
+    { key: 'phone_verify_countries', label: 'کشورهای مجاز', type: 'phone_countries' },
+  ]},
   { tab: 'sales', title: '🛒 سقف تعداد خرید در هر سفارش', fields: [
     { key: 'auto_provision_max_qty', label: 'حداکثر تعداد محصولات خودکار در هر سفارش (۰=نامحدود)', type: 'number' },
   ] },
@@ -8654,6 +9254,64 @@ new MutationObserver(() => document.querySelectorAll('.netmap-ed:not([data-ready
   .observe(document.body, { childList: true, subtree: true });
 
 
+const PHONE_COUNTRY_DEFAULTS = [
+  ['98', '🇮🇷 ایران', true], ['93', '🇦🇫 افغانستان', false], ['964', '🇮🇶 عراق', false], ['90', '🇹🇷 ترکیه', false],
+  ['971', '🇦🇪 امارات', false], ['966', '🇸🇦 عربستان', false], ['965', '🇰🇼 کویت', false], ['974', '🇶🇦 قطر', false],
+  ['973', '🇧🇭 بحرین', false], ['968', '🇴🇲 عمان', false], ['92', '🇵🇰 پاکستان', false], ['91', '🇮🇳 هند', false],
+  ['994', '🇦🇿 آذربایجان', false], ['374', '🇦🇲 ارمنستان', false], ['993', '🇹🇲 ترکمنستان', false], ['992', '🇹🇯 تاجیکستان', false],
+  ['998', '🇺🇿 ازبکستان', false], ['7', '🇷🇺 روسیه / قزاقستان', false], ['49', '🇩🇪 آلمان', false], ['44', '🇬🇧 انگلیس', false],
+  ['1', '🇺🇸 آمریکا / کانادا', false], ['33', '🇫🇷 فرانسه', false], ['31', '🇳🇱 هلند', false], ['46', '🇸🇪 سوئد', false],
+];
+function pcParse(raw) {
+  let data = [];
+  try { data = raw && raw.trim() ? JSON.parse(raw) : []; } catch (_) { data = []; }
+  if (!Array.isArray(data) || !data.length) return PHONE_COUNTRY_DEFAULTS.map(([p, n, a]) => ({ p, n, a }));
+  return data.map(o => ({ p: String(o.p || ''), n: String(o.n || ''), a: !!o.a }));
+}
+function pcRender(ed) {
+  ed.querySelector('.pc-rows').innerHTML = ed.__rows.map((r, i) => `
+    <div class="pc-row" data-i="${i}" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+      <input type="checkbox" class="pc-allow" ${r.a ? 'checked' : ''} title="مجاز">
+      <span dir="ltr">+</span>
+      <input class="input pc-prefix" dir="ltr" inputmode="numeric" placeholder="98" style="width:84px" value="${esc(r.p)}">
+      <input class="input pc-name" placeholder="نام کشور" style="flex:1;min-width:130px" value="${esc(r.n)}">
+      <button type="button" class="btn btn-sm pc-del" title="حذف">🗑</button>
+    </div>`).join('');
+}
+function pcSync(ed) {
+  const out = ed.__rows
+    .map(r => ({ p: String(r.p || '').replace(/\D/g, ''), n: String(r.n || '').trim(), a: !!r.a }))
+    .filter(r => r.p && r.n);
+  ed.querySelector('input[type=hidden]').value = JSON.stringify(out);
+}
+function pcInit(ed) {
+  if (ed.dataset.ready) return;
+  ed.dataset.ready = '1';
+  ed.__rows = pcParse(ed.dataset.pcRaw || '');
+  pcRender(ed);
+}
+document.addEventListener('click', e => {
+  const ed = e.target.closest && e.target.closest('.phone-ed'); if (!ed) return;
+  if (e.target.closest('.pc-add')) { ed.__rows.push({ p: '', n: '', a: true }); pcRender(ed); return; }
+  const del = e.target.closest('.pc-del');
+  if (del) { ed.__rows.splice(Number(del.closest('.pc-row').dataset.i), 1); pcRender(ed); pcSync(ed); }
+});
+document.addEventListener('input', e => {
+  const ed = e.target.closest && e.target.closest('.phone-ed'); if (!ed) return;
+  const row = e.target.closest('.pc-row'); if (!row) return;
+  const r = ed.__rows[Number(row.dataset.i)];
+  if (e.target.classList.contains('pc-prefix')) r.p = e.target.value;
+  if (e.target.classList.contains('pc-name')) r.n = e.target.value;
+  pcSync(ed);
+});
+document.addEventListener('change', e => {
+  const ed = e.target.closest && e.target.closest('.phone-ed'); if (!ed) return;
+  const row = e.target.closest('.pc-row'); if (!row) return;
+  if (e.target.classList.contains('pc-allow')) { ed.__rows[Number(row.dataset.i)].a = e.target.checked; pcSync(ed); }
+});
+new MutationObserver(() => document.querySelectorAll('.phone-ed:not([data-ready])').forEach(pcInit))
+  .observe(document.body, { childList: true, subtree: true });
+
 function settingsFieldHtml(f, settings) {
   const val = settings[f.key] ?? '';
   if (f.type === 'bool') {
@@ -8701,6 +9359,14 @@ function settingsFieldHtml(f, settings) {
         <button type="button" class="btn btn-sm firebase-json-extract-btn" style="margin-top:8px">استخراج و پرکردن خودکار</button>
       </div>
     </label>`;
+  }
+  if (f.type === 'phone_countries') {
+    return `<div class="field phone-ed" data-pc-raw="${esc(val)}">
+      <span class="card-sub">فقط شماره‌هایی که پیش‌شماره‌ی تیک‌خورده دارند می‌توانند خرید کنند. شماره فقط با دکمه‌ی اشتراک‌گذاری تلگرام (و فقط شماره‌ی خود کاربر) پذیرفته می‌شود. پیش‌شماره را بدون + و صفر وارد کن.</span>
+      <div class="pc-rows" style="display:flex;flex-direction:column;gap:8px;margin-top:10px"></div>
+      <button type="button" class="btn btn-sm pc-add" style="margin-top:10px">➕ افزودن کشور</button>
+      <input type="hidden" data-key="${f.key}" data-type="text" value="${esc(val)}">
+    </div>`;
   }
   if (f.type === 'netmap_simple') {
     return `<div class="field netmap-ed" data-nm-raw="${esc(val)}">

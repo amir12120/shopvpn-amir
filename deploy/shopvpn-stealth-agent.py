@@ -29,7 +29,7 @@ import uuid as uuidlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote, urlsplit
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 CONF_DIR = os.environ.get("STEALTH_CONF_DIR", "/etc/shopvpn-stealth")
 NODE_FILE = os.path.join(CONF_DIR, "node.json")
 USERS_FILE = os.path.join(CONF_DIR, "users.json")
@@ -174,9 +174,25 @@ def render_xray_config(node: dict, users: dict) -> dict:
     }
 
 
+_xray_stamp = {"v": None}
+
+
+def xray_start_stamp():
+    """زمان (monotonic) آخرین استارت xray؛ برای تشخیص ریستارت بیرونی (کرش/reboot/دستی).
+    کاربرانی که با `api adu` اضافه شده‌اند فقط در حافظه‌ی xray هستند و با ریستارت از بین می‌روند."""
+    try:
+        rc, out, _ = runner.run(["systemctl", "show", "xray", "-p", "ActiveEnterTimestampMonotonic", "--value"])
+    except Exception:  # noqa: BLE001
+        return None
+    out = (out or "").strip()
+    return out if rc == 0 and out.isdigit() else None
+
+
 def rewrite_xray(node: dict, users: dict) -> None:
     cfg = render_xray_config(node, users)
-    tmp = XRAY_CONFIG + ".new"
+    # پسوند باید .json باشد وگرنه xray فرمت فایل را تشخیص نمی‌دهد (Failed to get format)
+    base, ext = os.path.splitext(XRAY_CONFIG)
+    tmp = base + ".new" + (ext or ".json")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=1)
     rc, out, err = runner.run([XRAY_BIN, "run", "-test", "-config", tmp])
@@ -185,6 +201,10 @@ def rewrite_xray(node: dict, users: dict) -> None:
         raise RuntimeError("xray config test failed: " + (err or out)[:300])
     os.replace(tmp, XRAY_CONFIG)
     runner.run(["systemctl", "restart", "xray"], timeout=30)
+    # config کامل نوشته شد: همه‌ی کاربران قابل‌استفاده الان داخل xray هستند
+    for u in users.values():
+        u["_in_xray"] = is_usable(u)
+    _xray_stamp["v"] = xray_start_stamp()
 
 
 # ───────────────────────── منطق کاربر ─────────────────────────
@@ -248,13 +268,28 @@ def _public(name: str, u: dict, node: dict) -> dict:
     }
 
 
-def _sync_user_to_xray(name: str, u: dict, node: dict, users: dict) -> None:
-    """بعد از تغییر وضعیت: کاربر را روی xray بساز یا بردار. اگر API نشد، config را کامل بازنویسی کن."""
+def _sync_user_to_xray(name: str, u: dict, node: dict, users: dict) -> bool:
+    """بعد از تغییر وضعیت: کاربر را روی xray بساز یا بردار. اگر API نشد، config را کامل بازنویسی کن.
+
+    نتیجه‌ی واقعی در u["_in_xray"] ذخیره می‌شود (روی دیسک هم). اگر کاربر قابل‌استفاده باشد ولی
+    اضافه‌شدنش شکست بخورد، _in_xray=False می‌ماند و poller هر ۳۰ ثانیه دوباره تلاش می‌کند؛
+    قبلاً این وضعیت ذخیره نمی‌شد و کاربر برای همیشه در users.json می‌ماند بدون اینکه روی xray باشد."""
     xray_remove_user(name, node)
-    u["_in_xray"] = is_usable(u)
-    if u["_in_xray"]:
-        if not xray_add_user(name, u, node):
-            rewrite_xray(node, users)
+    usable = is_usable(u)
+    if not usable:
+        u["_in_xray"] = False
+        ok = True
+    else:
+        ok = xray_add_user(name, u, node)
+        if not ok:
+            try:
+                rewrite_xray(node, users)  # در صورت موفقیت _in_xray همه True می‌شود
+                ok = True
+            except Exception as exc:  # noqa: BLE001
+                print(f"xray sync failed for {name}: {exc}", file=sys.stderr, flush=True)
+        u["_in_xray"] = bool(ok)
+    _save_users(users)
+    return ok
 
 
 class ApiError(Exception):
@@ -405,6 +440,19 @@ def poll_usage_once() -> None:
     """مصرف را از xray می‌خواند (با reset تا فقط دلتا بیاید) و به کاربران اضافه می‌کند؛
     سپس کاربرانی که حجم/زمانشان تمام شده را از xray برمی‌دارد."""
     node = load_node()
+    cur = xray_start_stamp()
+    if cur:
+        if _xray_stamp["v"] and cur != _xray_stamp["v"]:
+            # xray بیرون از ایجنت ریستارت شده: کاربرهای runtime از بین رفته‌اند، config را دوباره از users.json بساز
+            try:
+                with _lock:
+                    users0 = _load_users()
+                    rewrite_xray(node, users0)
+                    _save_users(users0)
+            except Exception as exc:  # noqa: BLE001
+                print("resync after xray restart failed:", exc, file=sys.stderr, flush=True)
+        elif not _xray_stamp["v"]:
+            _xray_stamp["v"] = cur
     rc, out, _ = runner.run([XRAY_BIN, "api", "statsquery", f"--server={XRAY_API}", "-pattern", "user>>>", "-reset"])
     delta = {}
     if rc == 0 and out.strip():
@@ -433,8 +481,7 @@ def poll_usage_once() -> None:
                 u["_in_xray"] = False
                 changed = True
             elif not was_in and usable:
-                _sync_user_to_xray(name, u, node, users)
-                u["_in_xray"] = True
+                _sync_user_to_xray(name, u, node, users)  # _in_xray را خودش درست می‌کند؛ شکست = تلاش دوباره در دور بعد
                 changed = True
         if changed:
             _save_users(users)
@@ -511,6 +558,36 @@ class Handler(BaseHTTPRequestHandler):
         if parts == ["health"] and method == "GET":
             return self._send(200, {"ok": True, "version": VERSION,
                                     "transports": [t["name"] for t in active_transports(node)]})
+        if parts == ["settings"] and method == "GET":
+            return self._send(200, {
+                "domain": node.get("domain", ""), "port": int(node.get("port", 443)),
+                "title": node.get("title", "Stealth"), "fingerprint": node.get("fingerprint", "chrome"),
+                "sni": node.get("sni") or node.get("domain", ""), "host": node.get("host") or node.get("domain", ""),
+                "transports": [t["name"] for t in active_transports(node)],
+            })
+        if parts == ["settings"] and method == "PATCH":
+            title = str(body.get("title", node.get("title", "Stealth"))).strip()[:40]
+            fingerprint = str(body.get("fingerprint", node.get("fingerprint", "chrome"))).strip().lower()
+            sni = str(body.get("sni", node.get("sni") or node.get("domain", ""))).strip()
+            host = str(body.get("host", node.get("host") or node.get("domain", ""))).strip()
+            if not re.fullmatch(r"[A-Za-z0-9 _.-]{1,40}", title):
+                raise ApiError(400, "invalid title")
+            if fingerprint not in {"chrome", "firefox", "safari", "random", "randomized"}:
+                raise ApiError(400, "invalid fingerprint")
+            if not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", sni) or not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", host):
+                raise ApiError(400, "invalid host or SNI")
+            with _lock:
+                node["title"], node["fingerprint"], node["sni"], node["host"] = title, fingerprint, sni, host
+                tmp = NODE_FILE + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(node, f, ensure_ascii=False, indent=1)
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, NODE_FILE)
+            return self._send(200, {"ok": True, "settings": {
+                "title": title, "fingerprint": fingerprint, "sni": sni, "host": host,
+                "domain": node.get("domain", ""), "port": int(node.get("port", 443)),
+                "transports": [t["name"] for t in active_transports(node)],
+            }})
         if parts == ["users"] and method == "POST":
             return self._send(200, op_create(body))
         if len(parts) >= 2 and parts[0] == "users":
@@ -553,8 +630,20 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     node = load_node()
     # در شروع، config xray را با کاربران فعلی هم‌گام کن
-    with _lock:
-        rewrite_xray(node, _load_users())
+    # اگر هم‌گام‌سازی شکست بخورد، API نباید بمیرد (وگرنه nginx خطای 502 می‌دهد)
+    try:
+        with _lock:
+            users0 = _load_users()
+            try:
+                rewrite_xray(node, users0)
+            except Exception:
+                for u in users0.values():  # poller دوباره تلاش می‌کند
+                    u["_in_xray"] = False
+                raise
+            finally:
+                _save_users(users0)
+    except Exception as exc:  # noqa: BLE001
+        print("startup xray sync failed:", exc, file=sys.stderr, flush=True)
     threading.Thread(target=poller_loop, daemon=True).start()
     port = int(node.get("agent_port", 10086))
     ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()

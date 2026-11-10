@@ -295,6 +295,27 @@ class TicketsMixin:
             )
 
 
+    def add_broadcast_pin(self, batch: int, chat_id: int, message_id: int):
+        with self._get_conn() as conn:
+            conn.execute(
+                "INSERT INTO broadcast_pins (batch, chat_id, message_id) VALUES (?, ?, ?)",
+                (batch, chat_id, message_id),
+            )
+
+
+    def pop_latest_broadcast_pins(self) -> list:
+        """پین‌های آخرین ارسال همگانی را برمی‌گرداند و از جدول حذف می‌کند."""
+        with self._get_conn() as conn:
+            row = conn.execute("SELECT MAX(batch) AS b FROM broadcast_pins").fetchone()
+            if not row or row["b"] is None:
+                return []
+            rows = conn.execute(
+                "SELECT chat_id, message_id FROM broadcast_pins WHERE batch=?", (row["b"],)
+            ).fetchall()
+            conn.execute("DELETE FROM broadcast_pins WHERE batch=?", (row["b"],))
+            return [{"chat_id": r["chat_id"], "message_id": r["message_id"]} for r in rows]
+
+
     def pop_due_temp_messages(self) -> list:
         """پیام‌های سررسیدشده را برمی‌گرداند و همزمان از جدول حذف می‌کند."""
         now = datetime.utcnow().isoformat()
@@ -487,6 +508,33 @@ class TicketsMixin:
     def get_ticket(self, ticket_id: int):
         with self._get_conn() as conn:
             return conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+
+
+    def _ensure_ticket_group_table(self, conn):
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ticket_group_messages ("
+            "chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, ticket_id INTEGER NOT NULL, "
+            "created_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (chat_id, message_id))"
+        )
+
+
+    def link_ticket_group_message(self, chat_id: int, message_id: int, ticket_id: int):
+        with self._get_conn() as conn:
+            self._ensure_ticket_group_table(conn)
+            conn.execute(
+                "INSERT OR REPLACE INTO ticket_group_messages (chat_id, message_id, ticket_id) VALUES (?, ?, ?)",
+                (chat_id, message_id, ticket_id),
+            )
+
+
+    def get_ticket_id_by_group_message(self, chat_id: int, message_id: int):
+        with self._get_conn() as conn:
+            self._ensure_ticket_group_table(conn)
+            row = conn.execute(
+                "SELECT ticket_id FROM ticket_group_messages WHERE chat_id=? AND message_id=?",
+                (chat_id, message_id),
+            ).fetchone()
+            return row[0] if row else None
 
 
     def claim_ticket_if_open(self, ticket_id: int, admin_id: int):

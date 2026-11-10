@@ -65,6 +65,42 @@ class AgentTest(unittest.TestCase):
         self.assertFalse(any("packet-up" in l for l in links))
         self.assertTrue(any("adu" in c for c in self.fake.calls))
 
+    def test_failed_sync_is_persisted_and_retried(self):
+        class Failing(FakeRunner):
+            def run(self, args, stdin=None, timeout=15):
+                if "adu" in args or "-test" in args:
+                    self.calls.append(list(args))
+                    return 1, "", "boom"
+                return super().run(args, stdin, timeout)
+        self.agent.runner = Failing()
+        self.agent.op_create({"username": "r1", "volume_gb": 1, "duration_days": 5})
+        self.assertFalse(self.agent._load_users()["r1"]["_in_xray"])  # شکست روی دیسک ذخیره شده
+        self.agent.runner = self.fake
+        self.agent.poll_usage_once()
+        self.assertTrue(self.agent._load_users()["r1"]["_in_xray"])
+        self.assertTrue(any("adu" in c for c in self.fake.calls))
+
+    def test_resync_after_external_xray_restart(self):
+        class Stamped(FakeRunner):
+            stamp = "100"
+            def run(self, args, stdin=None, timeout=15):
+                if "show" in args:
+                    self.calls.append(list(args))
+                    return 0, self.stamp + "\n", ""
+                return super().run(args, stdin, timeout)
+        fr = Stamped()
+        self.agent.runner = fr
+        self.agent._xray_stamp["v"] = None
+        self.agent.op_create({"username": "r2", "volume_gb": 1, "duration_days": 5})
+        self.agent.poll_usage_once()  # stamp اولیه ثبت می‌شود
+        fr.calls.clear()
+        fr.stamp = "999"  # xray بیرون از ایجنت ریستارت شد
+        self.agent.poll_usage_once()
+        self.assertTrue(any("restart" in c for c in fr.calls))  # config دوباره از users.json ساخته شد
+        cfg = json.loads(Path(self.tmp, "xray.json").read_text())
+        uid = self.agent._load_users()["r2"]["uuid"]
+        self.assertIn(uid, json.dumps(cfg))
+
     def test_quota_expiry_first_use(self):
         self.agent.op_create({"username": "u2", "volume_gb": 1, "duration_days": 10, "start_on_first_use": True})
         self.assertEqual(self.agent._load_users()["u2"]["expire_ts"], 0)
@@ -125,6 +161,16 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(len(lines), 4)
         self.assertIn("subscription-userinfo", resp.headers)
         self.assertTrue(json.load(urlopen(Request(api + "/users/h1/online", headers=tok)))["online"])
+        settings = json.load(urlopen(Request(api + "/settings", headers=tok)))
+        self.assertEqual(settings["domain"], "cdn.example.com")
+        patch = Request(api + "/settings", data=json.dumps({
+            "title": "NewTitle", "fingerprint": "firefox", "sni": "sni.example.com", "host": "host.example.com"
+        }).encode(), headers={**tok, "Content-Type": "application/json"}, method="PATCH")
+        updated = json.load(urlopen(patch))
+        self.assertEqual(updated["settings"]["title"], "NewTitle")
+        persisted = json.loads(Path(self.tmp, "node.json").read_text())
+        self.assertEqual(persisted["fingerprint"], "firefox")
+        self.assertEqual(self.agent.build_links(persisted, self.agent.op_create({"username": "settings-user"}) and self.agent._load_users()["settings-user"], "settings-user")[0].split("?")[1].split("&")[2], "sni=sni.example.com")
         srv.shutdown()
 
 
@@ -146,8 +192,16 @@ class InstallerTest(unittest.TestCase):
     def test_decoy_site_and_paths_unique(self):
         d = Path(tempfile.mkdtemp())
         installer.render_decoy(d, "CineVault")
-        for f in ("index.html", "browse.html", "watch.html", "404.html", "style.css", "robots.txt"):
+        for f in ("index.html", "browse.html", "watch.html", "about.html", "contact.html", "404.html", "style.css", "app.js", "favicon.svg", "robots.txt"):
             self.assertTrue((d / f).exists(), f)
+        home = (d / "index.html").read_text("utf-8")
+        app = (d / "app.js").read_text("utf-8")
+        self.assertIn("Trending this week", home)
+        self.assertIn("globalSearch", home)
+        self.assertIn("genreFilters", (d / "browse.html").read_text("utf-8"))
+        self.assertIn("watchlist", app)
+        self.assertIn("sortTitles", app)
+        self.assertIn("@media(max-width:760px)", (d / "style.css").read_text("utf-8"))
         a = installer.build_node("x.com", 443, ["ws"], "T")
         b = installer.build_node("x.com", 443, ["ws"], "T")
         self.assertNotEqual(a["api_token"], b["api_token"])
@@ -175,6 +229,10 @@ class ProviderTest(unittest.TestCase):
             calls.append((method, path, body))
             if method == "DELETE":
                 return {"deleted": True}
+            if path == "/settings" and method == "GET":
+                return {"domain": "cdn.example.com", "port": 443, "title": "Node", "transports": ["ws"]}
+            if path == "/settings" and method == "PATCH":
+                return {"settings": body}
             if path.endswith("/online"):
                 return {"online": True}
             return {"username": "a b", "subscription_url": "https://x/sub/tok", "used_bytes": 5,
@@ -186,8 +244,12 @@ class ProviderTest(unittest.TestCase):
         self.assertEqual(r.subscription_url, "https://x/sub/tok")
         self.assertEqual(asyncio.run(p.get_user_usage("a b"))["used_bytes"], 5)
         self.assertTrue(asyncio.run(p.is_client_online("a b")))
+        self.assertEqual(asyncio.run(p.get_settings())["domain"], "cdn.example.com")
+        changed = asyncio.run(p.update_settings({"title": "Updated"}))
+        self.assertEqual(changed["title"], "Updated")
         self.assertTrue(asyncio.run(p.delete_user("a b")))
-        self.assertEqual(calls[3][1], "/users/a%20b")
+        self.assertEqual(calls[1][1], "/users/a%20b")
+        self.assertIn(("PATCH", "/settings", {"title": "Updated"}), calls)
 
 
 if __name__ == "__main__":
