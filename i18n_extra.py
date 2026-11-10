@@ -3033,11 +3033,14 @@ EXTRA_PHRASES.update({
     ('حداکثر ۵۰ بنر مجاز است.', 'At most 50 banners are allowed.'),
     ('برای خرید باید شماره موبایل خود را تایید کنید.', 'To buy, verify your phone number first.'),
     ('ارسال پیام به چت بات ناموفق بود؛ ابتدا بات را استارت کنید.', 'Sending the message to the bot chat failed; start the bot first.'),
-    ('⛔️ پیش\u200cشماره\u200cی این شماره مجاز نیست. شماره\u200cهای مجاز: {x}', '⛔️ This phone prefix is not allowed. Allowed numbers: {x}'),
-    ('📱 برای خرید، شماره موبایل خود را فقط با دکمه\u200cی «اشتراک\u200cگذاری شماره موبایل» پایین ارسال کنید.\n\nشماره\u200cهای مجاز: {x}\n\n⚠️ شماره\u200cی تایپ\u200cشده یا شماره\u200cی افراد دیگر پذیرفته نمی\u200cشود.', '📱 To buy, send your phone number only with the “Share phone number” button below.\n\nAllowed numbers: {x}\n\n⚠️ A typed number or someone else’s number is not accepted.'),
-    ('حداکثر {x} بنر مجاز است.', 'At most {x} banners are allowed.'),
 })
 
 EXTRA_DYNAMIC_PHRASES += [
 
+]
+
+EXTRA_DYNAMIC_PHRASES += [
+    ('⛔️ پیش\u200cشماره\u200cی این شماره مجاز نیست. شماره\u200cهای مجاز: {x}', '⛔️ This phone prefix is not allowed. Allowed numbers: {x}'),
+    ('📱 برای خرید، شماره موبایل خود را فقط با دکمه\u200cی «اشتراک\u200cگذاری شماره موبایل» پایین ارسال کنید.\n\nشماره\u200cهای مجاز: {x}\n\n⚠️ شماره\u200cی تایپ\u200cشده یا شماره\u200cی افراد دیگر پذیرفته نمی\u200cشود.', '📱 To buy, send your phone number only with the “Share phone number” button below.\n\nAllowed numbers: {x}\n\n⚠️ A typed number or someone else’s number is not accepted.'),
+    ('حداکثر {x} بنر مجاز است.', 'At most {x} banners are allowed.'),
 ]
