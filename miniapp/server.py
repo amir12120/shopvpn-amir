@@ -5655,7 +5655,6 @@ async def api_admin_create_product(body: ProductCreate, auth=Depends(require_sen
                 raise HTTPException(status_code=400, detail=tr(f"دریافت مقصدهای پنل {sid} ناموفق بود: {str(exc)[:180]}"))
 
     if extra_panel_ids and (base_users or extra_user_price or max_users):
-        from panel_capabilities import all_panels_support, USER_LIMIT
         all_rows = [db.get_panel_server(sid) for sid in [provision_server_id] + extra_panel_ids]
         try:
             base_users, extra_user_price, max_users = normalize_user_limit(
