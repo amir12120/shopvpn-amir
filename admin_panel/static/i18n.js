@@ -931,6 +931,17 @@
     "📝 محتوا و متن‌ها": "📝 Content & text",
     "💳 پرداخت و مالی": "💳 Payments & finance",
     "⚙️ سرویس‌های ویژه": "⚙️ Special services",
+    "🛒 فروش و سرویس‌ها": "🛒 Sales & services",
+    "محتوای ربات": "Bot content",
+    "🎁 رشد و تعامل": "🎁 Growth & engagement",
+    "🔗 اشتراک اختصاصی": "🔗 Dedicated subscription",
+    "🤖 هوش مصنوعی": "🤖 AI",
+    "🛠 سیستم و پایش": "🛠 System & monitoring",
+    "فروش و سرویس‌ها": "Sales & services",
+    "رشد و تعامل": "Growth & engagement",
+    "اشتراک اختصاصی": "Dedicated subscription",
+    "هوش مصنوعی": "AI",
+    "سیستم و پایش": "System & monitoring",
     "📱 اپ موبایل": "📱 Mobile app",
     "تنظیمات": "Settings",
     "پیکربندی محتوا، پرداخت، کمپین و سرویس‌های ربات": "Configure bot content, payments, campaigns, and services",
@@ -1154,5 +1165,6 @@
     (root||document.body).querySelectorAll?.('[placeholder],[title],[aria-label]').forEach(e=>['placeholder','title','aria-label'].forEach(a=>{if(e.hasAttribute(a))e.setAttribute(a,tr(e.getAttribute(a)))}));
   }
   window.ShopVPNTranslate=tr; window.ShopVPNLoadLanguage=loadCatalog; window.ShopVPNApplyI18n=()=>apply(document.body);
-  document.addEventListener('DOMContentLoaded',async()=>{await apply(document.body); new MutationObserver(m=>m.forEach(x=>x.addedNodes.forEach(n=>{if(n.nodeType===1)apply(n)}))).observe(document.body,{childList:true,subtree:true});});
+  const __svInit=async()=>{await apply(document.body); new MutationObserver(m=>m.forEach(x=>x.addedNodes.forEach(n=>{if(n.nodeType===1)apply(n)}))).observe(document.body,{childList:true,subtree:true});};
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',__svInit); else __svInit();
 })();

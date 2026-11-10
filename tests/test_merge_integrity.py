@@ -136,6 +136,13 @@ UPSTREAM_FEATURE_MODULES = (
     "buy_guide.py",
     "card_payment_ui.py",
     "force_join_channels.py",
+    # --- upstream batch: hourly system cron, signup config gift, emoji prefs,
+    # --- Stealth VLESS panel type, web DB manager ---
+    "cron_checks.py",
+    "welcome_gift.py",
+    "emoji_prefs.py",
+    "stealth_auto_install.py",
+    "panel_providers/stealth_provider.py",
 )
 
 # Upstream keeps re-uploading these with a module-level `from i18n import tr`
@@ -1032,3 +1039,178 @@ def test_wui_panel_migration_and_multi_cards_are_wired():
 
     # The fork does not resurrect upstream's upload duplicates.
     assert not (ROOT / "app.js").exists(), "the 9k-line root app.js upload duplicate came back"
+
+
+def test_cron_welcome_gift_emoji_and_stealth_are_wired():
+    """The 4.25.0 upstream batch must stay reachable, not just present on disk.
+
+    File existence is not wiring: each of these modules has to be imported and
+    actually reached from a loop, a handler, a route or a DB path.
+    """
+    bot_manager = (ROOT / "bot_manager.py").read_text(encoding="utf-8")
+    # hourly system cron and the signup config gift both run as real tasks
+    assert "from cron_checks import cron_loop" in bot_manager
+    assert "from welcome_gift import welcome_gift_loop" in bot_manager
+    assert "asyncio.create_task(cron_loop(bot, db))" in bot_manager
+    assert "asyncio.create_task(welcome_gift_loop(bot, db))" in bot_manager
+    assert '"cron_task": cron_task' in bot_manager
+    assert '"welcome_gift_task": welcome_gift_task' in bot_manager
+    # ...and both are stopped with the rest of the tasks
+    assert '"cron_task", "daily_report_task"' in bot_manager
+    assert '"signup_gift_task", "welcome_gift_task"' in bot_manager
+
+    # the cron state is exposed to the web panel, and can be triggered from it
+    server = (ROOT / "admin_panel/server.py").read_text(encoding="utf-8")
+    assert '@app.get("/api/cron/status")' in server
+    assert '@app.post("/api/cron/run")' in server
+    assert "import cron_checks" in server
+    assert "cron_checks.load_state(db)" in server
+    assert "cron_checks.request_run(db)" in server
+
+    # the gift queue is a real table with real DB methods
+    base = (ROOT / "db/_base.py").read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS welcome_gift_queue" in base
+    system = (ROOT / "db/system.py").read_text(encoding="utf-8")
+    for method in ("enqueue_welcome_gift", "claim_due_welcome_gifts", "save_welcome_gift_result",
+                   "retry_welcome_gift_delivery", "finish_welcome_gift", "retry_or_fail_welcome_gift",
+                   "welcome_gift_stats", "get_welcome_gift_status"):
+        assert f"def {method}(" in system, f"welcome gift DB method {method} is missing"
+    # settings the gift loop reads must exist as defaults
+    constants = (ROOT / "db/constants.py").read_text(encoding="utf-8")
+    for key in ("welcome_gift_enabled", "welcome_gift_product_id", "welcome_gift_delay_minutes"):
+        assert f'"{key}"' in constants, f"default setting {key} is missing"
+
+    # the gift is reachable from the bot: admin editor + user claim button
+    handlers_admin = (ROOT / "handlers_admin.py").read_text(encoding="utf-8")
+    assert '@router.callback_query(F.data == "adm_welcome_gift")' in handlers_admin
+    assert '@router.callback_query(F.data == "adm_wgift_toggle")' in handlers_admin
+    handlers_user = (ROOT / "handlers_user.py").read_text(encoding="utf-8")
+    assert '@router.callback_query(F.data == "welcome_gift_claim")' in handlers_user
+    assert "class AdminWelcomeGift(StatesGroup)" in (ROOT / "states.py").read_text(encoding="utf-8")
+
+    # configurable emojis: module -> admin menu -> keyboards -> category rows
+    assert "import emoji_prefs" in handlers_admin
+    assert '@router.callback_query(F.data == "adm_emoji_menu")' in handlers_admin
+    keyboards = (ROOT / "keyboards.py").read_text(encoding="utf-8")
+    assert "def admin_emoji_menu_kb(" in keyboards
+    catalog = (ROOT / "db/catalog.py").read_text(encoding="utf-8")
+    assert "def set_category_emoji(" in catalog
+    for key in ("emoji_product_in_stock", "emoji_category", "emoji_test_plan"):
+        assert f'"{key}"' in constants, f"emoji default {key} is missing"
+
+    # Stealth VLESS is a registered provider type, token-only and setup-free
+    providers = (ROOT / "panel_providers/__init__.py").read_text(encoding="utf-8")
+    assert "from .stealth_provider import StealthProvider" in providers
+    assert '"stealth": StealthProvider' in providers
+    assert '"stealth": "stealth"' in providers
+    assert 'NO_SETUP_PANEL_TYPES = {"stealth"}' in providers
+    assert '"stealth": "Stealth VLESS"' in providers
+    # the web panel honours the no-setup list and offers the auto-install route
+    assert "NO_SETUP_PANEL_TYPES" in server
+    assert '@app.post("/api/stealth/nodes/auto-install")' in server
+    assert '@app.get("/api/stealth/nodes/install-jobs/{job_id}")' in server
+    # the module upstream forgot to ship exists and exposes the same contract
+    stealth = (ROOT / "stealth_auto_install.py").read_text(encoding="utf-8")
+    assert "class InstallError(Exception)" in stealth
+    assert "def start_install(" in stealth
+    assert "def get_job(" in stealth
+    # the installer and agent it uploads are shipped with the fork
+    assert (ROOT / "deploy/install-shopvpn-stealth.py").exists()
+    assert (ROOT / "deploy/shopvpn-stealth-agent.py").exists()
+
+    # the web DB manager is owner-only and audited
+    for route in ("/api/database/tables", "/api/database/table/{table_name}",
+                  "/api/database/schema/{table_name}", "/api/database/backup",
+                  "/api/database/audit"):
+        assert f'@app.get("{route}")' in server, f"DB manager route {route} is missing"
+    assert "require_owner" in server
+    assert "_shopvpn_db_audit" in server
+
+
+def test_per_user_test_limit_and_config_search_are_wired():
+    """The per-user test cap and the config search/manage flow must reach the UI."""
+    system = (ROOT / "db/system.py").read_text(encoding="utf-8")
+    assert "def get_effective_test_limit(" in system
+    assert "def set_user_test_limit_override(" in system
+    # the AI support tool must honour the per-user cap, not the global constant
+    ai_support = (ROOT / "ai_support.py").read_text(encoding="utf-8")
+    assert "db.get_effective_test_limit(user_tg_id)" in ai_support
+    assert "test_max_per_user" in (ROOT / "db/constants.py").read_text(encoding="utf-8")
+
+    handlers_admin = (ROOT / "handlers_admin.py").read_text(encoding="utf-8")
+    assert '@router.callback_query(F.data.startswith("adm_user_test_limit:"))' in handlers_admin
+    assert '@router.callback_query(F.data == "adm_cfg_search")' in handlers_admin
+    states = (ROOT / "states.py").read_text(encoding="utf-8")
+    assert "class AdminUserTestLimit(StatesGroup)" in states
+    assert "class AdminConfigSearch(StatesGroup)" in states
+
+    dedicated = (ROOT / "db/dedicated_sub.py").read_text(encoding="utf-8")
+    assert "def search_custom_configs(" in dedicated
+    assert "def search_bank_configs(" in dedicated
+    keyboards = (ROOT / "keyboards.py").read_text(encoding="utf-8")
+    assert "def admin_cfg_search_results_kb(" in keyboards
+    assert "def admin_cfg_danger_confirm_kb(" in keyboards
+
+
+def test_admin_hub_layout_and_search_are_wired():
+    """The sectioned admin hub and the settings search must stay reachable."""
+    keyboards = (ROOT / "keyboards.py").read_text(encoding="utf-8")
+    assert "ADMIN_HUB_SECTIONS" in keyboards
+    assert "def resolve_admin_category(" in keyboards
+    assert "def admin_hub_text(" in keyboards
+    assert "def admin_search_results(" in keyboards
+    # exactly one definition: upstream re-uploads a duplicate that shadows the first
+    assert keyboards.count("def blupal_settings_kb(") == 1, (
+        "duplicate blupal_settings_kb definition came back from upstream"
+    )
+    handlers_admin = (ROOT / "handlers_admin.py").read_text(encoding="utf-8")
+    assert '@router.callback_query(F.data.startswith("adm_hub:"))' in handlers_admin
+    assert '@router.callback_query(F.data == "adm_search")' in handlers_admin
+    assert "@router.message(AdminPanelSearch.waiting_query)" in handlers_admin
+    assert "class AdminPanelSearch(StatesGroup)" in (ROOT / "states.py").read_text(encoding="utf-8")
+    admin_help = (ROOT / "admin_help.py").read_text(encoding="utf-8")
+    assert "def hub_for_back(" in admin_help
+    assert "def track(" in admin_help
+    # the fork's reseller-section toggle survives the new hub routing
+    assert "reseller_section.TOGGLE_CALLBACK" in handlers_admin
+    assert "adm_reseller_section_toggle" in keyboards
+
+
+def test_broadcast_targeting_and_product_layout_are_wired():
+    """Broadcast targeting, config management and the product layout toggle."""
+    users = (ROOT / "db/users.py").read_text(encoding="utf-8")
+    assert "def get_user_ids_by_service_state(" in users
+    handlers_admin = (ROOT / "handlers_admin.py").read_text(encoding="utf-8")
+    for cb in ("adm_broadcast_adv", "adm_broadcast_fwd", "adm_broadcast_status",
+               "adm_broadcast_stop", "adm_broadcast_single", "adm_broadcast_channel"):
+        assert f'F.data == "{cb}"' in handlers_admin, f"broadcast callback {cb} is missing"
+    assert '@router.callback_query(F.data.startswith("adm_broadcast_target:"))' in handlers_admin
+    assert '@router.message(Command("pin"))' in handlers_admin
+    assert '@router.message(Command("unpin"))' in handlers_admin
+    assert "def admin_broadcast_advanced_kb(" in (ROOT / "keyboards.py").read_text(encoding="utf-8")
+
+    constants = (ROOT / "db/constants.py").read_text(encoding="utf-8")
+    for key in ("buy_product_layout", "buy_product_order", "btn_subcat_select_style"):
+        assert f'"{key}"' in constants, f"layout setting {key} is missing"
+    assert '@router.callback_query(F.data == "adm_buyflow_layout_toggle")' in handlers_admin
+    assert '@router.callback_query(F.data == "adm_buyflow_order_toggle")' in handlers_admin
+
+    # test plans are provisioned through the product path, not the legacy one
+    tcp = (ROOT / "test_config_provision.py").read_text(encoding="utf-8")
+    assert "def plan_to_product(" in tcp
+    assert "direct_panel_provision.provision_direct(" in tcp
+    assert "async def _provision_like_product(" in tcp
+
+
+def test_stealth_install_scripts_do_not_touch_the_fork_install_flow():
+    """The Stealth node scripts are standalone; the lean install flow is untouched."""
+    for name in ("install.sh", "manage.sh", "update.sh", "preflight.sh", "cleanup.sh",
+                 "setup_local_translation.sh", "check_upstream.sh"):
+        text = (ROOT / name).read_text(encoding="utf-8", errors="replace")
+        assert "shopvpn-stealth" not in text, f"{name} must not reference the Stealth node scripts"
+        assert "stealth_auto_install" not in text, f"{name} must not reference stealth_auto_install"
+    # cleanup.sh still sweeps the heavy caches after an install
+    cleanup = (ROOT / "cleanup.sh").read_text(encoding="utf-8")
+    assert "while IFS= read -r h" in cleanup
+    assert "journalctl --vacuum-size=" in cleanup
+    assert "SHOPVPN_JOURNAL_MAX" in cleanup

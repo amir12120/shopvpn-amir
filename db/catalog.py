@@ -130,6 +130,53 @@ class CatalogMixin:
     # -----------------------------------------------------------------------
 
 
+    def get_user_invoice_items(self, tg_id: int) -> list:
+        """سرویس‌های خریداری‌شده‌ی کاربر به‌همراه سهم مبلغ هر سرویس از سفارش."""
+        items = []
+        with self._get_conn() as conn:
+            custom = conn.execute(
+                "SELECT cc.id AS service_id, 'custom' AS service_kind, "
+                "COALESCE(NULLIF(cc.display_name,''), cc.username) AS service_name, "
+                "cc.volume_gb, cc.duration_days, cc.created_at, cc.expires_at, cc.order_id, "
+                "o.final_price, o.base_price, p.name AS product_name "
+                "FROM custom_configs cc LEFT JOIN orders o ON o.id=cc.order_id "
+                "LEFT JOIN products p ON p.id=o.product_id "
+                "WHERE cc.user_id=? AND COALESCE(cc.source,'') NOT IN ('test','welcome_gift','gift') "
+                "AND o.id IS NOT NULL AND o.status='approved' ORDER BY cc.created_at, cc.id",
+                (int(tg_id),),
+            ).fetchall()
+            bank = conn.execute(
+                "SELECT cf.id AS service_id, 'bank' AS service_kind, "
+                "COALESCE(p.name,'سرویس بانکی') AS service_name, "
+                "NULL AS volume_gb, NULL AS duration_days, cf.assigned_at AS created_at, "
+                "cf.expires_at, cf.order_id, o.final_price, o.base_price, p.name AS product_name "
+                "FROM configs cf LEFT JOIN orders o ON o.id=cf.order_id "
+                "LEFT JOIN products p ON p.id=cf.product_id "
+                "WHERE cf.assigned_user_id=? "
+                "AND o.id IS NOT NULL AND o.status='approved' ORDER BY cf.assigned_at, cf.id",
+                (int(tg_id),),
+            ).fetchall()
+            items = [dict(r) for r in custom] + [dict(r) for r in bank]
+            counts = {}
+            for item in items:
+                oid = item.get("order_id")
+                if oid:
+                    counts[oid] = counts.get(oid, 0) + 1
+            order_offsets = {}
+            for item in items:
+                total = item.get("final_price")
+                if total is None:
+                    total = item.get("base_price") or 0
+                total = max(0, int(total or 0))
+                oid = item.get("order_id")
+                count = max(1, counts.get(oid, 1))
+                offset = order_offsets.get(oid, 0)
+                order_offsets[oid] = offset + 1
+                # تقسیم مبلغ سفارش بین سرویس‌های همان خرید، بدون گم‌شدن
+                # مانده‌ی ریالی در سفارش‌های چندسرویسی.
+                item["amount"] = total // count + (1 if offset < (total % count) else 0)
+        return sorted(items, key=lambda x: (x.get("created_at") or "", x.get("service_id") or 0), reverse=True)
+
     def get_user_custom_configs(self, tg_id: int):
         with self._get_conn() as conn:
             return conn.execute("SELECT * FROM custom_configs WHERE user_id=? ORDER BY id DESC", (tg_id,)).fetchall()
@@ -254,6 +301,29 @@ class CatalogMixin:
         with self._get_conn() as conn:
             return conn.execute("SELECT * FROM categories WHERE id=?", (cat_id,)).fetchone()
 
+
+    def set_category_emoji(self, cat_id: int, field: str, value) -> None:
+        """field: emoji (دکمه‌ی خود دسته) یا product_emoji (علامت موجودی محصولات آن دسته). مقدار خالی = پیش‌فرض سراسری، '-' = بدون ایموجی."""
+        if field not in ("emoji", "product_emoji"):
+            raise ValueError("invalid emoji field")
+        value = (value or "").strip() or None
+        def op():
+            with self._get_conn() as conn:
+                conn.execute(f"UPDATE categories SET {field}=? WHERE id=?", (value, int(cat_id)))
+        self._sqlite_retry(op)
+
+
+    def set_category_button_color(self, cat_id: int, color: str = None) -> None:
+        """سبک رنگ دکمه دسته/زیردسته مطابق Telegram Bot API؛ None یعنی پیش‌فرض."""
+        value = (color or "").strip().lower() or None
+        if value not in (None, "primary", "success", "danger"):
+            raise ValueError("invalid category button style")
+        def op():
+            with self._get_conn() as conn:
+                cur = conn.execute("UPDATE categories SET button_color=? WHERE id=?", (value, int(cat_id)))
+                if cur.rowcount == 0:
+                    raise ValueError("category not found")
+        self._sqlite_retry(op)
 
     def toggle_category(self, cat_id: int):
         def op():
@@ -497,12 +567,12 @@ class CatalogMixin:
         with self._get_conn() as conn:
             if active_only:
                 rows = conn.execute(
-                    "SELECT * FROM products WHERE category_id=? AND is_active=1 ORDER BY sort_order, id",
+                    "SELECT * FROM products WHERE category_id=? AND is_active=1 AND COALESCE(is_hidden,0)=0 ORDER BY sort_order, id",
                     (category_id,),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM products WHERE category_id=? ORDER BY sort_order, id", (category_id,)
+                    "SELECT * FROM products WHERE category_id=? AND COALESCE(is_hidden,0)=0 ORDER BY sort_order, id", (category_id,)
                 ).fetchall()
             return rows
 
@@ -512,7 +582,7 @@ class CatalogMixin:
         with self._get_conn() as conn:
             return conn.execute(
                 "SELECT p.*, c.name as category_name FROM products p "
-                "JOIN categories c ON p.category_id=c.id ORDER BY c.sort_order, p.sort_order, p.id"
+                "JOIN categories c ON p.category_id=c.id WHERE COALESCE(p.is_hidden,0)=0 ORDER BY c.sort_order, p.sort_order, p.id"
             ).fetchall()
 
 
@@ -529,6 +599,39 @@ class CatalogMixin:
             for order, product_id in enumerate(ids):
                 conn.execute("UPDATE products SET sort_order=? WHERE id=?", (order, product_id))
 
+
+    def clone_product_as_hidden_gift(self, template_product_id: int, gift_name: str) -> int:
+        """یک محصول مستقل و مخفی برای هدیه می‌سازد؛ تمام تنظیمات پنل/اینباند/حجم/مدت از قالب کپی می‌شود."""
+        gift_name = (gift_name or "").strip()
+        if not gift_name or len(gift_name) > 100:
+            raise ValueError("نام محصول هدیه معتبر نیست.")
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM products WHERE id=? AND COALESCE(is_hidden,0)=0",
+                (int(template_product_id),),
+            ).fetchone()
+            if not row:
+                raise ValueError("محصول الگو پیدا نشد.")
+            columns = [r["name"] for r in conn.execute("PRAGMA table_info(products)").fetchall()]
+            columns = [c for c in columns if c != "id"]
+            values = []
+            for col in columns:
+                if col == "name":
+                    values.append(gift_name)
+                elif col == "price":
+                    values.append(0)
+                elif col == "is_hidden":
+                    values.append(1)
+                elif col == "is_active":
+                    values.append(1)
+                else:
+                    values.append(row[col] if col in row.keys() else None)
+            placeholders = ",".join("?" for _ in columns)
+            cur = conn.execute(
+                f"INSERT INTO products ({','.join(columns)}) VALUES ({placeholders})",
+                values,
+            )
+            return int(cur.lastrowid)
 
     def get_product(self, product_id: int):
         self.expire_product_discounts()
@@ -1193,28 +1296,55 @@ class CatalogMixin:
             return conn.execute("SELECT * FROM test_config_plans WHERE id=?", (plan_id,)).fetchone()
 
 
-    def create_test_config_plan(self, name: str, name_prefix: str, panel_server_id: int,
-                                 volume_mb: int, duration_hours: int) -> int:
+    def create_test_config_plan(self, name: str, name_prefix: str, panel_server_id, volume_mb: int,
+                                 duration_hours: int, provision_ssh_node_id=None, provision_ssh_protocol="ssh",
+                                 provision_target_config=None, base_users: int = 0, extra_user_price: int = 0,
+                                 max_users: int = 0, extra_panel_ids=(), extra_ssh_node_ids=(),
+                                 extra_panel_target_configs=None) -> int:
         with self._get_conn() as conn:
             row = conn.execute("SELECT COALESCE(MAX(sort_order), -1) AS m FROM test_config_plans").fetchone()
             cur = conn.execute(
                 "INSERT INTO test_config_plans (name, name_prefix, panel_server_id, volume_mb, "
-                "duration_hours, is_active, sort_order) VALUES (?, ?, ?, ?, ?, 1, ?)",
-                (name, name_prefix, panel_server_id, volume_mb, duration_hours, row["m"] + 1),
+                "duration_hours, is_active, sort_order, provision_ssh_node_id, provision_ssh_protocol, "
+                "provision_target_config, base_users, extra_user_price, max_users) "
+                "VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)",
+                (name, name_prefix, panel_server_id or None, volume_mb, duration_hours, row["m"] + 1,
+                 provision_ssh_node_id or None, provision_ssh_protocol or "ssh",
+                 json.dumps(provision_target_config, ensure_ascii=False) if provision_target_config else None,
+                 int(base_users or 0), int(extra_user_price or 0), int(max_users or 0)),
             )
-            return cur.lastrowid
+            plan_id = cur.lastrowid
+        self.set_product_extra_targets(-plan_id, extra_panel_ids, extra_ssh_node_ids, extra_panel_target_configs)
+        return plan_id
 
 
     def update_test_config_plan(self, plan_id: int, **fields) -> None:
         """fields می‌تواند شامل هرکدام از ستون‌های test_config_plans باشد،
-        مثلاً update_test_config_plan(3, name=\"پلن یک‌ساعته\", is_active=0)."""
+        مثلاً update_test_config_plan(3, name=\"پلن یک‌ساعته\", is_active=0).
+        مقصدهای اضافه (چندپنلی/چندنودی) با کلیدهای extra_panel_ids، extra_ssh_node_ids و
+        extra_panel_target_configs جدا ذخیره می‌شوند."""
+        if "panel_server_id" in fields and "provision_target_config" not in fields:
+            current = self.get_test_config_plan(plan_id)
+            if current is not None and (current["panel_server_id"] or None) != (fields["panel_server_id"] or None):
+                fields["provision_target_config"] = None
+        extra_keys = ("extra_panel_ids", "extra_ssh_node_ids", "extra_panel_target_configs")
+        if any(k in fields for k in extra_keys):
+            self.set_product_extra_targets(
+                -int(plan_id), fields.get("extra_panel_ids") or (), fields.get("extra_ssh_node_ids") or (),
+                fields.get("extra_panel_target_configs"),
+            )
         if not fields:
             return
         allowed = {"name", "name_prefix", "panel_server_id", "volume_mb", "duration_hours",
-                   "is_active", "sort_order"}
+                   "is_active", "sort_order", "provision_ssh_node_id", "provision_ssh_protocol",
+                   "provision_target_config", "base_users", "extra_user_price", "max_users", "emoji"}
         sets, values = [], []
         for k, v in fields.items():
             if k in allowed:
+                if k == "provision_target_config":
+                    v = json.dumps(v, ensure_ascii=False) if v else None
+                if k in ("panel_server_id", "provision_ssh_node_id", "emoji"):
+                    v = v or None
                 sets.append(f"{k}=?")
                 values.append(v)
         if not sets:
@@ -1227,6 +1357,15 @@ class CatalogMixin:
     def delete_test_config_plan(self, plan_id: int) -> None:
         with self._get_conn() as conn:
             conn.execute("DELETE FROM test_config_plans WHERE id=?", (plan_id,))
+        self.clear_product_extra_targets(-int(plan_id))
+
+
+    def retag_custom_config(self, config_id: int, source: str, product_id=None) -> None:
+        with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE custom_configs SET source=?, product_id=? WHERE id=?",
+                (source, product_id, int(config_id)),
+            )
 
 
     def toggle_test_config_plan(self, plan_id: int) -> None:
@@ -1808,6 +1947,34 @@ class CatalogMixin:
             custom_config_id, "renewal",
             f"+{add_volume_gb} گیگ / +{add_days} روز" if (add_volume_gb or add_days) else "تمدید کامل",
         )
+        return {"volume_gb": new_volume, "duration_days": new_duration, "expires_at": new_expires_at}
+
+
+    def apply_custom_config_reduction(self, custom_config_id: int, sub_volume_gb: float = 0, sub_days: int = 0):
+        """بعد از موفقیت کاهش روی پنل، رکورد محلی را هم‌سو می‌کند؛ حجم/مدت هیچ‌وقت به صفر یا منفی (=نامحدود) نمی‌رسد."""
+        with self._get_conn() as conn:
+            row = conn.execute("SELECT * FROM custom_configs WHERE id=?", (custom_config_id,)).fetchone()
+            if not row:
+                return None
+            new_volume = row["volume_gb"]
+            if sub_volume_gb:
+                new_volume = float(row["volume_gb"] or 0) - float(sub_volume_gb)
+                if new_volume <= 0:
+                    return None
+            new_duration = row["duration_days"]
+            new_expires_at = row["expires_at"]
+            if sub_days:
+                new_duration = int(row["duration_days"] or 0) - int(sub_days)
+                if new_duration <= 0 or not row["expires_at"]:
+                    return None
+                try:
+                    new_expires_at = (datetime.fromisoformat(row["expires_at"]) - timedelta(days=int(sub_days))).isoformat()
+                except ValueError:
+                    return None
+            conn.execute(
+                "UPDATE custom_configs SET volume_gb=?, duration_days=?, expires_at=? WHERE id=?",
+                (new_volume, new_duration, new_expires_at, custom_config_id),
+            )
         return {"volume_gb": new_volume, "duration_days": new_duration, "expires_at": new_expires_at}
 
 

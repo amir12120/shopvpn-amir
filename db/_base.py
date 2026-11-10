@@ -194,6 +194,7 @@ class DatabaseBase:
                     first_name TEXT,
                     is_blocked INTEGER DEFAULT 0,
                     test_used INTEGER DEFAULT 0,
+                    test_limit_override INTEGER,
                     referred_by INTEGER,
                     referral_credit INTEGER DEFAULT 0,
                     referral_first_purchase_rewarded INTEGER DEFAULT 0,
@@ -243,6 +244,7 @@ class DatabaseBase:
                     price INTEGER NOT NULL,
                     description TEXT DEFAULT '',
                     is_active INTEGER DEFAULT 1,
+                    is_hidden INTEGER DEFAULT 0,
                     payment_methods TEXT,
                     FOREIGN KEY(category_id) REFERENCES categories(id) ON DELETE CASCADE
                 );
@@ -273,12 +275,18 @@ class DatabaseBase:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL,
                     name_prefix TEXT NOT NULL DEFAULT 'test',
-                    panel_server_id INTEGER NOT NULL REFERENCES panel_servers(id),
+                    panel_server_id INTEGER REFERENCES panel_servers(id),
                     volume_mb INTEGER NOT NULL DEFAULT 1024,
                     duration_hours INTEGER NOT NULL DEFAULT 24,
                     is_active INTEGER DEFAULT 1,
                     sort_order INTEGER DEFAULT 0,
-                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    provision_ssh_node_id INTEGER,
+                    provision_ssh_protocol TEXT DEFAULT 'ssh',
+                    provision_target_config TEXT,
+                    base_users INTEGER DEFAULT 0,
+                    extra_user_price INTEGER DEFAULT 0,
+                    max_users INTEGER DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS idx_test_plans_active ON test_config_plans(is_active);
 
@@ -1371,6 +1379,18 @@ class DatabaseBase:
                 );
                 CREATE INDEX IF NOT EXISTS idx_reseller_credit_log_user ON reseller_credit_log(user_id);
 
+                CREATE TABLE IF NOT EXISTS welcome_gift_queue (
+                    user_id INTEGER PRIMARY KEY,
+                    due_at INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    error TEXT,
+                    result_json TEXT,
+                    updated_at INTEGER,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_welcome_gift_queue_due ON welcome_gift_queue(status, due_at);
+
                 CREATE TABLE IF NOT EXISTS product_waitlist (
                     product_id INTEGER NOT NULL,
                     user_id INTEGER NOT NULL,
@@ -1735,7 +1755,7 @@ class DatabaseBase:
     FACTORY_RESET_TABLES = (
         "users", "categories", "products", "configs", "config_activity", "test_configs",
         "test_config_plans", "wheel_prizes", "orders", "discount_codes", "discount_redemptions", "wallet_topups",
-        "crypto_invoices", "support_messages", "support_conversations",
+        "crypto_invoices", "support_messages", "support_conversations", "welcome_gift_queue",
         "admin_presence", "tickets", "ticket_messages", "ticket_departments", "ticket_department_admins", "admin_logs",
         "abangateway_invoices", "blupal_invoices", "noapay_invoices", "extra_gateway_invoices", "custom_gateways", "custom_gateway_invoices",
         "card_to_card_cards", "card_to_card_invoices", "payment_cards", "payment_card_assignments", "quota_enforcement_state", "quota_pool_members", "quota_pool_adjustments",
@@ -1796,7 +1816,48 @@ class DatabaseBase:
         return column in cols
 
 
+    TEST_PLAN_PRODUCT_COLUMNS = (
+        ("provision_ssh_node_id", "INTEGER"),
+        ("provision_ssh_protocol", "TEXT DEFAULT 'ssh'"),
+        ("provision_target_config", "TEXT"),
+        ("base_users", "INTEGER DEFAULT 0"),
+        ("extra_user_price", "INTEGER DEFAULT 0"),
+        ("max_users", "INTEGER DEFAULT 0"),
+        ("emoji", "TEXT"),
+    )
+
+    def _migrate_test_config_plans(self, conn):
+        if not self._column_exists(conn, "test_config_plans", "id"):
+            return
+        info = {r["name"]: r for r in conn.execute("PRAGMA table_info(test_config_plans)").fetchall()}
+        if info["panel_server_id"]["notnull"]:
+            old_cols = ["id", "name", "name_prefix", "panel_server_id", "volume_mb", "duration_hours",
+                        "is_active", "sort_order", "created_at"]
+            conn.execute("DROP TABLE IF EXISTS test_config_plans_new")
+            conn.execute(
+                "CREATE TABLE test_config_plans_new ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, "
+                "name_prefix TEXT NOT NULL DEFAULT 'test', "
+                "panel_server_id INTEGER REFERENCES panel_servers(id), "
+                "volume_mb INTEGER NOT NULL DEFAULT 1024, duration_hours INTEGER NOT NULL DEFAULT 24, "
+                "is_active INTEGER DEFAULT 1, sort_order INTEGER DEFAULT 0, "
+                "created_at TEXT DEFAULT CURRENT_TIMESTAMP, "
+                "provision_ssh_node_id INTEGER, provision_ssh_protocol TEXT DEFAULT 'ssh', "
+                "provision_target_config TEXT, base_users INTEGER DEFAULT 0, "
+                "extra_user_price INTEGER DEFAULT 0, max_users INTEGER DEFAULT 0, emoji TEXT)"
+            )
+            cols = ", ".join(old_cols)
+            conn.execute(f"INSERT INTO test_config_plans_new ({cols}) SELECT {cols} FROM test_config_plans")
+            conn.execute("DROP TABLE test_config_plans")
+            conn.execute("ALTER TABLE test_config_plans_new RENAME TO test_config_plans")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_test_plans_active ON test_config_plans(is_active)")
+            return
+        for col, ddl in self.TEST_PLAN_PRODUCT_COLUMNS:
+            if col not in info:
+                conn.execute(f"ALTER TABLE test_config_plans ADD COLUMN {col} {ddl}")
+
     def _migrate_columns(self, conn):
+        self._migrate_test_config_plans(conn)
         if self._column_exists(conn, "product_extra_targets", "id") and not self._column_exists(conn, "product_extra_targets", "target_config"):
             conn.execute("ALTER TABLE product_extra_targets ADD COLUMN target_config TEXT")
 
@@ -1924,8 +1985,14 @@ class DatabaseBase:
             ("discount_codes", "max_discount_amount", "INTEGER"),
             ("discount_codes", "product_ids", "TEXT"),
             ("products", "duration_days", "INTEGER DEFAULT 30"),
+            ("users", "test_limit_override", "INTEGER"),
+            ("welcome_gift_queue", "result_json", "TEXT"),
+            ("products", "is_hidden", "INTEGER DEFAULT 0"),
             ("products", "btn_style", "TEXT DEFAULT ''"),
             ("categories", "parent_id", "INTEGER"),
+            ("categories", "emoji", "TEXT"),
+            ("categories", "product_emoji", "TEXT"),
+            ("categories", "button_color", "TEXT"),
             ("panel_servers", "panel_category_id", "INTEGER"),
             ("configs", "expires_at", "TEXT"),
             ("configs", "renewal_reminder_sent", "INTEGER DEFAULT 0"),
