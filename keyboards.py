@@ -17,6 +17,8 @@ from aiogram.types import (
     WebAppInfo,
 )
 
+import os
+
 import account_naming
 import emoji_prefs
 import extra_gateway_registry
@@ -80,13 +82,14 @@ def language_kb(db=None, back_callback: str = "", callback_prefix: str = "langua
 
 
 
-def miniapp_inline_kb(miniapp_url: str) -> InlineKeyboardMarkup:
+def miniapp_inline_kb(miniapp_url: str, db=None) -> InlineKeyboardMarkup:
     """دکمه‌ی واقعی وب‌اپ به‌صورت inline (نه reply keyboard)، چون طبق تجربه‌ی عملی،
     initData وقتی از دکمه‌ی reply keyboard با web_app مستقیم باز شود، در برخی
     کلاینت‌های تلگرام همیشه خالی برمی‌گردد. راه اصلی و مطمئن، Menu Button
     (در bot_manager._sync_menu_button) است؛ این دکمه صرفاً یک مسیر جایگزین است."""
+    label = ((db.get_setting("miniapp_button_text", MINIAPP_BTN_TEXT) if db is not None else MINIAPP_BTN_TEXT) or MINIAPP_BTN_TEXT).strip()[:64]
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=tr(MINIAPP_BTN_TEXT), web_app=WebAppInfo(url=miniapp_url))]
+        [InlineKeyboardButton(text=tr(label), web_app=WebAppInfo(url=miniapp_url))]
     ])
 
 
@@ -110,7 +113,8 @@ def _menu_items(db, is_admin: bool, is_reseller: bool, is_main_bot: bool, show_r
     def item_miniapp():
         if settings.get("miniapp_enabled", "1") != "1":
             return None
-        return (MINIAPP_BTN_TEXT, "") if miniapp_url else None
+        label = (settings.get("miniapp_button_text") or MINIAPP_BTN_TEXT).strip()[:64]
+        return (label or MINIAPP_BTN_TEXT, settings.get("miniapp_button_style", "")) if miniapp_url else None
 
     def item_buy():
         return (settings.get("btn_buy", "🛒 خرید کانفیگ"), settings.get("btn_buy_style", ""))
@@ -280,9 +284,9 @@ def main_menu_inline_kb(db, is_admin: bool, is_reseller: bool = False, is_main_b
     miniapp_url = _miniapp_url(db, getattr(db, "_current_menu_language", ""))
 
     def _build_button(key, text, style):
-        if key == "miniapp" and miniapp_url:
-            return InlineKeyboardButton(text=text, web_app=WebAppInfo(url=miniapp_url))
         s = style if style in ("primary", "success", "danger") else None
+        if key == "miniapp" and miniapp_url:
+            return InlineKeyboardButton(text=text, web_app=WebAppInfo(url=miniapp_url), style=s)
         return InlineKeyboardButton(text=text, callback_data=f"mm:{key}", style=s)
 
     rows = [[_build_button(key, tr(text), style) for key, text, style in row] for row in item_rows]
@@ -362,7 +366,7 @@ def reseller_tier_detail_kb(code: str) -> InlineKeyboardMarkup:
 # دسته‌بندی‌ها / محصولات (کاربر)
 # ---------------------------------------------------------------------------
 
-def categories_kb(db, categories, is_main_bot: bool = True) -> InlineKeyboardMarkup:
+def categories_kb(db, categories, is_main_bot: bool = True, show_payg: bool = False) -> InlineKeyboardMarkup:
     rows = []
     custom_enabled = db.get_setting("custom_config_enabled", "0") == "1" or db.count_active_custom_config_products() > 0
     if db.is_full_access_bot(is_main_bot) and custom_enabled:
@@ -374,6 +378,13 @@ def categories_kb(db, categories, is_main_bot: bool = True) -> InlineKeyboardMar
             rows.append([InlineKeyboardButton(text=tr("🤖 راهنمای خرید هوشمند"), callback_data="buy_guide_start")])
     except Exception:
         pass
+    if show_payg and db.get_setting("payg_enabled", "1") == "1":
+        payg_text = db.get_setting("btn_payg", "💳 پرداخت به‌ازای مصرف")
+        payg_style = db.get_setting("btn_payg_style", "success")
+        rows.append([InlineKeyboardButton(
+            text=payg_text, callback_data="payg:open",
+            style=payg_style if payg_style in ("primary", "success", "danger") else None,
+        )])
     for cat in categories:
         label = emoji_prefs.with_emoji(emoji_prefs.category_emoji(db, cat), cat["name"])
         category_style = (cat["button_color"] if "button_color" in cat.keys() else None) or ""
@@ -574,7 +585,7 @@ def custom_config_username_kb() -> InlineKeyboardMarkup:
 # سفارش‌های من (منوی کانفیگ‌ها با قابلیت حذف)
 # ---------------------------------------------------------------------------
 
-def my_orders_menu_kb(items) -> InlineKeyboardMarkup:
+def my_orders_menu_kb(items, db=None) -> InlineKeyboardMarkup:
     """لیست سرویس‌های کاربر با نمایش بصری وضعیت فعال/منقضی.
 
     برای سازگاری با callerهای قدیمی، ``items`` همچنان حداقل به ``cb_id`` و
@@ -734,6 +745,7 @@ _ACCOUNT_HUB_CALLBACKS = {
     "acct_lootbox": ("acct_show_lootbox", "lb_menu"),
     "acct_add_service": ("acct_show_add_service", "acct:addsvc"),
     "acct_merge": ("acct_show_merge", "acct:merge"),
+    "acct_smartsub": ("acct_show_smartsub", "acct:smartsub"),
 }
 
 
@@ -748,6 +760,8 @@ def account_hub_kb(db, is_main_bot: bool = True) -> InlineKeyboardMarkup:
         if key == "acct_tutorial" and tutorial_hub.GENERAL not in db.get_tutorial_bound_targets():
             continue
         if key == "acct_merge" and not is_main_bot:
+            continue
+        if key == "acct_smartsub" and db.get_setting("smart_subscription_enabled", "1") != "1":
             continue
         # دکمه‌ی زیرمجموعه‌گیری فقط وقتی نشان داده شود که کلید اصلی و حداقل یکی از
         # سه مدل پاداش روشن باشد (هم‌رفتار با item_referral در منوی اصلی)؛ وگرنه
@@ -768,6 +782,8 @@ def account_hub_kb(db, is_main_bot: bool = True) -> InlineKeyboardMarkup:
         text = tr(db.get_setting(f"{key}_text", ACCOUNT_HUB_META[key]["default_text"]))
         entries.append((key, text, _styled_inline(db, text, callback_data, f"{key}_style")))
     rows = _layout_group_rows(db, "account_hub", entries)
+    if _widgets_on(db):
+        rows.append([InlineKeyboardButton(text=tr("🧩 ویجت‌ها"), callback_data="u_widgets")])
     rows.append([InlineKeyboardButton(text=tr(LANGUAGE_BTN_TEXT), callback_data="acct:language")])
     rows.append([InlineKeyboardButton(text=tr("⬅️ بازگشت به منوی اصلی"), callback_data="acct:main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -1135,6 +1151,8 @@ def payment_card_detail_kb(card) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=toggle_text, callback_data=f"adm_pcard_toggle:{card['id']}")],
         [InlineKeyboardButton(text=tr("🎯 تغییر درصد نمایش"), callback_data=f"adm_pcard_w:{card['id']}")],
+        [InlineKeyboardButton(text=tr("🖼 تنظیم عکس کارت"), callback_data=f"adm_pcard_photo:{card['id']}")],
+        [InlineKeyboardButton(text=tr("📝 تنظیم توضیحات پارامتردار"), callback_data=f"adm_pcard_desc:{card['id']}")],
         [InlineKeyboardButton(text=tr("🗑 حذف"), callback_data=f"adm_pcard_del:{card['id']}")],
         [InlineKeyboardButton(text=tr("⬅️ بازگشت"), callback_data="adm_pcards")],
     ])
@@ -1748,6 +1766,7 @@ ADMIN_PANEL_ITEMS = [
     ("adm_tickets_menu", "🎫 تیکت‌های پشتیبانی", "adm_tickets_menu"),
     ("adm_ticket_departments", "🧩 دپارتمان‌های پشتیبانی", "adm_ticket_departments"),
     ("adm_pending_topups", "👛 درخواست‌های شارژ کیف پول", "adm_pending_topups"),
+    ("adm_payg", "💳 مدیریت پرداخت به‌ازای مصرف", "adm_payg"),
     ("adm_crypto_payments", "🪙 پرداخت‌های کریپتو", "adm_crypto_payments"),
     ("adm_abangateway_payments", "💳 پرداخت‌های آبان گیت وی", "adm_abangateway_payments"),
     ("adm_blupal_payments", "💳 پرداخت‌های بلوپال", "adm_blupal_payments"),
@@ -1804,6 +1823,7 @@ ADMIN_PANEL_ITEMS = [
     ("adm_deeplink_tools", "🔗 دیپ‌لینک و پست کانال", "adm_deeplink_tools"),
     ("adm_cposts", "🤖 مدیریت محتوای کانال با AI", "adm_cposts"),
     ("adm_stats", "📊 آمار فروش", "adm_stats"),
+    ("adm_widgets", "🧩 ویجت‌ها", "adm_widgets"),
     ("adm_user_search", "👥 مدیریت کاربران", "adm_stats_user"),
     ("adm_cfg_search", "🔎 جستجوی کانفیگ", "adm_cfg_search"),
     ("adm_backup_menu", "🗄 بکاپ و بازیابی", "adm_backup_menu"),
@@ -1856,6 +1876,7 @@ ADMIN_HUBS = [
             "adm_test_menu", "adm_custom_config_settings", "adm_renewal_pricing",
         ]),
         ("قیمت و تخفیف", ["adm_discounts_menu"]),
+        ("پرداخت به‌ازای مصرف", ["adm_payg"]),
         ("موجودی و تحویل", ["adm_stock_alert_settings", "adm_delivery_settings"]),
     ]),
     ("finance", "💰 پرداخت و کیف پول", [
@@ -1896,9 +1917,12 @@ ADMIN_HUBS = [
         ("جذب کاربر", ["adm_referral_settings", "adm_signup_gift_settings", "adm_welcome_gift"]),
         ("بازی و جایزه", ["adm_wheel_settings", "adm_lottery_settings", "adm_season_quiz", "adm_engage"]),
         ("هدیه", ["adm_bulk_gift", "adm_gift_cards"]),
+        # کل قابلیت پست کانال با AI یک کلید مستقل دارد؛ تنظیمات مدل، برند،
+        # نظرسنجی/کوییز و زمان‌بندی هم از داخل همین کلید باز می‌شوند.
+        ("🤖 محتوای کانال با AI", ["adm_cposts"]),
     ]),
     ("comms", "📣 ارتباط با کاربران", [
-        ("پیام و کانال", ["adm_broadcast", "adm_temp_message", "adm_deeplink_tools", "adm_cposts"]),
+        ("پیام و کانال", ["adm_broadcast", "adm_temp_message", "adm_deeplink_tools"]),
         ("ورود کاربر جدید", ["adm_forcejoin_menu", "adm_terms_menu", "adm_edit_welcome", "adm_tutorial_devices"]),
     ]),
     ("support", "🎧 پشتیبانی و هوش مصنوعی", [
@@ -1915,7 +1939,7 @@ ADMIN_HUBS = [
         ("زبان", ["adm_lang_settings", "adm_translation_settings"]),
     ]),
     ("management", "⚙️ ادمین، آمار و سیستم", [
-        ("آمار و کاربران", ["adm_stats", "adm_user_search", "adm_cfg_search"]),
+        ("آمار و کاربران", ["adm_stats", "adm_widgets", "adm_user_search", "adm_cfg_search"]),
         ("ادمین و امنیت", ["adm_admins_menu", "adm_spam_settings"]),
         ("سیستم", [
             "adm_backup_menu", "adm_update", "adm_gswitch", "adm_report_group",
@@ -1998,6 +2022,8 @@ def _unmapped_xs_groups() -> list:
 
 
 def _is_item_visible(db, key: str, is_main_bot: bool) -> bool:
+    if key == "adm_payg":
+        return bool(is_main_bot)
     if key == "adm_extra_settings":
         return bool(_unmapped_xs_groups())
     if key == "adm_my_volume":
@@ -2190,7 +2216,13 @@ def admin_hub_of_item(db, item_key: str):
 
 def _valid_item_overrides(db) -> dict:
     valid = {c[0] for c in ADMIN_PANEL_CATEGORIES}
-    return {k: c for k, c in db.get_admin_item_cat_overrides().items() if c in valid}
+    # محتوای کانال با AI طبق ساختار جدید همیشه زیر «بازاریابی و رشد» است؛
+    # override قدیمی آن از نسخه‌های قبلی (که در comms قرار داشت) نباید
+    # باعث نمایش دوباره یا باقی‌ماندنش در دسته‌ی ارتباط با کاربران شود.
+    return {
+        k: c for k, c in db.get_admin_item_cat_overrides().items()
+        if c in valid and k != "adm_cposts"
+    }
 
 
 def _ensure_hub_layout(db) -> None:
@@ -2214,7 +2246,7 @@ def admin_category_item_keys(db, cat_key: str) -> list:
     overrides = _valid_item_overrides(db)
     base = [
         k for k in defaults
-        if (overrides.get(k, cat_key) == cat_key or (cat_key == "comms" and k == "adm_cposts"))
+        if overrides.get(k, cat_key) == cat_key
     ]
     moved_in = [
         k for k, c in overrides.items()
@@ -2653,6 +2685,7 @@ def delivery_settings_kb(db) -> InlineKeyboardMarkup:
     (برای هر سه مسیر تحویل: بانک کانفیگ، محصول متصل به پنل، ساخت کانفیگ شخصی، و کانفیگ تست)."""
     sub_link_on = db.get_setting("deliver_sub_link_enabled", "1") != "0"
     individual_on = db.get_setting("deliver_individual_configs_enabled", "1") != "0"
+    vpn_files_on = db.get_setting("deliver_vpn_files_enabled", "1") != "0"
     post_text_set = bool((db.get_setting("post_delivery_custom_text", "") or "").strip())
     test_text_set = bool((db.get_setting("test_post_delivery_text", "") or "").strip())
     test_text_label = "🧪 متن دلخواه بعد از کانفیگ تست: تنظیم‌شده" if test_text_set else "🧪 متن دلخواه بعد از کانفیگ تست: تنظیم‌نشده"
@@ -2669,6 +2702,7 @@ def delivery_settings_kb(db) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text=sub_link_text, callback_data="adm_deliver_sublink_toggle")],
         [InlineKeyboardButton(text=individual_text, callback_data="adm_deliver_individual_toggle")],
+        [InlineKeyboardButton(text=tr("✅ ارسال فایل WireGuard/OpenVPN: فعال" if vpn_files_on else "❌ ارسال فایل WireGuard/OpenVPN: غیرفعال"), callback_data="adm_deliver_vpnfiles_toggle")],
         [InlineKeyboardButton(text=post_text_label, callback_data="adm_edit_post_delivery_text")],
         [InlineKeyboardButton(text=test_text_label, callback_data="adm_edit_test_delivery_text")],
         [InlineKeyboardButton(text=qr_bg_label, callback_data="adm_qr_background_menu")],
@@ -2706,7 +2740,8 @@ def admin_broadcast_target_kb() -> InlineKeyboardMarkup:
         [b("📩 ارسال به همه", "adm_broadcast_target:all"), b("📤 فوروارد به همه", "adm_broadcast_fwd")],
         [b("📩 ارسال به اکانت‌های منقضی", "adm_broadcast_target:expired"), b("📩 ارسال به کاربران فعال", "adm_broadcast_target:active")],
         [b("📩 ارسال به کاربران غیرفعال", "adm_broadcast_target:inactive")],
-        [b("🧪 ارسال به کاربران فقط دارای اکانت تست", "adm_broadcast_target:test_only")],
+        [b("🧪 ارسال به دریافت‌کنندگان کانفیگ تست", "adm_broadcast_target:test_recipients")],
+        [b("🛍 ارسال به خریداران اشتراک", "adm_broadcast_target:purchasers")],
         [b("📣 ارسال به کانال", "adm_broadcast_channel")],
         [b("❌ لغو ارسال", "adm_broadcast_stop"), b("⏳ وضعیت ارسال", "adm_broadcast_status")],
         [b("📍 آن‌پین آخرین ارسال", "adm_broadcast_unpin")],
@@ -2765,7 +2800,7 @@ def admin_broadcast_duration_kb(pin_after_send: bool = False, allow_schedule: bo
         [InlineKeyboardButton(text=tr("❌ لغو ارسال"), callback_data="adm_broadcast_cancel")],
     ]
     if allow_schedule:
-        rows.insert(-2, [InlineKeyboardButton(text=tr("⏰ زمان‌بندی ارسال (فقط متن)"), callback_data="adm_broadcast_schedule")])
+        rows.insert(-2, [InlineKeyboardButton(text=tr("⏰ زمان‌بندی همین پیام (متن/عکس/استیکر)"), callback_data="adm_broadcast_schedule")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -3046,6 +3081,7 @@ def deeplink_tools_menu_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=tr("🔗 ساخت دیپ‌لینک تبلیغاتی"), callback_data="adm_dl_build")],
         [InlineKeyboardButton(text=tr("🖼 افزودن دکمه به پست کانال"), callback_data="adm_dl_addbtn")],
         [InlineKeyboardButton(text=tr("📋 پارامترهای اصلی منوی کاربر"), callback_data="adm_dl_params_list")],
+        [InlineKeyboardButton(text=tr("🔗 ساخت لینک میانبر برای دکمه‌های ربات"), callback_data="adm_dl_buttons")],
         [InlineKeyboardButton(text=tr("⬅️ بازگشت"), callback_data="adm_cat:marketing")],
     ])
 
@@ -3138,6 +3174,8 @@ def admin_categories_kb(db, parent_id=0) -> InlineKeyboardMarkup:
             text=tr(f"🎨 رنگ دکمه این دسته: {color_icon}"),
             callback_data=f"adm_catcolor:{pid}",
         )])
+        _has_media = bool(cur is not None and "description_media" in cur.keys() and (cur["description_media"] or ""))
+        rows.append([InlineKeyboardButton(text=tr("📝 توضیحات دسته‌بندی") + (" 🖼" if _has_media else ""), callback_data=f"adm_cat_desc:{pid}")])
         rows.append([InlineKeyboardButton(text=tr("➕ افزودن زیردسته"), callback_data=f"adm_cat_add:{pid}")])
         back_cb = _category_parent_cb(db, pid, "adm_cat_open", "adm_categories")
     else:
@@ -3311,6 +3349,12 @@ def admin_products_list_kb(db, products, category_id=None) -> InlineKeyboardMark
         rows.append(
             [InlineKeyboardButton(text=tr("🤖 توضیح AI ✅" if _has_ai else "🤖 توضیح برای AI"), callback_data=f"adm_prod_aidesc:{p['id']}")]
         )
+        _has_dtext = "delivery_text" in p.keys() and (p["delivery_text"] or "").strip()
+        _has_dstk = "delivery_sticker" in p.keys() and (p["delivery_sticker"] or "").strip()
+        rows.append([
+            InlineKeyboardButton(text=tr("📝 متن تحویل ✅" if _has_dtext else "📝 متن تحویل"), callback_data=f"adm_prod_dtext:{p['id']}"),
+            InlineKeyboardButton(text=tr("🎭 استیکر تحویل ✅" if _has_dstk else "🎭 استیکر تحویل"), callback_data=f"adm_prod_dstk:{p['id']}"),
+        ])
         compare = p["compare_price"] if "compare_price" in p.keys() else 0
         compare_label = f"🏷 تخفیف: {plain_range(compare, p['price'])}" if compare and compare > p["price"] else "🏷 تنظیم تخفیف"
         rows.append(
@@ -3583,8 +3627,8 @@ def admin_new_product_source_kb(show_credit: bool = False) -> InlineKeyboardMark
         rows.append([InlineKeyboardButton(text=tr("📦 بانک کانفیگ (لینک‌های آماده)"), callback_data="adm_newprod_src:bank")])
     rows += [
         [InlineKeyboardButton(text=tr("🔌 اتصال مستقیم به پنل"), callback_data="adm_newprod_src:direct")],
-        [InlineKeyboardButton(text=tr("⬅️ بازگشت"), callback_data="adm_cat:products")],
     ]
+    rows.append([InlineKeyboardButton(text=tr("⬅️ بازگشت"), callback_data="adm_cat:products")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -5140,6 +5184,38 @@ def pricing_tiers_kb(db) -> InlineKeyboardMarkup:
 # ---------------------------------------------------------------------------
 # کیف پول
 # ---------------------------------------------------------------------------
+
+def _widgets_on(db) -> bool:
+    return os.environ.get("SHOPVPN_WIDGETS", "1") != "0" and db.get_setting("widgets_enabled", "1") != "0"
+
+
+def admin_widgets_menu_kb() -> InlineKeyboardMarkup:
+    """منوی یکپارچه‌ی ویجت‌های ادمین (همه‌ی ویجت‌ها یک‌جا)."""
+    items = [
+        ("🔴 نبض زنده فروشگاه", "adm_wpulse"),
+        ("🚨 مرکز هشدار", "adm_walerts"),
+        ("🏆 برترین‌ها", "adm_wtop"),
+        ("📊 تحلیل فروش", "adm_wanalysis"),
+        ("📈 آمار ویجتی (تعاملی)", "adm_wstats"),
+        ("🎛 قابلیت‌ها", "adm_wfeat"),
+        ("🧾 صف تایید", "adm_wqueue"),
+        ("🩺 سلامت پنل‌ها", "adm_whealth"),
+        ("👥 کاربران سریع", "adm_wusers"),
+    ]
+    rows = [[InlineKeyboardButton(text=tr(text), callback_data=cb)] for text, cb in items]
+    rows.append([InlineKeyboardButton(text=tr("⬅️ بازگشت"), callback_data="adm_hub:management")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def user_widgets_menu_kb() -> InlineKeyboardMarkup:
+    """منوی یکپارچه‌ی ویجت‌های کاربر."""
+    rows = [
+        [InlineKeyboardButton(text=tr("📶 داشبورد سرویس‌ها"), callback_data="u_wsvc")],
+        [InlineKeyboardButton(text=tr("💰 کیف پول و دعوت"), callback_data="u_wwal")],
+        [InlineKeyboardButton(text=tr("⬅️ بازگشت"), callback_data="acct:hub")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 def wallet_menu_kb(db=None) -> InlineKeyboardMarkup:
     if db is None:

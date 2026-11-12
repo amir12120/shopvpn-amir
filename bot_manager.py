@@ -8,12 +8,14 @@
 """
 
 import asyncio
+import bot_profile
 import hashlib
 import logging
 import os
 import time
 
 from aiogram import Bot, Dispatcher
+import widgets
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -32,6 +34,7 @@ from business_chat import create_business_router
 from userbot_admin import create_userbot_router
 from leak_admin import create_leak_router
 from handlers_admin import create_admin_router
+from payg import create_payg_router, PaygEngine
 from renewal_reminders import renewal_reminder_loop
 from connect_alerts import connect_alert_loop
 from churn_prediction import churn_offer_loop
@@ -79,11 +82,28 @@ async def scheduled_broadcast_loop(bot, db):
         try:
             jobs=await asyncio.to_thread(db.get_due_scheduled_broadcasts, datetime.utcnow().isoformat())
             for job in jobs:
-                user_ids=await asyncio.to_thread(db.get_all_user_ids)
+                target = job["target"] if "target" in job.keys() else "all"
+                if target == "purchasers":
+                    user_ids = await asyncio.to_thread(db.get_user_ids_with_purchases)
+                elif target == "test_recipients":
+                    user_ids = await asyncio.to_thread(db.get_user_ids_with_test_configs)
+                elif target in ("active", "expired", "inactive", "test_only"):
+                    user_ids = await asyncio.to_thread(db.get_user_ids_by_service_state, target)
+                else:
+                    user_ids = await asyncio.to_thread(db.get_all_user_ids)
                 sent=failed=0
                 for uid in user_ids:
                     try:
-                        await send_scheduled_broadcast(bot, uid, job["message_text"])
+                        if job["source_chat_id"] and job["source_message_id"]:
+                            import json
+                            from telegram_media import copy_messages as _copy_media_messages
+                            try:
+                                media_ids = json.loads(job["source_message_ids"] or "[]") if "source_message_ids" in job.keys() else []
+                            except Exception:
+                                media_ids = []
+                            await _copy_media_messages(bot, uid, job["source_chat_id"], media_ids or [job["source_message_id"]])
+                        else:
+                            await send_scheduled_broadcast(bot, uid, job["message_text"])
                         sent+=1
                     except Exception:
                         failed+=1
@@ -427,8 +447,10 @@ class BotManager:
         miniapp_url = kb._miniapp_url(db)
         try:
             if miniapp_url:
+                menu_text = (await asyncio.to_thread(db.get_setting, "miniapp_menu_button_text", "فروشگاه") or "فروشگاه").strip()
+                menu_text = menu_text[:64] or "فروشگاه"
                 await bot.set_chat_menu_button(
-                    menu_button=MenuButtonWebApp(text=tr("فروشگاه"), web_app=WebAppInfo(url=miniapp_url))
+                    menu_button=MenuButtonWebApp(text=menu_text, web_app=WebAppInfo(url=miniapp_url))
                 )
             else:
                 await bot.set_chat_menu_button(menu_button=MenuButtonDefault())
@@ -463,7 +485,9 @@ class BotManager:
                 fsm_db_path,
             )
             fsm_storage = MemoryStorage()
-        dp = Dispatcher(storage=fsm_storage)
+        dp = widgets.WidgetDispatcher(storage=fsm_storage)
+        dp.widget_hub = widgets.WidgetHub(db)
+        dp.include_router(widgets.create_router(db))
         async def _error_with_report(event: ErrorEvent, _bot=bot, _db=db) -> bool:
             await _report_error_to_group(_bot, _db, event)
             return await _global_error_handler(event)
@@ -510,6 +534,8 @@ class BotManager:
         dp.include_router(create_gift_router(db, is_main_bot=is_main_bot))
         dp.include_router(create_season_quiz_router(db, is_main_bot=is_main_bot))
         dp.include_router(create_engagement_router(db, is_main_bot=is_main_bot))
+        if is_main_bot:
+            dp.include_router(create_payg_router(db, is_main_bot=True))
         dp.include_router(create_admin_router(db, is_main_bot=is_main_bot, bot_manager=self))
         dp.include_router(create_user_router(db, is_main_bot=is_main_bot, bot_manager=self))
 
@@ -529,7 +555,7 @@ class BotManager:
                     webhook_url,
                     secret_token=WEBHOOK_SECRET or None,
                     drop_pending_updates=True,
-                    allowed_updates=dp.resolve_used_update_types(),
+                    allowed_updates=widgets.allowed_updates(dp),
                 )
             except Exception:
                 logger.warning(
@@ -551,8 +577,12 @@ class BotManager:
                     "delete_webhook برای db_path=%s ناموفق بود؛ راه‌اندازی بات ادامه می‌یابد.",
                     db_path, exc_info=True,
                 )
-            task = asyncio.create_task(dp.start_polling(bot))
+            task = asyncio.create_task(dp.start_polling(bot, allowed_updates=widgets.allowed_updates(dp)))
         await self._sync_menu_button(bot, db)
+        try:
+            await bot_profile.apply_profile(token, db)
+        except Exception:
+            logger.warning("اعمال پروفایل ربات هنگام استارت ناموفق بود.", exc_info=True)
         reminder_task = asyncio.create_task(renewal_reminder_loop(bot, db))
         connect_alert_task = asyncio.create_task(connect_alert_loop(bot, db))
         churn_offer_task = asyncio.create_task(churn_offer_loop(bot, db))
@@ -565,6 +595,7 @@ class BotManager:
             asyncio.create_task(extra_gateway_payment.poll_loop(bot, db)) if is_main_bot else None
         )
         panel_health_task = asyncio.create_task(panel_health_loop(bot, db)) if is_main_bot else None
+        payg_task = asyncio.create_task(PaygEngine(db, bot=bot, interval_seconds=600).run_forever()) if is_main_bot else None
         cron_task = asyncio.create_task(cron_loop(bot, db)) if is_main_bot else None
         daily_report_task = asyncio.create_task(daily_report_loop(bot, db))
         scheduled_broadcast_task = asyncio.create_task(scheduled_broadcast_loop(bot, db))
@@ -590,7 +621,7 @@ class BotManager:
             "connect_alert_task": connect_alert_task, "churn_offer_task": churn_offer_task,
             "backup_task": backup_task, "cache_refresh_task": cache_refresh_task,
             "temp_msg_task": temp_msg_task, "extra_gateway_task": extra_gateway_task,
-            "panel_health_task": panel_health_task, "cron_task": cron_task, "daily_report_task": daily_report_task,
+            "panel_health_task": panel_health_task, "payg_task": payg_task, "cron_task": cron_task, "daily_report_task": daily_report_task,
             "scheduled_broadcast_task": scheduled_broadcast_task, "channel_post_task": channel_post_task,
             "cleanup_task": cleanup_task, "lottery_task": lottery_task,
             "reseller_expiry_task": reseller_expiry_task, "signup_gift_task": signup_gift_task, "welcome_gift_task": welcome_gift_task,
@@ -604,7 +635,7 @@ class BotManager:
     _STOP_TASK_KEYS = (
         "reminder_task", "connect_alert_task", "churn_offer_task", "backup_task",
         "scheduled_broadcast_task", "channel_post_task", "cache_refresh_task", "temp_msg_task",
-        "extra_gateway_task", "panel_health_task", "cron_task", "daily_report_task",
+        "extra_gateway_task", "panel_health_task", "payg_task", "cron_task", "daily_report_task",
         "cleanup_task", "lottery_task", "reseller_expiry_task", "signup_gift_task", "welcome_gift_task",
         "gift_expiry_task", "audit_task", "season_task", "quiz_task", "update_check_task",
     )

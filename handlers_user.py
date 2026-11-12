@@ -13,9 +13,11 @@ import html
 import time
 import random
 import account_naming
+import widgets
 import re
 import asyncio
 import logging
+logger = logging.getLogger("handlers_user")
 from service_alerts import send_service_alert
 import math
 from datetime import datetime, timezone, timedelta
@@ -41,6 +43,7 @@ import ai_support
 import buy_guide
 import phone_gate
 import ai_media
+import category_media
 from draft_stream import DraftStreamer
 import account_link
 import web_auth
@@ -364,6 +367,19 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
         if inline_kb is not None:
             await target.answer(db.get_text('handlers_user.auto_f368dac9', '📋 منو:'), reply_markup=inline_kb)
 
+    async def _clear_old_reply_keyboard(target):
+        """وقتی منوی پایین خاموش است، کیبورد قدیمی روی گوشی کاربر خودبه‌خود جمع نمی‌شود
+        (تلگرام فقط با پیامِ حاوی ReplyKeyboardRemove آن را برمی‌دارد و پیامِ منوی شیشه‌ای
+        نمی‌تواند هر دو را داشته باشد). یک پیام کوتاه با ReplyKeyboardRemove می‌فرستیم و فوراً حذفش می‌کنیم."""
+        try:
+            tmp = await target.answer("🔄", reply_markup=ReplyKeyboardRemove())
+            try:
+                await tmp.delete()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     async def _show_main_menu_after_exit(target, user_tg_id: int, text: str = ""):
         """بعد از لغو/بازگشت، منوی اصلی را دوباره نشان می‌دهد تا کاربر مجبور به /start نشود.
         اگر منوی پایین فعال باشد همان برگردانده می‌شود (حتی اگر قبلاً ReplyKeyboardRemove شده بود) و
@@ -376,6 +392,8 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
             await _send_inline_main_menu(target, user_tg_id)
             return
         inline_kb = await asyncio.to_thread(kb.inline_menu_for_user, db, user_tg_id, is_main_bot)
+        if inline_kb is not None:
+            await _clear_old_reply_keyboard(target)
         await target.answer(
             text,
             reply_markup=inline_kb if inline_kb is not None else kb.menu_for_user(db, user_tg_id, is_main_bot),
@@ -412,10 +430,24 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
         cfg = await asyncio.to_thread(card_payment_ui.get_cfg, db)
         card_number, card_holder = _card["card_number"], _card["card_holder"]
         bank_name = _card["bank_name"] if "bank_name" in _card.keys() else ""
+        description = (_card.get("description_template") or "").strip()
+        if description:
+            try:
+                intro_lines = list(intro_lines) + [description.format(
+                    card_number=card_number or "", holder=card_holder or "", bank=bank_name or "",
+                    amount_toman=int(final_price), amount_rial=int(final_price) * 10,
+                )]
+            except (KeyError, ValueError, IndexError):
+                intro_lines = list(intro_lines) + [description]
         text = card_payment_ui.build_text(
             cfg, intro_lines, card_number, card_holder, bank_name, int(final_price), auto=False,
         )
         markup = _card_pay_markup(cfg, card_number, card_holder, int(final_price), back_cb=back_cb)
+        if _card.get("photo_file_id"):
+            try:
+                await target.answer_photo(_card["photo_file_id"])
+            except Exception:
+                logger.warning("ارسال تصویر کارت‌به‌کارت ناموفق بود.", exc_info=True)
         sent = await target.answer(
             text, parse_mode="Markdown", reply_markup=markup, protect_content=bool(cfg["protect"]) or None,
         )
@@ -437,10 +469,25 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
         timeout_minutes = int((await asyncio.to_thread(
             db.get_setting, "card_to_card_auto_timeout_minutes", "15")) or 15)
         cfg = await asyncio.to_thread(card_payment_ui.get_cfg, db)
+        description = (invoice.get("description_template") or "").strip()
+        if description:
+            try:
+                intro_lines = list(intro_lines) + [description.format(
+                    card_number=invoice["card_number"] or "", holder=invoice["card_holder"] or "",
+                    bank=invoice.get("bank_name") or "", amount_toman=int(invoice["amount_toman"]),
+                    amount_rial=int(invoice["amount_rial"]),
+                )]
+            except (KeyError, ValueError, IndexError):
+                intro_lines = list(intro_lines) + [description]
         text = card_payment_ui.build_text(
             cfg, intro_lines, invoice["card_number"], invoice["card_holder"], invoice.get("bank_name"),
             int(invoice["amount_toman"]), auto=True, timeout_minutes=timeout_minutes,
         )
+        if invoice.get("photo_file_id"):
+            try:
+                await target.answer_photo(invoice["photo_file_id"])
+            except Exception:
+                logger.warning("ارسال تصویر کارت خودکار ناموفق بود.", exc_info=True)
         status_row = [InlineKeyboardButton(text=tr("🔄 بررسی وضعیت پرداخت"), callback_data=f"check_c2c:{invoice['invoice_id']}")]
         markup = _card_pay_markup(
             cfg, invoice["card_number"], invoice["card_holder"], int(invoice["amount_toman"]),
@@ -594,6 +641,8 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
             await _send_inline_main_menu(message, user_id)
         else:
             inline_kb = await asyncio.to_thread(kb.inline_menu_for_user, db, user_id, is_main_bot)
+            if inline_kb is not None:
+                await _clear_old_reply_keyboard(message)
             await message.answer(
                 welcome,
                 reply_markup=inline_kb if inline_kb is not None else kb.menu_for_user(db, user_id, is_main_bot),
@@ -633,6 +682,24 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
             elif action.startswith("__quiz_answer__:"):
                 _quiz_id, _choice = action.split(":")[1:3]
                 await answer_quiz_for_message(db, message, int(_quiz_id), int(_choice))
+            elif action.startswith("__open_menu_button__:"):
+                key = action.split(":", 1)[1]
+                if key == "miniapp":
+                    url = kb._miniapp_url(db, getattr(db, "_current_menu_language", ""))
+                    if url:
+                        await message.answer("🛍 فروشگاه", reply_markup=kb.miniapp_inline_kb(url, db))
+                elif key == "btn_buy": await show_categories(message, state)
+                elif key == "btn_test": await get_test_config(message)
+                elif key == "btn_my_orders": await my_orders(message)
+                elif key == "btn_tutorial": await tutorial_menu_entry(message)
+                elif key == "btn_referral": await referral_menu(message, bot)
+                elif key == "btn_wheel": await wheel_of_fortune(message, bot)
+                elif key == "btn_contact": await contact_start(message, state)
+                elif key == "btn_wallet": await wallet_menu(message)
+                elif key == "btn_reseller_panel": await reseller_panel_open(message, state)
+                elif key == "btn_reseller_tiers": await reseller_tiers_menu(message)
+                elif key in ("btn_reseller_request", "btn_commission_reseller_request"):
+                    await reseller_tiers_menu(message)
             else:
                 await message.answer(action)
 
@@ -805,24 +872,39 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
     async def help_cmd(message: Message):
         await tutorial_menu_entry(message)
 
-    @router.message(Command("smartsub"))
-    async def smartsub_cmd(message: Message):
+    async def _smartsub_build(user_id: int) -> tuple:
+        """(متن پیام، موفق؟) - مشترک بین /smartsub و دکمه‌ی حساب کاربری."""
         if db.get_setting("smart_subscription_enabled","1")!="1":
-            await message.answer(db.get_text('handlers_user.auto_cc8afc71', '⛔️ اشتراک هوشمند غیرفعال است.')); return
-        rows=await asyncio.to_thread(db.get_user_custom_configs, message.from_user.id) if hasattr(db,"get_user_custom_configs") else []
+            return db.get_text('handlers_user.auto_cc8afc71', '⛔️ اشتراک هوشمند غیرفعال است.'), False
+        rows=await asyncio.to_thread(db.get_user_custom_configs, user_id) if hasattr(db,"get_user_custom_configs") else []
         urls=[]
         for r in rows or []:
             if r["subscription_url"] and r["status"]=="active": urls.append(r["subscription_url"])
         if len(urls)<2:
-            await message.answer(db.get_text('handlers_user.auto_95fbba11', 'ℹ️ برای ساخت اشتراک هوشمند حداقل دو اشتراک فعال لازم است.')); return
-        token=await asyncio.to_thread(db.create_smart_subscription,message.from_user.id,urls)
+            return db.get_text('handlers_user.auto_95fbba11', 'ℹ️ برای ساخت اشتراک هوشمند حداقل دو اشتراک فعال لازم است.'), False
+        token=await asyncio.to_thread(db.create_smart_subscription,user_id,urls)
         from config import API_BASE_URL
         # اگر ساب اختصاصی روشن است، لینک هوشمند هم از دامنه‌ی همان سرور ساخته می‌شود (آن سرور endpoint را سرو می‌کند)
         dedicated_base=dedicated_sub.base_url(db) if dedicated_sub.is_enabled(db) else ""
         base=(db.get_setting("smart_subscription_base_url","") or dedicated_base or API_BASE_URL).rstrip("/")
         if not base:
-            await message.answer(db.get_text('handlers_user.auto_c76802fa', '⛔️ آدرس عمومی API تنظیم نشده است.')); return
-        await message.answer(tr(f"🔗 لینک اشتراک هوشمند شما:\n{base}/sub/smart/{token}"))
+            return db.get_text('handlers_user.auto_c76802fa', '⛔️ آدرس عمومی API تنظیم نشده است.'), False
+        return tr(f"🔗 لینک اشتراک هوشمند شما:\n{base}/sub/smart/{token}"), True
+
+    @router.message(Command("smartsub"))
+    async def smartsub_cmd(message: Message):
+        text, _ok = await _smartsub_build(message.from_user.id)
+        await message.answer(text)
+
+    @router.callback_query(F.data == "acct:smartsub")
+    async def cb_account_smartsub(call: CallbackQuery):
+        if (await asyncio.to_thread(db.get_setting, "acct_show_smartsub", "1")) != "1":
+            await call.answer(db.get_text('handlers_user.auto_877cd65e', 'این بخش غیرفعال است.'), show_alert=True)
+            return
+        text, _ok = await _smartsub_build(call.from_user.id)
+        back = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=tr("⬅️ حساب کاربری"), callback_data="acct:hub")]])
+        await _safe_edit(call.message, text, reply_markup=back)
+        await call.answer()
 
     # -----------------------------------------------------------------------
     # شروع
@@ -1069,7 +1151,16 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
             (await asyncio.to_thread(db.set_force_join_exempt, message.from_user.id))
 
         for token in filter(None, start_param.split("-")):
-            if token.startswith("resref_"):
+            if token.startswith("btn_"):
+                menu_key = token[4:]
+                allowed_menu_keys = {
+                    "miniapp", "btn_buy", "btn_test", "btn_my_orders", "btn_tutorial", "btn_referral",
+                    "btn_wheel", "btn_contact", "btn_wallet", "btn_reseller_panel", "btn_reseller_tiers",
+                    "btn_reseller_request", "btn_commission_reseller_request",
+                }
+                if menu_key in allowed_menu_keys:
+                    post_start_actions.append("__open_menu_button__:" + menu_key)
+            elif token.startswith("resref_"):
                 # نماینده با «لینک اختصاصی داخل بات اصلی» (بند ۳.۱ اسپک) —
                 # کاملاً مستقل از سیستم زیرمجموعه‌گیری ref<id> زیر.
                 owner_part = token[len("resref_"):]
@@ -1187,6 +1278,8 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
             # منوی پایین غیرفعال است: اگر منوی شیشه‌ای فعال باشد، دکمه‌ها مستقیم
             # زیر همین پیام خوش‌آمد می‌آیند و پیام جدای «📋 منو:» حذف می‌شود.
             inline_kb = (await asyncio.to_thread(kb.inline_menu_for_user, db, message.from_user.id, is_main_bot))
+            if inline_kb is not None:
+                await _clear_old_reply_keyboard(message)
             await message.answer(
                 welcome,
                 reply_markup=inline_kb if inline_kb is not None else kb.menu_for_user(db, message.from_user.id, is_main_bot),
@@ -1222,6 +1315,24 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
             elif action.startswith("__quiz_answer__:"):
                 _quiz_id, _choice = action.split(":")[1:3]
                 await answer_quiz_for_message(db, message, int(_quiz_id), int(_choice))
+            elif action.startswith("__open_menu_button__:"):
+                key = action.split(":", 1)[1]
+                if key == "miniapp":
+                    url = kb._miniapp_url(db, getattr(db, "_current_menu_language", ""))
+                    if url:
+                        await message.answer("🛍 فروشگاه", reply_markup=kb.miniapp_inline_kb(url, db))
+                elif key == "btn_buy": await show_categories(message, state)
+                elif key == "btn_test": await get_test_config(message)
+                elif key == "btn_my_orders": await my_orders(message)
+                elif key == "btn_tutorial": await tutorial_menu_entry(message)
+                elif key == "btn_referral": await referral_menu(message, bot)
+                elif key == "btn_wheel": await wheel_of_fortune(message, bot)
+                elif key == "btn_contact": await contact_start(message, state)
+                elif key == "btn_wallet": await wallet_menu(message)
+                elif key == "btn_reseller_panel": await reseller_panel_open(message, state)
+                elif key == "btn_reseller_tiers": await reseller_tiers_menu(message)
+                elif key in ("btn_reseller_request", "btn_commission_reseller_request"):
+                    await reseller_tiers_menu(message)
             else:
                 await message.answer(action)
 
@@ -1360,7 +1471,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
             return
         await message.answer(
             db.get_text("handlers_user.miniapp.open_prompt", "برای ورود به مینی‌اپ فروشگاه، روی دکمه‌ی زیر بزن:"),
-            reply_markup=kb.miniapp_inline_kb(miniapp_url),
+            reply_markup=kb.miniapp_inline_kb(miniapp_url, db),
         )
 
     # -----------------------------------------------------------------------
@@ -1375,12 +1486,13 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
             (await asyncio.to_thread(db.get_setting, "custom_config_enabled", "0")) == "1"
             or (await asyncio.to_thread(db.count_active_custom_config_products)) > 0
         )
-        if not categories and not custom_enabled:
+        payg_on = is_main_bot and (await asyncio.to_thread(db.get_setting, "payg_enabled", "1")) == "1"
+        if not categories and not custom_enabled and not payg_on:
             await message.answer(db.get_text("handlers_user.category.none_active", "در حال حاضر دسته‌بندی فعالی وجود ندارد."))
             return
         await message.answer(
             db.get_text("handlers_user.category.choose_option", "یک گزینه را انتخاب کنید:"),
-            reply_markup=kb.categories_kb(db, categories, full_access_bot),
+            reply_markup=kb.categories_kb(db, categories, full_access_bot, show_payg=is_main_bot),
         )
 
     @router.callback_query(F.data == "gift_open_store")
@@ -1401,6 +1513,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
 
     @router.callback_query(F.data == "back_main")
     async def cb_back_main(call: CallbackQuery, state: FSMContext):
+        await _clear_category_media(call.bot, call.message.chat.id, state)
         await state.clear()
         try:
             await call.message.delete()
@@ -1417,18 +1530,35 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
         if (await asyncio.to_thread(db.get_setting, "main_menu_reply_enabled", "1")) != "1":
             await _show_main_menu_after_exit(call.message, call.from_user.id)
 
+    async def _clear_category_media(bot_obj, chat_id: int, state: FSMContext):
+        """پیام‌های رسانه‌ی توضیحات دسته‌ی قبلی را پاک می‌کند تا چت شلوغ نشود."""
+        try:
+            data = await state.get_data()
+            ids = data.get("cat_media_ids") or []
+            if not ids:
+                return
+            await state.update_data(cat_media_ids=[])
+            for mid in ids:
+                try:
+                    await bot_obj.delete_message(chat_id, int(mid))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     @router.callback_query(F.data == "back_categories")
-    async def cb_back_categories(call: CallbackQuery):
+    async def cb_back_categories(call: CallbackQuery, state: FSMContext):
+        await _clear_category_media(call.bot, call.message.chat.id, state)
         categories = (await asyncio.to_thread(db.get_child_categories, None, True))
         await _safe_edit(
             call.message,
             db.get_text("handlers_user.category.choose_category", "یک دسته‌بندی را انتخاب کنید:"),
-            reply_markup=kb.categories_kb(db, categories, is_main_bot),
+            reply_markup=kb.categories_kb(db, categories, is_main_bot, show_payg=is_main_bot),
         )
         await call.answer()
 
     @router.callback_query(F.data.startswith("cat:"))
-    async def cb_category(call: CallbackQuery):
+    async def cb_category(call: CallbackQuery, state: FSMContext):
         cat_id = int(call.data.split(":")[1])
         products = (await asyncio.to_thread(db.get_products, cat_id, active_only=True))
         children = (await asyncio.to_thread(db.get_child_categories, cat_id, True))
@@ -1437,13 +1567,35 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
                 db.get_text("handlers_user.category.empty", "محصولی در این دسته‌بندی موجود نیست."), show_alert=True
             )
             return
+        await _clear_category_media(call.bot, call.message.chat.id, state)
         if children:
             title = db.get_text("handlers_user.category.choose_sub", "یک زیردسته یا محصول را انتخاب کنید:")
         else:
             title = db.get_text("handlers_user.category.choose_product", "یک محصول را انتخاب کنید:")
+        category = await asyncio.to_thread(db.get_category, cat_id)
+        category_description = (category["description"] or "") if category and "description" in category.keys() else ""
+        display_title = f"{title}\n\n📝 {category_description}" if category_description else title
+        media_items = category_media.parse(category["description_media"]) if category and "description_media" in category.keys() else []
+        if media_items:
+            # رسانه (عکس/ویس/ویدیو/فایل...) همراه توضیحات: اول رسانه، بعد منوی انتخاب زیر آن
+            chat_id = call.message.chat.id
+            caption = f"📝 {category_description}" if category_description else ""
+            try:
+                await call.message.delete()
+            except Exception:
+                pass
+            sent_ids, caption_sent = await category_media.send_media(call.bot, chat_id, media_items, caption)
+            if sent_ids:
+                await state.update_data(cat_media_ids=sent_ids)
+            menu_text = title if (caption_sent or not category_description) else display_title
+            await call.bot.send_message(
+                chat_id, menu_text, reply_markup=kb.products_kb(db, products, cat_id, children),
+            )
+            await call.answer()
+            return
         await _safe_edit(
             call.message,
-            title,
+            display_title,
             reply_markup=kb.products_kb(db, products, cat_id, children),
         )
         await call.answer()
@@ -1473,6 +1625,8 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
             "📦 {name}\n💰 قیمت واحد: {price} تومان\n📝 توضیحات: {description}\n",
         ).format(name=product["name"], price=price_label_plain(product, unit_price, suffix=""), description=product["description"] or "---")
         text += stock_line
+        if "product_kind" in product.keys() and product["product_kind"] == "panel_account":
+            text += db.get_text("handlers_user.product.panel_account_line", "🔑 تحویل: اطلاعات ورود پنل (آدرس، یوزر و پسورد)\n")
         if product["is_auto_provision"] and (product["auto_provision_volume_gb"] or product["duration_days"]):
             volume_gb = product["auto_provision_volume_gb"]
             duration_days = product["duration_days"]
@@ -3126,6 +3280,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
                 f"⏳ مدت اعتبار: {settings['duration_days']} روز (ثابت)"),
                 reply_markup=kb.cancel_kb(),
             )
+        await widgets.send_custom_plan(message.bot, db, message.chat.id, product_id)
 
     @router.message(CustomConfigFlow.waiting_duration)
     async def custom_config_receive_duration(message: Message, state: FSMContext):
@@ -3326,6 +3481,174 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
             await message.answer(
                 db.get_text('handlers_user.auto_7c0e859b', '⛔️ خطای غیرمنتظره\u200cای در پردازش سفارش رخ داد.\nاگر مبلغی از کیف پول شما کسر شده بود، به\u200cطور کامل بازگردانده شد. لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید.')
             )
+
+    async def _widget_custom_go(bot, user, chat_id, state, volume_gb, days):
+        current = await state.get_state()
+        if current not in (CustomConfigFlow.waiting_volume.state, CustomConfigFlow.waiting_duration.state):
+            return "⌛ این درخواست منقضی شده؛ از منو دوباره شروع کنید.", None
+        data = await state.get_data()
+        product_id = data.get("product_id")
+        product = (await asyncio.to_thread(db.get_custom_config_product, product_id)) if product_id else None
+        if product:
+            low, high = product["min_gb"], product["max_gb"]
+            user_choice = product["duration_mode"] == "user_choice"
+            min_days, max_days = product["min_days"] or 1, product["max_days"] or 90
+            fixed_days = product["duration_days"]
+            price = await asyncio.to_thread(db.calc_custom_config_product_price, product_id, volume_gb)
+        else:
+            settings = await asyncio.to_thread(db.get_custom_config_settings)
+            low, high = settings["min_gb"], settings["max_gb"]
+            user_choice = False
+            min_days = max_days = 0
+            fixed_days = settings["duration_days"]
+            price = await asyncio.to_thread(db.calc_custom_config_price, volume_gb)
+        if volume_gb < low or volume_gb > high:
+            return f"❌ حجم باید بین {low} تا {high} گیگابایت باشد.", None
+        if user_choice:
+            if days < min_days or days > max_days:
+                return f"❌ مدت باید بین {min_days} تا {max_days} روز باشد.", None
+        else:
+            days = fixed_days
+        if price <= 0:
+            return "⚠️ قیمت‌گذاری این بخش هنوز تنظیم نشده.", None
+
+        async def run():
+            await state.update_data(custom_volume_gb=volume_gb, custom_price=price)
+            sent = await bot.send_message(chat_id, "⏳ در حال ثبت سفارش...")
+            message = sent.model_copy(update={"from_user": user}).as_(bot)
+            await _custom_config_finalize_order(message, state, days)
+
+        return "✅ ثبت شد؛ ادامه‌ی پرداخت در چت.", run
+
+    widgets.register_custom_hook(db, _widget_custom_go)
+
+    async def _widget_sub_info(url):
+        if not url:
+            return {}
+        try:
+            return await asyncio.wait_for(fetch_sub_info(url), 6)
+        except Exception:
+            return {}
+
+    def _widget_days_left(raw) -> int:
+        if not raw:
+            return -1
+        try:
+            exp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            return -1
+        now = datetime.now(timezone.utc) if exp.tzinfo else datetime.utcnow()
+        return max(0, (exp - now).days)
+
+    async def _widget_services_payload(user_id: int) -> dict:
+        items = [
+            it for it in await asyncio.to_thread(_my_orders_items, user_id)
+            if it["kind"] == "custom" and it["custom"]["source"] != "test"
+        ][:4]
+        infos = await asyncio.gather(*(_widget_sub_info(it["custom"]["subscription_url"]) for it in items))
+        gib = 1024 ** 3
+        out = []
+        for it, info in zip(items, infos):
+            cc = it["custom"]
+            used = (int(info.get("upload") or 0) + int(info.get("download") or 0)) / gib if info.get("ok") else 0
+            total = (int(info.get("total") or 0) / gib) if info.get("ok") and info.get("total") else float(cc["volume_gb"] or 0)
+            days = _widget_days_left(cc["expires_at"])
+            if days < 0 and info.get("expire"):
+                days = max(0, int((int(info["expire"]) - datetime.now(timezone.utc).timestamp()) // 86400))
+            enabled = 1 if (cc["enabled"] if "enabled" in cc.keys() else 1) == 1 else 0
+            name = str(cc["display_name"] or cc["username"] or "")[:16]
+            out.append([it["cb_id"], name, round(used, 1), round(total, 1), days, enabled])
+        return {"s": out}
+
+    async def _widget_service_action(bot, user, act: str, cb_id: str):
+        item = await asyncio.to_thread(_find_my_orders_item, user.id, cb_id)
+        if not item or item["kind"] != "custom" or item["custom"]["source"] == "test":
+            return "❌ سرویس یافت نشد.", None
+        if act == "l":
+            link = _item_sub_link(item)
+            if not link:
+                return "⚠️ این سرویس لینکی ندارد.", None
+            shown = await asyncio.to_thread(dedicated_sub.dedicated_link_for_upstream, db, link)
+            await bot.send_message(
+                user.id, f"🔗 <code>{html.escape(str(shown))}</code>", parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text=tr("📋 کپی لینک"), copy_text=CopyTextButton(text=str(shown))),
+                ]]),
+            )
+            return "✅ لینک در چت ارسال شد.", None
+        rows = []
+        for key, label, mode in (
+            ("svc_show_renew_full", "🛠 تمدید کامل سرویس", "full"),
+            ("svc_show_renew_volume", "🔋 تمدید حجم سرویس", "volume"),
+            ("svc_show_renew_time", "⏱ تمدید زمان سرویس", "time"),
+        ):
+            if (await asyncio.to_thread(db.get_setting, key, "1")) == "1":
+                rows.append([InlineKeyboardButton(text=tr(label), callback_data=f"svc_renew:{mode}:{cb_id}")])
+        if not rows:
+            return "⚠️ تمدید در حال حاضر غیرفعال است.", None
+        name = item["custom"]["display_name"] or item["custom"]["username"]
+        await bot.send_message(
+            user.id, tr(f"🔄 تمدید «{name}»؛ نوع تمدید را انتخاب کنید:"),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        )
+        return "✅ گزینه‌های تمدید در چت ارسال شد.", None
+
+    async def _widget_wallet_payload(user_id: int) -> dict:
+        status = await asyncio.to_thread(db.get_wallet_status, user_id)
+        rows = await asyncio.to_thread(db.get_wallet_transactions, user_id, 5)
+        stats = await asyncio.to_thread(db.get_referral_stats, user_id)
+        min_topup = int((await asyncio.to_thread(db.get_setting, "min_amount_wallet_topup", "1000")) or "1000")
+        presets = [a for a in widgets._TOPUP_PRESETS if a >= min_topup] or [min_topup]
+        labels = db.WALLET_TX_KIND_LABELS
+        return {
+            "b": int(status["balance"]), "p": presets,
+            "t": [[int(r["delta"]), labels.get(r["kind"], "سایر")] for r in rows],
+            "c": int(stats["count"]), "r": int(stats["credit"]),
+        }
+
+    async def _widget_invite(bot, user):
+        keys = ("referral_enabled", "referral_free_config_enabled", "referral_invite_bonus_enabled")
+        defaults = ("1", "0", "0")
+        flags = [(await asyncio.to_thread(db.get_setting, k, d)) == "1" for k, d in zip(keys, defaults)]
+        if not any(flags) or (await asyncio.to_thread(db.get_setting, "referral_button_enabled", "1")) != "1":
+            return "⚠️ سیستم زیرمجموعه‌گیری غیرفعال است.", None
+        me = await bot.get_me()
+        link = f"https://t.me/{me.username}?start=ref{user.id}"
+        await bot.send_message(
+            user.id, tr("🤝 لینک اختصاصی دعوت شما:") + f"\n{link}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text=tr("📋 کپی لینک دعوت"), copy_text=CopyTextButton(text=link)),
+            ]]),
+        )
+        return "✅ لینک دعوت در چت ارسال شد.", None
+
+    async def _widget_user(bot, user, state, kind, rest):
+        row = await asyncio.to_thread(db.get_user, user.id)
+        if not row or row["is_blocked"]:
+            return "⛔️ دسترسی ندارید.", None
+        act, _, arg = rest.partition(":")
+        if kind == "v":
+            if act == "r":
+                return None, await _widget_services_payload(user.id)
+            if act in ("l", "n") and arg:
+                return await _widget_service_action(bot, user, act, arg)
+            return "❌ مقدار نامعتبر.", None
+        if act == "r":
+            return None, await _widget_wallet_payload(user.id)
+        if act == "i":
+            return await _widget_invite(bot, user)
+        if act == "t" and arg.isdigit():
+            amount = int(arg)
+            min_topup = int((await asyncio.to_thread(db.get_setting, "min_amount_wallet_topup", "1000")) or "1000")
+            if amount < min_topup:
+                return f"❌ حداقل مبلغ شارژ {min_topup:,} تومان است.", None
+            sent = await bot.send_message(user.id, "⏳")
+            message = sent.model_copy(update={"from_user": user}).as_(bot)
+            ok = await _begin_topup(message, state, user.id, amount)
+            return ("✅ روش پرداخت را در چت انتخاب کنید." if ok else "⚠️ شارژ این مبلغ ممکن نیست؛ پیام چت را ببینید."), None
+        return "❌ مقدار نامعتبر.", None
+
+    widgets.register_hook(db, "user", _widget_user)
 
     @router.callback_query(F.data == "pay_card2card", CustomConfigFlow.waiting_receipt)
     async def cb_pay_card2card_custom_config(call: CallbackQuery, state: FSMContext):
@@ -4470,7 +4793,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
                 await target.answer(text)
             return
         text = "📦 سفارش‌ها و کانفیگ‌های شما\n\nیکی از موارد زیر را برای مشاهده‌ی جزئیات انتخاب کنید:"
-        markup = kb.my_orders_menu_kb(items)
+        markup = kb.my_orders_menu_kb(items, db)
         if edit:
             await _safe_edit(target, text, reply_markup=markup)
         else:
@@ -6635,26 +6958,17 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
         )
         await call.answer()
 
-    @router.message(WalletTopup.waiting_amount)
-    async def process_topup_amount(message: Message, state: FSMContext):
-        min_topup = int((await asyncio.to_thread(db.get_setting, "min_amount_wallet_topup", "1000")) or "1000")
-        text = message.text.strip().replace(",", "")
-        if not text.isdigit() or int(text) < min_topup:
-            await message.answer(tr(f"لطفاً یک عدد معتبر و حداقل {min_topup:,} تومان ارسال کنید."))
-            return
-
-        amount = int(text)
-
+    async def _begin_topup(message, state, user_id: int, amount: int) -> bool:
         max_balance = int((await asyncio.to_thread(db.get_setting, "max_wallet_balance", "0")) or "0")
         if max_balance > 0:
-            current_balance = await asyncio.to_thread(db.get_wallet_credit, message.from_user.id)
+            current_balance = await asyncio.to_thread(db.get_wallet_credit, user_id)
             if current_balance + amount > max_balance:
                 remaining = max(max_balance - current_balance, 0)
                 await message.answer(
                     tr(f"⛔️ با این شارژ، موجودی کیف پول شما از سقف مجاز ({max_balance:,} تومان) بیشتر می‌شود.\n"
                     f"حداکثر مبلغ قابل شارژ فعلی: {remaining:,} تومان.")
                 )
-                return
+                return False
 
         wallet_allowed_methods = (await asyncio.to_thread(db.get_wallet_topup_payment_methods))
 
@@ -6662,7 +6976,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
             await message.answer(
                 db.get_text('handlers_user.auto_b6a66c09', '⛔️ در حال حاضر هیچ روش پرداخت فعالی برای این مبلغ در دسترس نیست. لطفاً مبلغ دیگری وارد کنید یا بعداً تلاش کنید.')
             )
-            return
+            return False
 
         await state.update_data(topup_amount=amount)
         await state.set_state(WalletTopup.waiting_receipt)
@@ -6682,9 +6996,20 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
                 noapay_enabled=noapay_payment.noapay_payment_available(db),
                 blupal_enabled=blupal_payment.blupal_payment_available(db),
                 extra_gateways=extra_gateway_payment.available_keys(db, is_main_bot),
-                user_id=message.from_user.id,
+                user_id=user_id,
             ),
         )
+        return True
+
+    @router.message(WalletTopup.waiting_amount)
+    async def process_topup_amount(message: Message, state: FSMContext):
+        min_topup = int((await asyncio.to_thread(db.get_setting, "min_amount_wallet_topup", "1000")) or "1000")
+        text = message.text.strip().replace(",", "")
+        if not text.isdigit() or int(text) < min_topup:
+            await message.answer(tr(f"لطفاً یک عدد معتبر و حداقل {min_topup:,} تومان ارسال کنید."))
+            return
+
+        await _begin_topup(message, state, message.from_user.id, int(text))
 
     @router.callback_query(F.data == "pay_card2card", WalletTopup.waiting_receipt)
     async def cb_pay_card2card_topup(call: CallbackQuery, state: FSMContext):

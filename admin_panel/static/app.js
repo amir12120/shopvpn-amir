@@ -1554,8 +1554,51 @@ async function renderDashboard() {
   const root = content();
   if (root) root.insertAdjacentHTML('afterbegin', dashRangeBarHtml(s));
   wireDashRangeBar();
+  appendDashboardCommandCenter(s, sys);
   appendExtraStatsPanel(s);
   await appendCronPanel();
+}
+
+/* نوار فرمان داشبورد: میان‌برهای پرتکرار و هشدارهای عملیاتی، مستقل از تم */
+function appendDashboardCommandCenter(s, sys) {
+  const root = content();
+  if (!root || ME?.tenant) return;
+  $('#dashboard-command-center', root)?.remove();
+  const shortcuts = [
+    { key: 'orders', icon: '🧾', title: 'بررسی سفارش‌ها', desc: 'پرداخت‌ها و سفارش‌های جدید' },
+    { key: 'users', icon: '👥', title: 'مدیریت کاربران', desc: 'جستجو و مدیریت مشتریان' },
+    { key: 'catalog', icon: '📦', title: 'محصولات و کانفیگ‌ها', desc: 'موجودی و بانک سرویس' },
+    { key: 'panels', icon: '🖥️', title: 'پنل‌های VPN', desc: 'اتصال و وضعیت پنل‌ها' },
+    { key: 'analytics', icon: '📈', title: 'گزارش‌های تحلیلی', desc: 'روند فروش و عملکرد' },
+    { key: 'settings', icon: '⚙️', title: 'تنظیمات فروشگاه', desc: 'پیکربندی و برندینگ' },
+  ].filter(item => canSee(NAV.find(n => n.key === item.key)?.role || 'any'));
+  const lowStock = (s.low_stock_products || []).length;
+  const openTickets = Number(s.open_tickets || 0);
+  const resourceAlerts = [sys?.cpu?.percent, sys?.ram?.percent, sys?.disk?.percent]
+    .map(Number).filter(v => Number.isFinite(v) && v >= 85).length;
+  const alerts = [
+    { count: lowStock, label: 'محصول کم‌موجودی', target: 'catalog', tone: 'warning', icon: '📦' },
+    { count: openTickets, label: 'تیکت نیازمند رسیدگی', target: 'tickets', tone: 'info', icon: '🎧' },
+    { count: resourceAlerts, label: 'منبع سرور در آستانه هشدار', target: 'system', tone: 'danger', icon: '🛡️' },
+  ].filter(a => a.count > 0 && canSee(NAV.find(n => n.key === a.target)?.role || 'any'));
+  const el = document.createElement('section');
+  el.id = 'dashboard-command-center';
+  el.className = 'dashboard-command-center';
+  el.innerHTML = `
+    <div class="dcc-heading"><div><span class="dcc-eyebrow">SHOPVPN · CONTROL CENTER</span>
+      <h3>${greetingByHour()}، ${esc(ME?.username || 'مدیر')} 👋</h3>
+      <p>دسترسی سریع به بخش‌های مهم و مواردی که نیاز به توجه دارند.</p></div>
+      <div class="dcc-status"><i></i><span>پنل مدیریت فعال است</span></div></div>
+    <div class="dcc-body"><div class="dcc-shortcuts">${shortcuts.map(item => `
+      <button type="button" class="dcc-shortcut" data-dash-go="${item.key}"><span class="dcc-shortcut-icon">${item.icon}</span>
+      <span class="dcc-shortcut-copy"><b>${item.title}</b><small>${item.desc}</small></span><span class="dcc-arrow">←</span></button>`).join('')}
+      </div><aside class="dcc-alerts"><div class="dcc-alert-head"><b>نیازمند توجه</b><span>${alerts.length ? `${alerts.length} مورد` : 'همه‌چیز مرتب است'}</span></div>
+      ${alerts.length ? alerts.map(a => `<button type="button" class="dcc-alert ${a.tone}" data-dash-go="${a.target}"><span>${a.icon}</span><span>${a.label}</span><b class="mono">${fmt(a.count)}</b></button>`).join('') :
+      '<div class="dcc-all-clear"><span>✓</span><b>مورد فوری وجود ندارد</b><small>موجودی، پشتیبانی و منابع سرور در وضعیت عادی هستند.</small></div>'}</aside></div>`;
+  const rangeBar = $('.dash-range-row', root)?.closest('.card');
+  if (rangeBar?.parentNode === root) rangeBar.insertAdjacentElement('afterend', el);
+  else root.insertBefore(el, root.firstChild);
+  $$('[data-dash-go]', el).forEach(btn => btn.addEventListener('click', () => goTo(btn.dataset.dashGo)));
 }
 
 /* ------------------------------------------ dashboard: extra stats panel --- */
@@ -4509,6 +4552,7 @@ function productProvisionFieldsHtml(panelServers, sshNodes = [], prefill = null)
     <div class="form-row" style="gap:12px;align-items:center">
       <label style="display:flex;align-items:center;gap:4px"><input type="radio" name="prod-source" value="bank" ${isDirect ? '' : 'checked'}> بانک کانفیگ</label>
       <label style="display:flex;align-items:center;gap:4px"><input type="radio" name="prod-source" value="direct" ${isDirect ? 'checked' : ''}> ساخت خودکار</label>
+      ${prefill ? '' : '<label style="display:flex;align-items:center;gap:4px"><input type="radio" name="prod-source" value="panel"> 🔑 فروش پنل (یوزر/پسورد)</label>'}
     </div>
     <div id="prod-direct-fields" class="form-grid" style="display:${isDirect ? '' : 'none'}">
       <label class="field"><span>نوع مقصد</span><select class="input" id="prod-target-type"><option value="vpn" ${target === 'vpn' ? 'selected' : ''}>پنل VPN</option>${panelServers.some(s => s.panel_type === 'stealth') ? `<option value="vless" ${target === 'vless' ? 'selected' : ''}>نود VLESS</option>` : ''}${sshNodes.length || (prefill && prefill.provision_ssh_node_id) ? `<option value="ssh" ${target === 'ssh' ? 'selected' : ''}>نود SSH (Linux Agent)</option><option value="both" ${target === 'both' ? 'selected' : ''} ${comboLocked && target !== 'both' ? 'disabled' : ''}>ترکیبی VPN + SSH (حجم و زمان مشترک)${comboLocked ? ' — نیازمند ساب اختصاصی فعال' : ''}</option>` : ''}<option value="multi" ${target === 'multi' ? 'selected' : ''} ${comboLocked && target !== 'multi' ? 'disabled' : ''}>چند پنل / چند نود (حجم و زمان مشترک)${comboLocked ? ' — نیازمند ساب اختصاصی فعال' : ''}</option></select><span class="card-sub" id="prod-multi-hint" style="display:${comboLocked ? '' : 'none'}">ترکیب و چند مقصدی فقط وقتی ساب اختصاصی فعال باشد کار می‌کند.</span></label>
@@ -4586,7 +4630,9 @@ function wireProductProvisionToggle(b) {
   wireRenewRules(b);
   $$('input[name="prod-source"]', b).forEach(r => r.addEventListener('change', () => {
     const df = $('#prod-direct-fields', b);
-    if (df) df.style.display = $('input[name="prod-source"]:checked', b).value === 'direct' ? '' : 'none';
+    const srcVal = $('input[name="prod-source"]:checked', b).value;
+    if (df) df.style.display = srcVal === 'direct' ? '' : 'none';
+    ['#prod-duration', '#prod-renew-rules'].forEach(sel => { const el = $(sel, b); const box = el ? (el.closest('.field') || el) : null; if (box) box.style.display = srcVal === 'panel' ? 'none' : ''; });
   }));
   const targetType = $('#prod-target-type', b);
   const syncPanelOptions = () => {
@@ -4713,6 +4759,7 @@ function readProductProvisionFields(b) {
   const durInput = $('#prod-duration', b);
   const duration_days = durationUnlimited ? 0 : (Number(durInput ? durInput.value : 0) || 30);
   const userLimit = () => ({ base_users: Number($('#prod-base-users', b)?.value || 0), extra_user_price: Number($('#prod-extra-user-price', b)?.value || 0), max_users: Number($('#prod-max-users', b)?.value || 0), renew_rules: collectRenewRules(b) });
+  if (source === 'panel') return { ok: true, source: 'panel', product_kind: 'panel_account', provision_server_id: null, provision_ssh_node_id: null, extra_panel_ids: [], extra_ssh_node_ids: [], auto_provision_volume_gb: null, duration_days: 0 };
   if (!isDirect) return { ok: true, source: 'bank', provision_server_id: null, provision_ssh_node_id: null, extra_panel_ids: [], extra_ssh_node_ids: [], auto_provision_volume_gb: null, duration_days, ...userLimit() };
   const target = $('#prod-target-type', b)?.value || 'vpn';
   const volUnlimitedCb = $('#prod-volume-unlimited', b);
@@ -4871,7 +4918,7 @@ function openProductEditModal(product, categories, panelServers, sshNodes) {
       if (!prov.ok) return;
       const payload = {
         category_id: Number($('#pe-cat', b).value), name, price: disc.price, compare_price: disc.compare_price, discount_days: disc.discount_days, discount_max_uses: disc.discount_max_uses,
-        description: $('#pe-desc', b).value, btn_style: readProductBtnStyle(b, 'pe'), ai_description: $('#pe-ai-desc', b)?.value ?? '', duration_days: prov.duration_days,
+        description: $('#pe-desc', b).value, btn_style: readProductBtnStyle(b, 'pe'), ai_description: $('#pe-ai-desc', b)?.value ?? '', duration_days: prov.duration_days, product_kind: prov.product_kind || 'config',
         source: prov.source,
       };
       if (prov.source === 'direct') {
@@ -5037,7 +5084,7 @@ async function renderCatalog() {
       try {
         await apiPost('/products', {
           category_id: Number($('#prod-cat', b).value), name, price: disc.price, compare_price: disc.compare_price, discount_days: disc.discount_days, discount_max_uses: disc.discount_max_uses,
-          description: $('#prod-desc', b).value, btn_style: readProductBtnStyle(b, 'prod'), ai_description: $('#prod-ai-desc', b)?.value || '', duration_days: prov.duration_days,
+          description: $('#prod-desc', b).value, btn_style: readProductBtnStyle(b, 'prod'), ai_description: $('#prod-ai-desc', b)?.value || '', duration_days: prov.duration_days, product_kind: prov.product_kind || 'config',
           provision_server_id: prov.provision_server_id, provision_target_values: prov.provision_target_values, extra_panel_target_values: prov.extra_panel_target_values, provision_ssh_node_id: prov.provision_ssh_node_id, provision_ssh_protocol: prov.provision_ssh_protocol, extra_panel_ids: prov.extra_panel_ids, extra_ssh_node_ids: prov.extra_ssh_node_ids,
           auto_provision_volume_gb: prov.auto_provision_volume_gb, payment_methods, base_users: prov.base_users, extra_user_price: prov.extra_user_price, max_users: prov.max_users, renew_rules: prov.renew_rules,
         });
@@ -5170,7 +5217,7 @@ function renderCatalogBento(categories, products, panelServers, sshNodes, paymen
       try {
         await apiPost('/products', {
           category_id: Number($('#prod-cat', b).value), name, price: disc.price, compare_price: disc.compare_price, discount_days: disc.discount_days, discount_max_uses: disc.discount_max_uses,
-          description: $('#prod-desc', b).value, btn_style: readProductBtnStyle(b, 'prod'), ai_description: $('#prod-ai-desc', b)?.value || '', duration_days: prov.duration_days,
+          description: $('#prod-desc', b).value, btn_style: readProductBtnStyle(b, 'prod'), ai_description: $('#prod-ai-desc', b)?.value || '', duration_days: prov.duration_days, product_kind: prov.product_kind || 'config',
           provision_server_id: prov.provision_server_id, provision_target_values: prov.provision_target_values, extra_panel_target_values: prov.extra_panel_target_values, provision_ssh_node_id: prov.provision_ssh_node_id, provision_ssh_protocol: prov.provision_ssh_protocol, extra_panel_ids: prov.extra_panel_ids, extra_ssh_node_ids: prov.extra_ssh_node_ids,
           auto_provision_volume_gb: prov.auto_provision_volume_gb, payment_methods, base_users: prov.base_users, extra_user_price: prov.extra_user_price, max_users: prov.max_users, renew_rules: prov.renew_rules,
         });
@@ -5303,7 +5350,7 @@ function renderCatalogBrutalist(categories, products, panelServers, sshNodes, pa
       try {
         await apiPost('/products', {
           category_id: Number($('#prod-cat', b).value), name, price: disc.price, compare_price: disc.compare_price, discount_days: disc.discount_days, discount_max_uses: disc.discount_max_uses,
-          description: $('#prod-desc', b).value, btn_style: readProductBtnStyle(b, 'prod'), ai_description: $('#prod-ai-desc', b)?.value || '', duration_days: prov.duration_days,
+          description: $('#prod-desc', b).value, btn_style: readProductBtnStyle(b, 'prod'), ai_description: $('#prod-ai-desc', b)?.value || '', duration_days: prov.duration_days, product_kind: prov.product_kind || 'config',
           provision_server_id: prov.provision_server_id, provision_target_values: prov.provision_target_values, extra_panel_target_values: prov.extra_panel_target_values, provision_ssh_node_id: prov.provision_ssh_node_id, provision_ssh_protocol: prov.provision_ssh_protocol, extra_panel_ids: prov.extra_panel_ids, extra_ssh_node_ids: prov.extra_ssh_node_ids,
           auto_provision_volume_gb: prov.auto_provision_volume_gb, payment_methods, base_users: prov.base_users, extra_user_price: prov.extra_user_price, max_users: prov.max_users, renew_rules: prov.renew_rules,
         });
@@ -5349,15 +5396,16 @@ async function showConfigBank(productId) {
   const configs = res.items || [];
   const usedConfigs = usedRes.items || [];
   const usedCount = res.used_count || 0;
-  openModal('بانک کانفیگ', `
+  const isPanelKind = res.product_kind === 'panel_account';
+  openModal(isPanelKind ? 'موجودی پنل‌ها' : 'بانک کانفیگ', `
     <div class="cfg-stats">
       <div class="cfg-stat"><span>لینک‌های آزاد</span><b class="mono">${fmt(configs.length)}</b></div>
       <div class="cfg-stat"><span>تحویل‌شده</span><b class="mono">${fmt(usedCount)}</b></div>
       <div class="cfg-stat"><span>مجموع</span><b class="mono">${fmt(configs.length + usedCount)}</b></div>
     </div>
     <label class="field" style="margin-top:16px">
-      <span>افزودن لینک جدید</span>
-      <textarea class="input" id="new-links" rows="6" placeholder="هر خط یک لینک کانفیگ..."></textarea>
+      <span>${isPanelKind ? 'افزودن پنل جدید' : 'افزودن لینک جدید'}</span>
+      <textarea class="input" id="new-links" rows="6" placeholder="${isPanelKind ? 'هر خط یک پنل: آدرس | یوزر | پسورد | توضیحات' : 'هر خط یک لینک کانفیگ...'}"></textarea>
     </label>
     <button class="btn btn-primary btn-block" id="add-links" style="margin-top:10px">افزودن لینک‌ها</button>
     <h4 class="cfg-list-title">لینک‌های آزاد (${configs.length})</h4>
@@ -8979,6 +9027,32 @@ const SETTINGS_GROUPS = [
   // نکته: متن/رنگ/ترتیب/فعال‌سازی دکمه‌های منوی اصلی ربات، و همچنین رنگ
   // دکمه‌های مسیر خرید (انتخاب دسته/محصول/ادامه/کد تخفیف/بازگشت) دیگر اینجا
   // نیست؛ برای یکپارچه‌سازی، همه‌شان به تب «دکمه‌های ربات» منتقل شدند.
+  { tab: 'content', title: '🛍 دکمه مینی‌اپ فروشگاه', fields: [
+    { key: 'miniapp_button_text', label: 'نام دکمه فروشگاه در منوی اصلی ربات', type: 'text' },
+    { key: 'miniapp_button_style', label: 'رنگ دکمه فروشگاه', type: 'select', options: [['', 'پیش‌فرض'], ['primary', 'آبی'], ['success', 'سبز'], ['danger', 'قرمز']] },
+    { key: 'miniapp_menu_button_text', label: 'نام دکمه فروشگاه کنار کادر پیام تلگرام', type: 'text' },
+  ]},
+  { tab: 'content', title: '📨 قالب پیام تحویل کانفیگ بر اساس نوع پنل', fields: [
+    { key: 'delivery_message_template_default', label: 'قالب تحویل — عمومی', type: 'textarea' },
+    { key: 'delivery_message_template_pasarguard', label: 'قالب تحویل — PasarGuard', type: 'textarea' },
+    { key: 'delivery_message_template_3xui', label: 'قالب تحویل — 3X-UI', type: 'textarea' },
+    { key: 'delivery_message_template_marzban', label: 'قالب تحویل — Marzban', type: 'textarea' },
+    { key: 'delivery_message_template_marzneshin', label: 'قالب تحویل — Marzneshin', type: 'textarea' },
+    { key: 'delivery_message_template_hiddify', label: 'قالب تحویل — Hiddify', type: 'textarea' },
+    { key: 'delivery_message_template_alireza', label: 'قالب تحویل — Alireza', type: 'textarea' },
+    { key: 'delivery_message_template_rebecca', label: 'قالب تحویل — Rebecca', type: 'textarea' },
+    { key: 'delivery_message_template_sui', label: 'قالب تحویل — SUI', type: 'textarea' },
+    { key: 'delivery_message_template_wgdashboard', label: 'قالب تحویل — WGDashboard', type: 'textarea' },
+    { key: 'delivery_message_template_mikrotik', label: 'قالب تحویل — MikroTik', type: 'textarea' },
+    { key: 'delivery_message_template_ibsng', label: 'قالب تحویل — IBSng', type: 'textarea' },
+    { key: 'delivery_message_template_wui', label: 'قالب تحویل — WUI', type: 'textarea' },
+    { key: 'delivery_message_template_stealth', label: 'قالب تحویل — Stealth', type: 'textarea' },
+  ]},
+  { tab: 'content', title: '🧊 جلوه سه‌بعدی فروشگاه وب (صفحه اصلی)', fields: [
+    { key: 'web_3d_mode', label: 'حالت سه‌بعدی (برای سبک‌ترین سایت «خاموش» را بزن)', type: 'select', options: [['off', '⛔ خاموش — بدون هیچ جلوه سه‌بعدی (سبک‌ترین)'], ['cinema', '🎬 سینمایی (حالت فعلی)'], ['particles', '✨ ذرات و سپر'], ['globe', '🌍 کره زمین با مسیرهای اتصال'], ['network', '🕸 شبکه گره‌ها'], ['tunnel', '🚀 تونل سرعت'], ['waves', '🌊 موج‌های سه‌بعدی']] },
+    { key: 'web_3d_mobile', label: 'نمایش جلوه سه‌بعدی روی موبایل (خاموش = در موبایل همیشه ساده)', type: 'bool' },
+    { key: 'web_3d_auto_lite', label: 'خاموش شدن خودکار روی گوشی/سیستم ضعیف و «حالت صرفه‌جویی داده»', type: 'bool' },
+  ]},
   { tab: 'content', title: '🗺 نقشه زنده شبکه — مکان سرورها (دستی)', fields: [
     { key: 'netmap_locations', label: 'مکان سرورها', type: 'netmap_simple' },
   ]},
@@ -9093,6 +9167,7 @@ const SETTINGS_GROUPS = [
     { key: 'acct_show_wallet', label: 'نمایش «کیف پول من»', type: 'bool' },
     { key: 'acct_show_add_service', label: 'نمایش «افزودن حساب (اتصال کانفیگ قبلی)»', type: 'bool' },
     { key: 'acct_show_merge', label: 'نمایش «ادغام با حساب ایمیلی»', type: 'bool' },
+    { key: 'acct_show_smartsub', label: 'نمایش «اشتراک هوشمند (ادغام کانفیگ‌ها)»', type: 'bool' },
     { key: 'acct_add_service_by_username', label: 'افزودن حساب با نام کاربری کانفیگ (علاوه بر لینک ساب)', type: 'bool' },
   ]},
   { tab: 'sales', title: '🛠 نمایش دکمه‌های سرویس', fields: [
@@ -9607,10 +9682,15 @@ async function saveExtraGroup(groupEl, btn) {
   $$('.switch[data-xkey]', groupEl).forEach(sw => { values[sw.dataset.xkey] = sw.dataset.on === '1' ? '1' : '0'; });
   btn.disabled = true;
   try {
-    await apiPost('/settings/extra', { values });
+    const saved = await apiPost('/settings/extra', { values });
     // رمز تازه‌ذخیره‌شده دیگر در صفحه نمی‌ماند؛ به ماسک برمی‌گردد.
     $$('input[type=password][data-xkey]', groupEl).forEach(inp => { if (inp.value.trim()) inp.value = EXTRA_SECRET_MASK; });
     toast(settingsUiText('ذخیره شد.'));
+    if (saved && saved.profile) {
+      const errs = Object.values(saved.profile.errors || {}).join('؛ ');
+      toast(saved.profile.ok ? settingsUiText('روی تلگرام اعمال شد.')
+        : settingsUiText('ذخیره شد ولی اعمال روی تلگرام ناموفق بود: ') + errs);
+    }
     const qbox = groupEl.closest('#extra-settings-root');
     if (qbox && qbox._refreshQrBg && groupEl.dataset.extraGroup === 'post_tools') qbox._refreshQrBg();
   } catch (e) {

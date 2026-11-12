@@ -488,22 +488,92 @@
     return p.original_price && p.original_price > p.price ? Math.round((1 - p.price / p.original_price) * 100) : 0;
   }
 
+  // حالت سه‌بعدی از تنظیمات پنل ادمین (meta#sv-3d که سرور می‌گذارد). هر چیز نامعتبر یا
+  // دستگاه ضعیف/موبایل (طبق تنظیم) = off تا سایت سبک بماند.
+  var SCENE_MODES = ["off", "cinema", "particles", "globe", "network", "tunnel", "waves"];
+  function sceneMode() {
+    var meta = document.querySelector('meta[name="sv-3d"]');
+    var mode = meta ? String(meta.getAttribute("content") || "").toLowerCase() : "cinema";
+    if (SCENE_MODES.indexOf(mode) < 0) mode = "cinema";
+    if (mode === "off") return mode;
+    try {
+      var small = window.innerWidth < 720 || (window.matchMedia && matchMedia("(pointer: coarse)").matches && window.innerWidth < 1024);
+      if (meta && meta.getAttribute("data-mobile") === "0" && small) return "off";
+      if (meta && meta.getAttribute("data-lite") !== "0") {
+        var conn = navigator.connection || {};
+        if (conn.saveData) return "off";
+        if (navigator.deviceMemory && navigator.deviceMemory <= 2) return "off";
+        if (navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 2) return "off";
+      }
+    } catch (e) {}
+    return mode;
+  }
+
   function buildHero() {
+    var mode = sceneMode();
+    if (mode !== "cinema") return buildClassicHero(mode);
+    if (!window.ShopVPNCinema || !window.ShopVPNCinema.supported()) return buildClassicHero("particles");
+    var node = h("div", { class: "hero-stack" });
+    var ctl = null;
+    var classic = null;
+    return {
+      node: node,
+      start: function () {
+        try {
+          ctl = window.ShopVPNCinema.mount({ host: node, lang: lang, t: t, fmt: fmt, word: S.brand.name || "ShopVPN" });
+        } catch (e) { ctl = null; }
+        if (ctl) return;
+        classic = buildClassicHero("particles");
+        node.textContent = "";
+        node.appendChild(classic.node);
+        classic.start();
+      },
+      bind: function (c) {
+        if (classic) { classic.bind(c); return; }
+        if (!ctl) return;
+        if (S.brand.name) ctl.setWord(S.brand.name);
+        if (c.tagline) ctl.setLead(c.tagline);
+        ctl.setPlans(allProducts(c).filter(function (p) { return p.in_stock; }).slice(0, 9));
+      }
+    };
+  }
+
+  function buildClassicHero(mode) {
+    mode = mode || "particles";
     var lead = h("p", { class: "lead", text: t("hero_sub") });
     var quick = h("div", { class: "quick" });
     var tunnelHost = h("div", { class: "tunnel" });
-    var node = h("section", { class: "wrap hero" },
-      h("div", null,
-        h("h1", { text: t("hero_title") }),
-        lead,
-        h("div", { class: "cta" },
-          h("a", { class: "btn", href: "#/plans", text: t("hero_cta") }),
-          h("a", { class: "btn ghost", href: "#/guide", text: t("hero_cta2") }))),
-      tunnelHost);
+    var canvas = h("canvas", { class: "scene-gl", "aria-hidden": "true" });
+    var copy = h("div", { class: "scene-copy" },
+      h("h1", { text: t("hero_title") }),
+      lead,
+      h("div", { class: "cta" },
+        h("a", { class: "btn", href: "#/plans", text: t("hero_cta") }),
+        h("a", { class: "btn ghost", href: "#/guide", text: t("hero_cta2") })));
+    var stage = h("div", { class: "scene-stick" }, canvas, copy, h("i", { class: "scene-hint", "aria-hidden": "true" }));
+    var scene = h("section", { class: "scene" }, stage);
+    var sceneCtl = null;
+    var node = h("div", { class: "hero-stack" }, scene, h("section", { class: "quick-hero" }, tunnelHost));
     tunnelHost.appendChild(buildTunnel(3).node);
     return {
       node: node,
+      start: function () {
+        var opts = { scene: scene, stage: stage, canvas: canvas, copy: copy, word: S.brand.name || "ShopVPN" };
+        if (mode === "particles" && window.ShopVPNHeroScene) {
+          try { sceneCtl = window.ShopVPNHeroScene.mount(opts); } catch (e) { sceneCtl = null; }
+          return;
+        }
+        if (mode !== "off" && mode !== "particles" && window.ShopVPNScenes) {
+          scene.classList.add("flat");
+          try { sceneCtl = window.ShopVPNScenes.mount(mode, opts); } catch (e) { sceneCtl = null; }
+          if (sceneCtl) return;
+        }
+        // خاموش یا ناموفق: هیچ canvas و انیمیشنی نمی‌ماند
+        scene.classList.add("flat", "is-off");
+        if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
+      },
       bind: function (c) {
+        if (sceneCtl && S.brand.name) sceneCtl.setWord(S.brand.name);
         if (c.tagline) lead.textContent = c.tagline;
         var list = allProducts(c).filter(function (p) { return p.in_stock; }).slice(0, 4);
         if (!list.length) return;
@@ -722,6 +792,7 @@
       plansBox);
     var networkMap = window.ShopVPNNetworkMap && window.ShopVPNNetworkMap.create ? window.ShopVPNNetworkMap.create() : null;
     mount(h("div", null, hero.node, networkMap, storefrontHighlights(), plans, deviceSection(), howSection(), testimonialSection(), faqSection(), finalCtaSection()), "");
+    hero.start();
     plansBox.appendChild(skeletonCards(3));
     loadCatalog().then(function (c) {
       fillPlans(plansBox, c);

@@ -27,6 +27,8 @@ class DatabaseBase:
         # event loop تک‌رشته‌ای هستند، پس این لاک برای آن‌ها overhead
         # واقعی ندارد ولی برای مینی‌اپ لازم است.
         self._lock = threading.Lock()
+        self._read_local = threading.local()
+        self._read_gen = 0
 
     async def cache_autorefresh_loop(self, interval: float = 2.0):
         """فقط برای پردازش بات (aiogram) استفاده می‌شود، نه مینی‌اپ/پنل وب.
@@ -106,6 +108,27 @@ class DatabaseBase:
                 raise
 
 
+    @contextmanager
+    def _get_read_conn(self):
+        """Per-thread read-only connection so reads do not queue behind the shared writer lock (WAL allows concurrent readers)."""
+        local = self._read_local
+        conn = getattr(local, "conn", None)
+        if conn is not None and getattr(local, "gen", -1) != self._read_gen:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            conn = None
+        if conn is None:
+            conn = sqlite3.connect(self.db_path, timeout=5)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout = 4000")
+            conn.execute("PRAGMA query_only = ON")
+            local.conn = conn
+            local.gen = self._read_gen
+        yield conn
+
+
     def close(self):
         """اتصال persistent فعلی را می‌بندد و کش تنظیمات را پاک می‌کند. فراخوانی
         بعدی هر متدی خودش دوباره یک اتصال تازه باز می‌کند. لازم قبل از
@@ -119,6 +142,7 @@ class DatabaseBase:
                 self._conn = None
             self._settings_cache = None
             self._admin_cache = None
+            self._read_gen += 1
 
 
     def replace_file(self, uploaded_file_path: str) -> str:
@@ -154,6 +178,7 @@ class DatabaseBase:
                 self._conn = None
             self._settings_cache = None
             self._admin_cache = None
+            self._read_gen += 1
 
             if os.path.exists(self.db_path):
                 src = sqlite3.connect(self.db_path)
@@ -344,7 +369,11 @@ class DatabaseBase:
                 CREATE TABLE IF NOT EXISTS scheduled_broadcasts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     admin_id INTEGER NOT NULL,
-                    message_text TEXT NOT NULL,
+                    message_text TEXT NOT NULL DEFAULT '',
+                    source_chat_id INTEGER,
+                    source_message_id INTEGER,
+                    source_message_ids TEXT NOT NULL DEFAULT '',
+                    target TEXT NOT NULL DEFAULT 'all',
                     scheduled_at TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'pending',
                     sent_count INTEGER DEFAULT 0,
@@ -1014,6 +1043,7 @@ class DatabaseBase:
 
                 CREATE INDEX IF NOT EXISTS idx_custom_gw_invoices_txn ON custom_gateway_invoices(gateway_id, txn_id);
                 CREATE INDEX IF NOT EXISTS idx_custom_gw_invoices_ref ON custom_gateway_invoices(gateway_id, kind, ref_id);
+                CREATE INDEX IF NOT EXISTS idx_custom_gw_invoices_kind_ref ON custom_gateway_invoices(kind, ref_id);
 
                 -- ===== کارت‌به‌کارت با تایید خودکار (پیامک بانک از اپ BankSmsForwarder) =====
                 CREATE TABLE IF NOT EXISTS card_to_card_cards (
@@ -1866,6 +1896,21 @@ class DatabaseBase:
 
     def _migrate_columns(self, conn):
         self._migrate_test_config_plans(conn)
+        if self._column_exists(conn, "scheduled_broadcasts", "id"):
+            for _col, _ddl in (("source_chat_id", "INTEGER"), ("source_message_id", "INTEGER"), ("source_message_ids", "TEXT NOT NULL DEFAULT ''"), ("target", "TEXT NOT NULL DEFAULT 'all'")):
+                if not self._column_exists(conn, "scheduled_broadcasts", _col):
+                    conn.execute(f"ALTER TABLE scheduled_broadcasts ADD COLUMN {_col} {_ddl}")
+        # Optional descriptive/media fields; additive so existing customer databases remain intact.
+        for _table, _column, _ddl in (
+            ("categories", "description", "TEXT NOT NULL DEFAULT ''"),
+            ("categories", "description_media", "TEXT NOT NULL DEFAULT ''"),
+            ("payment_cards", "photo_file_id", "TEXT"),
+            ("payment_cards", "description_template", "TEXT NOT NULL DEFAULT ''"),
+            ("card_to_card_cards", "photo_file_id", "TEXT"),
+            ("card_to_card_cards", "description_template", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if self._column_exists(conn, _table, "id") and not self._column_exists(conn, _table, _column):
+                conn.execute(f"ALTER TABLE {_table} ADD COLUMN {_column} {_ddl}")
         if self._column_exists(conn, "product_extra_targets", "id") and not self._column_exists(conn, "product_extra_targets", "target_config"):
             conn.execute("ALTER TABLE product_extra_targets ADD COLUMN target_config TEXT")
 
@@ -1997,6 +2042,11 @@ class DatabaseBase:
             ("welcome_gift_queue", "result_json", "TEXT"),
             ("products", "is_hidden", "INTEGER DEFAULT 0"),
             ("products", "btn_style", "TEXT DEFAULT ''"),
+            ("products", "product_kind", "TEXT DEFAULT 'config'"),
+            ("configs", "panel_url", "TEXT"),
+            ("configs", "panel_user", "TEXT"),
+            ("configs", "panel_pass", "TEXT"),
+            ("configs", "panel_info", "TEXT"),
             ("categories", "parent_id", "INTEGER"),
             ("categories", "emoji", "TEXT"),
             ("categories", "product_emoji", "TEXT"),
@@ -2079,6 +2129,9 @@ class DatabaseBase:
             ("products", "max_users", "INTEGER DEFAULT 0"),
             ("products", "base_users", "INTEGER DEFAULT 0"),
             ("products", "ai_description", "TEXT DEFAULT ''"),
+            # متن و استیکر اختصاصی تحویل هر محصول (file_id استیکر تلگرام)؛ خالی = ندارد.
+            ("products", "delivery_text", "TEXT DEFAULT ''"),
+            ("products", "delivery_sticker", "TEXT DEFAULT ''"),
             # قیمت قبل از تخفیف (فقط نمایشی: خط‌خورده کنار قیمت فعلی). 0 یعنی بدون تخفیف.
             ("products", "compare_price", "INTEGER DEFAULT 0"),
             # محدودیت تخفیف محصول: انقضا (UTC ISO)، سقف تعداد خرید و شمارنده‌ی خریدهای انجام‌شده.

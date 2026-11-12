@@ -301,6 +301,33 @@ class CatalogMixin:
         with self._get_conn() as conn:
             return conn.execute("SELECT * FROM categories WHERE id=?", (cat_id,)).fetchone()
 
+    def set_category_description(self, cat_id: int, description: str) -> None:
+        """ذخیره توضیح دسته یا زیردسته؛ متن خالی توضیح را پاک می‌کند."""
+        value = str(description or "").strip()
+        if len(value) > 2000:
+            raise ValueError("category description is too long")
+        with self._get_conn() as conn:
+            cur = conn.execute("UPDATE categories SET description=? WHERE id=?", (value, int(cat_id)))
+            if not cur.rowcount:
+                raise ValueError("category not found")
+
+
+    def get_category_description_media(self, cat_id: int) -> list:
+        """لیست رسانه‌های توضیحات دسته: [{"type","file_id"}, ...]"""
+        import category_media
+        row = self.get_category(cat_id)
+        if row is None or "description_media" not in row.keys():
+            return []
+        return category_media.parse(row["description_media"])
+
+    def set_category_description_media(self, cat_id: int, items) -> None:
+        """ذخیره‌ی رسانه‌های توضیحات دسته؛ لیست خالی رسانه را پاک می‌کند."""
+        import category_media
+        value = category_media.serialize(items)
+        with self._get_conn() as conn:
+            cur = conn.execute("UPDATE categories SET description_media=? WHERE id=?", (value, int(cat_id)))
+            if not cur.rowcount:
+                raise ValueError("category not found")
 
     def set_category_emoji(self, cat_id: int, field: str, value) -> None:
         """field: emoji (دکمه‌ی خود دسته) یا product_emoji (علامت موجودی محصولات آن دسته). مقدار خالی = پیش‌فرض سراسری، '-' = بدون ایموجی."""
@@ -476,7 +503,7 @@ class CatalogMixin:
                      compare_price: int = 0, provision_ssh_node_id: int = None,
                      provision_ssh_protocol: str = "ssh",
                      extra_panel_ids=(), extra_ssh_node_ids=(), provision_target_config=None, extra_panel_target_configs=None, renew_rules=None, ai_description: str = "",
-                     btn_style: str = "") -> int:
+                     btn_style: str = "", product_kind: str = "config") -> int:
         """payment_methods: None/[] یعنی «همه‌ی روش‌های پرداخت مجازند» (پیش‌فرض)،
         در غیر این صورت لیستی از کلیدهای مجاز - همان قراردادِ set_product_payment_methods.
 
@@ -504,6 +531,8 @@ class CatalogMixin:
                  btn_style if btn_style in ("primary", "success", "danger") else ""),
             )
             product_id = cur.lastrowid
+            if product_kind == "panel_account":
+                conn.execute("UPDATE products SET product_kind='panel_account' WHERE id=?", (product_id,))
             if ai_description:
                 conn.execute("UPDATE products SET ai_description=? WHERE id=?", (str(ai_description).strip()[:2000], product_id))
             if renew_rules:
@@ -677,7 +706,7 @@ class CatalogMixin:
                       provision_server_id=..., payment_methods=..., category_id: int = None,
                       provision_ssh_node_id=..., provision_ssh_protocol=...,
                       compare_price=..., discount_days=..., discount_max_uses=..., provision_target_config=...,
-                      ai_description: str = None, btn_style=...):
+                      ai_description: str = None, btn_style=..., delivery_text=..., delivery_sticker=...):
         # نکته: is_auto_provision/auto_provision_volume_gb/provision_server_id از سنتینل
         # Ellipsis استفاده می‌کنند (مثل payment_methods) چون باید بتوان آن‌ها را عمداً
         # NULL/False کرد (مثلاً وقتی محصول از «اتصال مستقیم به پنل» به «بانک کانفیگ»
@@ -695,6 +724,10 @@ class CatalogMixin:
             fields.append("duration_days=?"); values.append(duration_days)
         if ai_description is not None:
             fields.append("ai_description=?"); values.append(str(ai_description).strip()[:2000])
+        if delivery_text is not ...:
+            fields.append("delivery_text=?"); values.append(str(delivery_text or "").strip()[:3500])
+        if delivery_sticker is not ...:
+            fields.append("delivery_sticker=?"); values.append(str(delivery_sticker or "").strip()[:200])
         if is_auto_provision is not ...:
             fields.append("is_auto_provision=?"); values.append(1 if is_auto_provision else 0)
         if auto_provision_volume_gb is not ...:
@@ -862,6 +895,43 @@ class CatalogMixin:
                 )
                 seen.add(link)
                 existing.add(link)
+                added += 1
+        return added, duplicates
+
+
+    def is_panel_account_product(self, product_id: int) -> bool:
+        """True اگر محصول از نوع «فروش پنل» (تحویل آدرس/یوزر/پسورد پنل) باشد."""
+        try:
+            with self._get_conn() as conn:
+                row = conn.execute("SELECT product_kind FROM products WHERE id=?", (int(product_id),)).fetchone()
+        except Exception:
+            return False
+        return bool(row and (row["product_kind"] or "") == "panel_account")
+
+
+    def add_panel_accounts(self, product_id: int, items: list):
+        """افزودن اطلاعات ورود پنل‌ها به موجودی محصول «فروش پنل».
+        هر آیتم: {url, user, password, info}. تکراری بر اساس (آدرس|یوزر|پسورد).
+        خروجی: (added_count, duplicate_count)."""
+        added = duplicates = 0
+        with self._get_conn() as conn:
+            existing = {(r["link"] or "").strip() for r in conn.execute("SELECT link FROM configs").fetchall()}
+            for it in items:
+                url = (it.get("url") or "").strip()
+                user = (it.get("user") or "").strip()
+                pw = (it.get("password") or "").strip()
+                if not (url and user and pw):
+                    continue
+                key = f"{url} | {user} | {pw}"
+                if key in existing:
+                    duplicates += 1
+                    continue
+                conn.execute(
+                    "INSERT INTO configs (product_id, link, panel_url, panel_user, panel_pass, panel_info) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (product_id, key, url, user, pw, (it.get("info") or "").strip()),
+                )
+                existing.add(key)
                 added += 1
         return added, duplicates
 

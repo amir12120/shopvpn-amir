@@ -29,6 +29,23 @@ async def get_me(bot_token: str):
         return None
 
 
+async def copy_message(bot_token: str, chat_id: int, from_chat_id: int, message_id: int) -> bool:
+    """کپی پیام ذخیره‌شده (متن، عکس، استیکر و سایر رسانه‌ها) بین گفت‌وگوها."""
+    if not bot_token:
+        return False
+    url = f"https://api.telegram.org/bot{bot_token}/copyMessage"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json={"chat_id": chat_id, "from_chat_id": from_chat_id,
+                                               "message_id": message_id},
+                                    timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                data = await resp.json()
+                return resp.status == 200 and bool(data.get("ok"))
+    except Exception:
+        logger.exception("کپی پیام تلگرام به %s ناموفق بود", chat_id)
+        return False
+
+
 async def send_message(bot_token: str, chat_id: int, text: str, parse_mode: str = None, reply_markup: dict = None) -> bool:
     if not bot_token:
         return False
@@ -141,6 +158,42 @@ async def fetch_telegram_file(bot_token: str, file_id: str):
     except Exception:
         logger.exception("دریافت فایل رسید از تلگرام ناموفق بود (file_id=%s)", file_id)
         return None
+
+
+async def send_document_bytes(bot_token: str, chat_id: int, data: bytes, filename: str, caption: str = "") -> bool:
+    """ارسال فایل از روی بایت‌ها (مثلاً فایل .conf/.ovpn سرویس) بدون وابستگی به aiogram."""
+    if not bot_token:
+        return False
+    url = f"https://api.telegram.org/bot{bot_token}/sendDocument"
+    try:
+        form = aiohttp.FormData()
+        form.add_field("chat_id", str(chat_id))
+        if caption:
+            form.add_field("caption", caption)
+        form.add_field("document", data, filename=filename, content_type="application/octet-stream")
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=form, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                return resp.status == 200
+    except Exception:
+        logger.exception("ارسال فایل تلگرام به %s ناموفق بود", chat_id)
+        return False
+
+
+async def send_sticker(bot_token: str, chat_id: int, sticker_file_id: str) -> bool:
+    """ارسال استیکر با file_id (استیکر محصول)؛ file_id باید با همین توکن بات گرفته شده باشد."""
+    if not bot_token or not sticker_file_id:
+        return False
+    url = f"https://api.telegram.org/bot{bot_token}/sendSticker"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url, json={"chat_id": chat_id, "sticker": sticker_file_id},
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                return resp.status == 200
+    except Exception:
+        logger.exception("ارسال استیکر تلگرام به %s ناموفق بود", chat_id)
+        return False
 
 
 async def send_document(bot_token: str, chat_id: int, file_path: str, caption: str = "") -> bool:

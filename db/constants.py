@@ -222,6 +222,10 @@ DEFAULT_SETTINGS = {
     "store_name": "⚡ SHOP VPN",
     "miniapp_banner_text": "اتصال امن و پایدار برقرار است",
     "miniapp_theme": "clean-light",
+    # فروشگاه وب: حالت سه‌بعدی صفحه‌ی اصلی (off/cinema/particles/globe/network/tunnel/waves)
+    "web_3d_mode": "cinema",
+    "web_3d_mobile": "1",
+    "web_3d_auto_lite": "1",
     # سیستم زیرمجموعه‌گیری
     # کلید مستر: مستقل از سه مدل زیر - غیرفعال کردنش کل سیستم رفرال (دکمه/تب و
     # هر سه مدل پاداش) را کاملاً خاموش می‌کند، صرف‌نظر از اینکه کدام مدل روشن باشد.
@@ -521,6 +525,7 @@ ACCOUNT_TOGGLE_KEYS = [
     ("acct_show_lootbox", "🎁 نمایش «صندوق شانس» (فقط وقتی صندوق شانس روشن باشد)", "1"),
     ("acct_show_add_service", "➕ نمایش «افزودن حساب (اتصال کانفیگ قبلی)»", "1"),
     ("acct_show_merge", "🔗 نمایش «ادغام با حساب ایمیلی»", "1"),
+    ("acct_show_smartsub", "📎 نمایش «اشتراک هوشمند (ادغام کانفیگ‌ها)»", "1"),
     ("acct_add_service_by_username", "🔑 افزودن حساب با نام کاربری کانفیگ (علاوه بر لینک ساب)", "1"),
     ("svc_show_renew_full", "🛠 دکمه «تمدید کامل سرویس»", "1"),
     ("svc_show_renew_volume", "🔋 دکمه «تمدید حجم سرویس»", "1"),
@@ -569,8 +574,9 @@ ACCOUNT_HUB_META = {
     "acct_lootbox": {"label": "صندوق شانس", "default_text": "🎁 صندوق شانس"},
     "acct_add_service": {"label": "افزودن حساب", "default_text": "➕ افزودن حساب (اتصال کانفیگ قبلی)"},
     "acct_merge": {"label": "ادغام با حساب ایمیلی", "default_text": "🔗 ادغام با حساب ایمیلی"},
+    "acct_smartsub": {"label": "اشتراک هوشمند", "default_text": "📎 اشتراک هوشمند (ادغام کانفیگ‌ها)"},
 }
-DEFAULT_ACCOUNT_HUB_ORDER = ["acct_orders", "acct_tutorial", "acct_referral", "acct_wallet", "acct_lootbox", "acct_add_service", "acct_merge"]
+DEFAULT_ACCOUNT_HUB_ORDER = ["acct_orders", "acct_tutorial", "acct_referral", "acct_wallet", "acct_lootbox", "acct_add_service", "acct_smartsub", "acct_merge"]
 
 BUYFLOW_META = {
     "btn_custom_config": {"label": "ساخت کانفیگ شخصی", "default_text": "🛠 ساخت کانفیگ شخصی"},

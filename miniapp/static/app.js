@@ -2423,17 +2423,18 @@ async function renderStore() {
     });
     const products = selected ? selected.products : [];
     const title = selected ? selected.name : "یک دسته را انتخاب کنید";
+    const selectedDescription = selected && selected.description ? `<div class="hint-text" style="margin:4px 0 12px">${escHtml(selected.description)}</div>` : "";
     const parentOfSelected = selected && selected.parent_id != null
       ? categories.find((c) => Number(c.id) === Number(selected.parent_id)) : null;
 
     content.innerHTML = `
       ${selected ? `<div class="list-row" id="store-back-row"><div class="list-row-main"><span class="list-row-ic">‹</span><div class="list-row-text"><span class="list-row-title">بازگشت ${parentOfSelected ? "به " + parentOfSelected.name : "به دسته‌بندی‌ها"}</span></div></div></div>` : `<div class="eyebrow">${title}</div>${buyGuideRow}${customConfigRow}`}
-      ${selected ? `<div class="eyebrow">${title}</div>` : ""}
+      ${selected ? `<div class="eyebrow">${title}</div>${selectedDescription}` : ""}
       ${visibleCategories.map((c) => `
         <div class="list-row" data-cat="${c.id}" style="${c.button_color === "primary" ? "background:#2563eb;color:#fff;border-color:#2563eb;" : c.button_color === "success" ? "background:#16a34a;color:#fff;border-color:#16a34a;" : c.button_color === "danger" ? "background:#dc2626;color:#fff;border-color:#dc2626;" : ""}">
           <div class="list-row-main"><div class="list-row-ic">🏬</div><div class="list-row-text">
             <span class="list-row-title">${c.name}</span>
-            <span class="list-row-sub">${c.products.length} محصول · ${categories.filter(x => Number(x.parent_id) === Number(c.id)).length} زیردسته</span>
+            <span class="list-row-sub">${escHtml(c.description || (c.products.length + " محصول · " + categories.filter(x => Number(x.parent_id) === Number(c.id)).length + " زیردسته"))}</span>
           </div></div><span class="list-row-chev">‹</span>
         </div>`).join("")}
       ${products.length ? `<div class="card"><h3><span class="ic">▣</span>محصولات ${title}</h3>
@@ -3560,6 +3561,10 @@ async function renderAdminExtraSettingsSection() {
         tg.HapticFeedback.notificationOccurred("success");
         card.querySelectorAll('input[type="password"]').forEach((el) => { el.value = ""; });
         notify(res.changed && res.changed.length ? "تنظیمات ذخیره شد." : "تغییری برای ذخیره وجود نداشت.");
+        if (res.profile) {
+          notify(res.profile.ok ? "روی تلگرام اعمال شد."
+            : "ذخیره شد ولی اعمال روی تلگرام ناموفق بود: " + Object.values(res.profile.errors || {}).join("؛ "));
+        }
         if (refreshQrBg && card.dataset.gid === "post_tools") refreshQrBg();
       } catch (e) {
         errBox.textContent = e.message;
@@ -5458,7 +5463,7 @@ async function renderAdminCategories(body) {
         <div class="admin-list-row">
           <div class="admin-list-row-main" data-open-cat="${c.id}" data-cat-name="${(c.name || "").replace(/"/g, "&quot;")}">
             <span>${c.name}</span>
-            <span class="hint-text" style="margin:0">${c.product_count} محصول ${c.is_active ? "" : "· غیرفعال"}</span>
+            <span class="hint-text" style="margin:0">${c.product_count} محصول ${c.is_active ? "" : "· غیرفعال"}${c.description ? " · " + escHtml(c.description) : ""}</span>
           </div>
           <div class="admin-list-row-actions">
             <select aria-label="رنگ دسته‌بندی" title="رنگ اختصاصی دسته‌بندی" data-color-cat="${c.id}" class="input" style="width:94px;padding:4px;font-size:12px">
@@ -5477,6 +5482,7 @@ async function renderAdminCategories(body) {
     <div class="card">
       <div class="eyebrow" style="margin-top:0">افزودن دسته‌بندی جدید</div>
       <input class="input" id="new-cat-name" type="text" placeholder="نام دسته‌بندی" style="direction:rtl;text-align:right;font-family:var(--font-body)" />
+      <textarea class="input" id="new-cat-description" placeholder="توضیحات دسته‌بندی (اختیاری)" style="direction:rtl;text-align:right;font-family:var(--font-body);margin-top:8px"></textarea>
       <button class="btn" id="new-cat-save" style="margin-top:8px">➕ افزودن</button>
     </div>
   `;
@@ -5501,8 +5507,10 @@ async function renderAdminCategories(body) {
       const cat = cats.find((c) => c.id === Number(el.dataset.editCat));
       const name = prompt("نام جدید دسته‌بندی:", cat.name);
       if (!name || !name.trim()) return;
+      const description = prompt("توضیحات دسته‌بندی (خالی = بدون توضیح):", cat.description || "");
+      if (description === null) return;
       try {
-        await api(`/api/admin/categories/${cat.id}`, { method: "PATCH", body: JSON.stringify({ name: name.trim() }) });
+        await api(`/api/admin/categories/${cat.id}`, { method: "PATCH", body: JSON.stringify({ name: name.trim(), description: description.trim() }) });
         renderAdmin();
       } catch (e) { notify(e.message); }
     };
@@ -5528,7 +5536,7 @@ async function renderAdminCategories(body) {
     const input = document.getElementById("new-cat-name");
     if (!input.value.trim()) return;
     try {
-      await api("/api/admin/categories", { method: "POST", body: JSON.stringify({ name: input.value.trim() }) });
+      await api("/api/admin/categories", { method: "POST", body: JSON.stringify({ name: input.value.trim(), description: (document.getElementById("new-cat-description")?.value || "").trim() }) });
       renderAdmin();
     } catch (e) { notify(e.message); }
   };
@@ -5621,6 +5629,7 @@ function productProvisionFieldsHtml(panelServers, bankAllowed = true) {
     <div style="display:flex;gap:14px;align-items:center;margin-bottom:10px">
       <label style="display:flex;align-items:center;gap:4px"><input type="radio" name="new-prod-source" value="bank" checked /> 📦 بانک کانفیگ</label>
       <label style="display:flex;align-items:center;gap:4px"><input type="radio" name="new-prod-source" value="direct" /> 🔌 اتصال مستقیم به پنل</label>
+      <label style="display:flex;align-items:center;gap:4px"><input type="radio" name="new-prod-source" value="panel" /> 🔑 فروش پنل (یوزر/پسورد)</label>
     </div>
     <div id="new-prod-direct-fields" style="display:none;margin-bottom:8px">
       <select class="input" id="new-prod-server" style="margin-bottom:8px">${panelServers.map((s) => `<option value="${s.id}">${s.name}</option>`).join("")}</select>
@@ -5818,6 +5827,15 @@ async function renderAdminProducts(body) {
     loadMiniExtraPanelTargets().catch(e => { document.getElementById("new-prod-error").textContent = e.message; });
   }));
   sourceRadios.forEach((r) => r.addEventListener("change", syncNewProdUserLimit));
+  const syncNewProdPanelKind = () => {
+    const isPanelKind = body.querySelector('input[name="new-prod-source"]:checked')?.value === "panel";
+    ["new-prod-duration", "new-prod-duration-unlimited"].forEach((id) => {
+      const el = document.getElementById(id);
+      const box = el ? (el.closest("label") || el) : null;
+      if (box) box.style.display = isPanelKind ? "none" : "";
+    });
+  };
+  sourceRadios.forEach((r) => r.addEventListener("change", syncNewProdPanelKind));
   syncNewProdUserLimit();
   if (document.getElementById("new-prod-server")) {
     loadAdminProductTargets(document.getElementById("new-prod-server").value, "new-prod-target-picker").then(() => loadMiniExtraPanelTargets()).catch(() => {});
@@ -5847,6 +5865,7 @@ async function renderAdminProducts(body) {
       base_users: Number(document.getElementById("new-prod-base-users")?.value || 0),
       extra_user_price: Number(document.getElementById("new-prod-extra-user-price")?.value || 0),
       max_users: Number(document.getElementById("new-prod-max-users")?.value || 0) };
+    if (sourceEl && sourceEl.value === "panel") { payload.product_kind = "panel_account"; payload.duration_days = 0; }
     if (isDirect) payload.renew_rules = collectMiniRenewRules("new-prod");
     if (isDirect) {
       const provision_server_id = Number(document.getElementById("new-prod-server").value);
@@ -6076,7 +6095,7 @@ async function renderAdminConfigs(body) {
     </div>
     <div class="card">
       <div class="eyebrow" style="margin-top:0">افزودن دسته‌ای کانفیگ</div>
-      <p class="hint-text">هر خط یک لینک کانفیگ (vmess/vless/...) وارد کن.</p>
+      <p class="hint-text">هر خط یک لینک کانفیگ (vmess/vless/...) وارد کن. برای محصول «فروش پنل» هر خط: آدرس | یوزر | پسورد | توضیحات</p>
       <textarea class="input" id="new-configs-bulk" rows="5" style="direction:ltr;text-align:left;resize:vertical"></textarea>
       <button class="btn" id="new-configs-save" style="margin-top:8px">➕ افزودن به انبار</button>
     </div>

@@ -116,6 +116,24 @@ EXTRA_SETTINGS_GROUPS: List[Dict[str, Any]] = [
         ],
     },
     {
+        "id": "bot_profile", "title": "🪪 پروفایل ربات (توضیحات قبل از استارت)", "web": True, "mini": True, "bot": True,
+        "fields": [
+            {**_ta("bot_desc_fa", "توضیحات ربات - فارسی (حداکثر ۵۱۲ کاراکتر)", "",
+                   "متنی که کاربر جدید قبل از زدن Start زیر «What can this bot do?» می‌بیند. بعد از ذخیره خودکار روی تلگرام اعمال می‌شود. "
+                   "عکس/گیف بالای آن فقط از BotFather (Edit Description Picture) قابل تنظیم است."),
+             "maxlen": 512, "plain": True},
+            {**_ta("bot_desc_en", "توضیحات ربات - انگلیسی (حداکثر ۵۱۲ کاراکتر)", "",
+                   "برای کاربرانی که زبان تلگرامشان انگلیسی است. خالی = از متن فارسی استفاده می‌شود."),
+             "maxlen": 512, "plain": True},
+            {**_t("bot_short_desc_fa", "توضیح کوتاه ربات - فارسی (حداکثر ۱۲۰ کاراکتر)", "",
+                  "در صفحه‌ی پروفایل ربات و هنگام اشتراک‌گذاری نمایش داده می‌شود."),
+             "maxlen": 120},
+            {**_t("bot_short_desc_en", "توضیح کوتاه ربات - انگلیسی (حداکثر ۱۲۰ کاراکتر)", "",
+                  "خالی = از متن فارسی استفاده می‌شود."),
+             "maxlen": 120},
+        ],
+    },
+    {
         "id": "signup_gift", "title": "🎁 هدیه‌ی ثبت‌نام (برای کاربرانی که خرید نکرده‌اند)", "web": True, "mini": True,
         "fields": [
             _b("signup_gift_enabled", "فعال بودن هدیه‌ی ثبت‌نام", "0", "مبلغ هدیه باید بزرگ‌تر از صفر باشد."),
@@ -185,6 +203,7 @@ EXTRA_SETTINGS_GROUPS: List[Dict[str, Any]] = [
         "fields": [
             _b("deliver_sub_link_enabled", "ارسال لینک اشتراک (Subscription)", "1"),
             _b("deliver_individual_configs_enabled", "ارسال کانفیگ‌های تکی", "1"),
+            _b("deliver_vpn_files_enabled", "ارسال فایل WireGuard/OpenVPN هنگام تحویل (نودها و پنل‌هایی مثل W-UI)", "1"),
             _ta("post_delivery_custom_text", "متن سفارشی بعد از تحویل سرویس (خالی = ندارد)", ""),
             _ta("test_post_delivery_text", "متن سفارشی بعد از تحویل کانفیگ تست (خالی = همان متن عمومی)", ""),
             _t("custom_config_prefix", "پیشوند نام کانفیگ‌های سفارشی", ""),

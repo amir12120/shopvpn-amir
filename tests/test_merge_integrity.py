@@ -148,6 +148,17 @@ UPSTREAM_FEATURE_MODULES = (
     "phone_gate.py",
     "db/user_groups.py",
     "db/subscriptions.py",
+    # --- upstream batch: PayG billing, Telegram widgets, bot profile,
+    # --- category description media, delivery extras, album copying ---
+    "payg.py",
+    "widgets.py",
+    "widgets_pro.py",
+    "widget_html.py",
+    "widget_html_pro.py",
+    "bot_profile.py",
+    "category_media.py",
+    "delivery_extras.py",
+    "telegram_media.py",
 )
 
 # Upstream keeps re-uploading these with a module-level `from i18n import tr`
@@ -200,6 +211,65 @@ def _module_level_imports(path):
         elif isinstance(node, ast.ImportFrom):
             if node.level == 0 and node.module:
                 yield node.module.split(".")[0]
+
+
+def test_payg_widgets_profile_media_and_delivery_extras_are_wired():
+    """The 9.3.0 batch: every new module must be reachable from a real entry point."""
+    bot_manager = (ROOT / "bot_manager.py").read_text(encoding="utf-8")
+    assert "from payg import create_payg_router, PaygEngine" in bot_manager
+    assert "dp.include_router(create_payg_router(db, is_main_bot=True))" in bot_manager
+    assert "dp.include_router(widgets.create_router(db))" in bot_manager
+    assert "import bot_profile" in bot_manager
+
+    # PayG owns its own tables and its user command; orders refresh its quota.
+    payg = (ROOT / "payg.py").read_text(encoding="utf-8")
+    for table in ("payg_accounts", "payg_services", "payg_transactions",
+                  "payg_provision_locks", "payg_provisioned_services"):
+        assert f"CREATE TABLE IF NOT EXISTS {table}" in payg
+    assert '@router.message(Command("payg"))' in payg
+    assert '@router.callback_query(F.data == "adm_payg")' in payg
+    assert "from payg import refresh_payg_quota" in (ROOT / "db/orders.py").read_text(encoding="utf-8")
+
+    # Widgets are opened from the user account hub and the admin menu.
+    keyboards = (ROOT / "keyboards.py").read_text(encoding="utf-8")
+    assert "def user_widgets_menu_kb(" in keyboards
+    assert "def admin_widgets_menu_kb(" in keyboards
+    assert "def _widgets_on(db)" in keyboards
+    widgets = (ROOT / "widgets.py").read_text(encoding="utf-8")
+    assert "import widget_html" in widgets and "import widgets_pro" in widgets
+
+    # Bot profile (description/short description) reaches Telegram from three processes.
+    assert "bot_profile" in (ROOT / "extra_settings_schema.py").read_text(encoding="utf-8")
+    assert "apply_profile" in (ROOT / "admin_extra_settings.py").read_text(encoding="utf-8")
+    assert "import bot_profile" in (ROOT / "admin_panel/server.py").read_text(encoding="utf-8")
+    assert "import bot_profile" in (ROOT / "miniapp/server.py").read_text(encoding="utf-8")
+
+    # Category description + media are stored, edited in the admin and sent to users.
+    catalog = (ROOT / "db/catalog.py").read_text(encoding="utf-8")
+    assert "def set_category_description(" in catalog
+    assert "def set_category_description_media(" in catalog
+    handlers_admin = (ROOT / "handlers_admin.py").read_text(encoding="utf-8")
+    assert "import category_media" in handlers_admin
+    assert "import category_media" in (ROOT / "handlers_user.py").read_text(encoding="utf-8")
+
+    # Delivery extras: per-product text/sticker and VPN files on delivery.
+    config_delivery = (ROOT / "config_delivery.py").read_text(encoding="utf-8")
+    assert "import delivery_extras" in config_delivery
+    assert "def _send_product_extras(" in config_delivery
+    assert "import delivery_extras" in (ROOT / "admin_panel/config_delivery_web.py").read_text(encoding="utf-8")
+
+    # Albums are copied without downloading (broadcast + delivery).
+    assert "from telegram_media import collect_media_group" in handlers_admin
+    assert "def copy_messages(" in (ROOT / "telegram_media.py").read_text(encoding="utf-8")
+
+    # Reads no longer queue behind the single writer connection.
+    base = (ROOT / "db/_base.py").read_text(encoding="utf-8")
+    assert "def _get_read_conn(" in base
+    assert "query_only = ON" in base
+    assert "_get_read_conn" in (ROOT / "db/tickets.py").read_text(encoding="utf-8")
+
+    # The delivery-template fields are read dynamically, so they are not dead keys.
+    assert 'f"delivery_message_template_{provider_key}"' in config_delivery
 
 
 def test_upstream_feature_modules_still_shipped_and_wired():

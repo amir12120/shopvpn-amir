@@ -26,12 +26,33 @@ SETTINGS_FORM_SECTIONS = [
         "title": "📝 محتوا و متن‌ها",
         "groups": [
             {
+                "title": "📨 قالب پیام تحویل کانفیگ بر اساس نوع پنل",
+                "fields": [
+                    {"key": "delivery_message_template_default", "label": "قالب تحویل — عمومی", "type": "textarea"},
+                    {"key": "delivery_message_template_pasarguard", "label": "قالب تحویل — PasarGuard", "type": "textarea"},
+                    {"key": "delivery_message_template_3xui", "label": "قالب تحویل — 3X-UI", "type": "textarea"},
+                    {"key": "delivery_message_template_marzban", "label": "قالب تحویل — Marzban", "type": "textarea"},
+                    {"key": "delivery_message_template_marzneshin", "label": "قالب تحویل — Marzneshin", "type": "textarea"},
+                    {"key": "delivery_message_template_hiddify", "label": "قالب تحویل — Hiddify", "type": "textarea"},
+                    {"key": "delivery_message_template_alireza", "label": "قالب تحویل — Alireza", "type": "textarea"},
+                    {"key": "delivery_message_template_rebecca", "label": "قالب تحویل — Rebecca", "type": "textarea"},
+                    {"key": "delivery_message_template_sui", "label": "قالب تحویل — SUI", "type": "textarea"},
+                    {"key": "delivery_message_template_wgdashboard", "label": "قالب تحویل — WGDashboard", "type": "textarea"},
+                    {"key": "delivery_message_template_mikrotik", "label": "قالب تحویل — MikroTik", "type": "textarea"},
+                    {"key": "delivery_message_template_ibsng", "label": "قالب تحویل — IBSng", "type": "textarea"},
+                    {"key": "delivery_message_template_wui", "label": "قالب تحویل — WUI", "type": "textarea"},
+                    {"key": "delivery_message_template_stealth", "label": "قالب تحویل — Stealth", "type": "textarea"},
+                ],
+            },
+            {
                 "title": "متن‌های پایه",
                 "fields": [
                     {"key": "store_name", "label": "نام فروشگاه", "type": "text"},
                     {"key": "welcome_text", "label": "متن خوش‌آمدگویی (شروع ربات)", "type": "textarea"},
                     {"key": "contact_text", "label": "متن ابتدای بخش ارتباط با پشتیبانی", "type": "textarea"},
                     {"key": "after_buy_text", "label": "متن راهنمای پرداخت (بعد از انتخاب محصول)", "type": "textarea"},
+                    {"key": "miniapp_button_text", "label": "نام دکمه فروشگاه در منوی اصلی ربات", "type": "text"},
+                    {"key": "miniapp_menu_button_text", "label": "نام دکمه فروشگاه کنار کادر پیام تلگرام", "type": "text"},
                 ],
             },
         ],
@@ -155,6 +176,14 @@ SETTINGS_FORM_SECTIONS = [
                     {"key": "custom_config_max_gb", "label": "حداکثر حجم مجاز (گیگ)", "type": "number"},
                     {"key": "custom_config_duration_days", "label": "مدت اعتبار (روز)", "type": "number"},
                     {"key": "btn_custom_config", "label": "متن دکمه ساخت کانفیگ شخصی", "type": "text"},
+                ],
+            },
+            {
+                "title": "🧊 جلوه سه‌بعدی فروشگاه وب (صفحه اصلی)",
+                "fields": [
+                    {"key": "web_3d_mode", "label": "حالت سه‌بعدی", "type": "select", "options": [["off", "خاموش (سبک‌ترین)"], ["cinema", "سینمایی"], ["particles", "ذرات و سپر"], ["globe", "کره زمین"], ["network", "شبکه گره‌ها"], ["tunnel", "تونل سرعت"], ["waves", "موج‌های سه‌بعدی"]]},
+                    {"key": "web_3d_mobile", "label": "نمایش سه‌بعدی روی موبایل", "type": "bool"},
+                    {"key": "web_3d_auto_lite", "label": "خاموش شدن خودکار روی دستگاه ضعیف", "type": "bool"},
                 ],
             },
             {

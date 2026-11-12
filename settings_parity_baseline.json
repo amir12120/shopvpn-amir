@@ -2,16 +2,32 @@
  "web_only": [
   "abangateway_webhook_secret",
   "btn_custom_config",
-  "dsub_custom_template",
-  "dsub_custom_template_enabled",
+  "delivery_message_template_default",
   "firebase_api_key",
   "firebase_app_id",
   "firebase_project_id",
   "firebase_sender_id",
   "master_sub_link",
-  "netmap_locations"
+  "miniapp_button_text",
+  "miniapp_menu_button_text",
+  "netmap_locations",
+  "web_3d_auto_lite",
+  "web_3d_mobile",
+  "web_3d_mode"
  ],
  "mini_only": [
-  "header_image_data"
+  "dsub_brand",
+  "dsub_footer_text",
+  "dsub_logo_url",
+  "dsub_notice",
+  "dsub_show_apps",
+  "dsub_show_chart",
+  "dsub_show_configs",
+  "dsub_show_faq",
+  "dsub_show_qr",
+  "dsub_support_url",
+  "dsub_theme",
+  "header_image_data",
+  "test_max_per_user"
  ]
 }

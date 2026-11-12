@@ -51,10 +51,17 @@ spec.loader.exec_module(mod)
 
 used = set(DEFAULT_SETTINGS)
 pat = re.compile(r"""(?:get_setting|set_setting)\s*(?:,|\()\s*['"]([A-Za-z0-9_]+)['"]""")
+# خانواده‌های کلید که با f-string خوانده می‌شوند (مثلاً config_delivery قالب تحویل
+# هر پنل را با f"delivery_message_template_{provider_key}" می‌خواند). کلیدهایشان
+# در فرم لازم‌اند ولی با الگوی ثابت بالا پیدا نمی‌شوند.
+dyn_pat = re.compile(r"""f['"]([A-Za-z0-9_]+_)\{[^}]*\}['"]""")
+dynamic_families = set()
 for f in glob.glob("**/*.py", recursive=True):
     if os.path.basename(f) in ("settings_schema.py", "check_settings_sync.py"):
         continue
-    used.update(pat.findall(read(f)))
+    body = read(f)
+    used.update(pat.findall(body))
+    dynamic_families.update(dyn_pat.findall(body))
 # کلیدهایی که در فرم‌های این پروژه با ساختار دیگری ذخیره می‌شوند.
 used.update(k for k, _, _ in ACCOUNT_TOGGLE_KEYS)
 
@@ -64,7 +71,7 @@ for section in mod.SETTINGS_FORM_SECTIONS:
             continue
         for field in group.get("fields", []):
             k = field.get("key")
-            if k and k not in used:
+            if k and k not in used and not any(k.startswith(p) for p in dynamic_families):
                 errors.append(f"کلید مرده در settings_schema: «{k}» (هیچ کدی آن را نمی‌خواند).")
 
 # --- ۳) تکراری‌ها در extra_settings_schema ---------------------------------
