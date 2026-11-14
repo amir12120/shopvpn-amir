@@ -4651,7 +4651,13 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
         «سفارش» ناقص (بدون لینک/حجم، چون configs خالی است) و هم به‌صورت آیتم
         «کانفیگ شخصی» کامل (از حلقه‌ی custom_configs پایین‌تر) دوبار نمایش داده
         می‌شد."""
-        custom_order_ids = {cc["order_id"] for cc in db.get_custom_configs_for_user(user_tg_id) if cc["order_id"]}
+        # include_deleted: اگر کانفیگِ همین خرید دیگر روی پنل نباشد (حذف منطقی)،
+        # نباید سفارشش دوباره به‌صورت آیتم ناقصِ «سفارش» بالا بیاید.
+        custom_order_ids = {
+            cc["order_id"]
+            for cc in db.get_custom_configs_for_user(user_tg_id, include_deleted=True)
+            if cc["order_id"]
+        }
         items = []
         for o in db.get_user_orders(user_tg_id):
             if o["status"] == "rejected":

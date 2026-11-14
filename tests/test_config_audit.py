@@ -88,6 +88,10 @@ class ConfigAuditTest(unittest.TestCase):
         rows = self.db.get_user_custom_configs(USER_ID)
         return [r for r in rows if (r["status"] or "active") != "deleted"]
 
+    def _list_visible_configs(self):
+        """همان چیزی که منوی «سفارش‌ها و کانفیگ‌های شما» می‌بیند."""
+        return [r["username"] for r in self.db.get_custom_configs_for_user(USER_ID)]
+
     # ------------------------------------------------------- inventory path
     def test_config_missing_from_panel_inventory_is_reported_and_removed(self):
         kept = self._config("still_here")
@@ -106,6 +110,10 @@ class ConfigAuditTest(unittest.TestCase):
         self.assertEqual(self._status(gone)["enabled"], 0)
         self.assertEqual(self._status(kept)["status"], "active")
         self.assertEqual([r["username"] for r in self._visible_configs()], ["still_here"])
+        # منوی «سفارش‌ها و کانفیگ‌های شما» هم نباید کانفیگ حذف‌شده را نشان دهد
+        self.assertEqual(self._list_visible_configs(), ["still_here"])
+        self.assertEqual(len(self.db.get_custom_configs_for_user(USER_ID, include_deleted=True)), 2)
+        self.assertEqual(len(self.db.get_user_custom_configs(USER_ID, include_deleted=True)), 2)
         history = self.db.get_custom_config_history(gone)
         self.assertIn("removed_from_panel", [h["event_type"] for h in history])
 

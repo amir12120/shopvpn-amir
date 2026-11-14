@@ -177,9 +177,16 @@ class CatalogMixin:
                 item["amount"] = total // count + (1 if offset < (total % count) else 0)
         return sorted(items, key=lambda x: (x.get("created_at") or "", x.get("service_id") or 0), reverse=True)
 
-    def get_user_custom_configs(self, tg_id: int):
+    def get_user_custom_configs(self, tg_id: int, include_deleted: bool = False):
+        """کانفیگ‌های شخصی کاربر. ردیف‌هایی که حذف منطقی شده‌اند (مثلاً چون
+        کلاینتشان دیگر روی پنل نیست) به‌صورت پیش‌فرض برنمی‌گردند تا نه در
+        «سفارش‌ها و کانفیگ‌های شما» و نه در هدیه/تمدید ظاهر شوند."""
+        sql = "SELECT * FROM custom_configs WHERE user_id=?"
+        if not include_deleted:
+            sql += " AND COALESCE(status,'active')<>'deleted'"
+        sql += " ORDER BY id DESC"
         with self._get_conn() as conn:
-            return conn.execute("SELECT * FROM custom_configs WHERE user_id=? ORDER BY id DESC", (tg_id,)).fetchall()
+            return conn.execute(sql, (tg_id,)).fetchall()
 
 
     def get_user_ids_without_config(self):
@@ -1910,15 +1917,20 @@ class CatalogMixin:
             )
             return cur.rowcount > 0
 
-    def get_custom_configs_for_user(self, user_id: int, source: str = None):
+    def get_custom_configs_for_user(self, user_id: int, source: str = None, include_deleted: bool = False):
+        """لیست کانفیگ‌های شخصی یک کاربر برای نمایش (ربات/وب/مینی‌اپ).
+        کانفیگ‌های «حذف منطقی‌شده» (F139: دیگر روی پنل نیستند) پیش‌فرض حذف
+        می‌شوند؛ برای گزارش‌های تاریخی include_deleted=True بدهید."""
+        conds = ["user_id=?"]
+        params = [user_id]
+        if source:
+            conds.append("source=?")
+            params.append(source)
+        if not include_deleted:
+            conds.append("COALESCE(status,'active')<>'deleted'")
+        sql = "SELECT * FROM custom_configs WHERE " + " AND ".join(conds) + " ORDER BY id DESC"
         with self._get_conn() as conn:
-            if source:
-                return conn.execute(
-                    "SELECT * FROM custom_configs WHERE user_id=? AND source=? ORDER BY id DESC", (user_id, source)
-                ).fetchall()
-            return conn.execute(
-                "SELECT * FROM custom_configs WHERE user_id=? ORDER BY id DESC", (user_id,)
-            ).fetchall()
+            return conn.execute(sql, tuple(params)).fetchall()
 
 
     def update_custom_config_subscription_url(self, custom_config_id: int, subscription_url: str):

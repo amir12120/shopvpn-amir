@@ -778,7 +778,13 @@ def api_orders(auth=Depends(get_verified_user)):
     # custom_configs می‌سازند (تا حجم/انقضا قابل پیگیری باشد)؛ سفارششان هیچ‌وقت
     # configs مرتبط ندارد. بدون این استثنا، همان خرید هم این‌جا (ناقص، بدون
     # لینک/انقضا) و هم در /api/custom-configs (کامل) نمایش داده می‌شد.
-    custom_order_ids = {cc["order_id"] for cc in db.get_custom_configs_for_user(tg_id) if cc["order_id"]}
+    # include_deleted: خریدهایی که کانفیگشان حذف منطقی شده نباید دوباره به‌صورت
+    # سفارش ناقص (بدون لینک) برگردند.
+    custom_order_ids = {
+        cc["order_id"]
+        for cc in db.get_custom_configs_for_user(tg_id, include_deleted=True)
+        if cc["order_id"]
+    }
     result = []
     for o in orders:
         if o["is_renewal"]:
