@@ -1888,6 +1888,28 @@ class CatalogMixin:
             ).fetchall()
 
 
+    def get_custom_configs_for_panel_audit(self):
+        """F139: کانفیگ‌های فعالی که روی یک پنل ساخته شده‌اند (برای بررسی روزانه
+        وجودشان روی خود پنل). شامل کانفیگ‌های عمداً غیرفعال‌شده هم هست، چون
+        رکوردشان باید فقط وقتی پاک شود که کاربرِ پنل واقعاً وجود نداشته باشد."""
+        with self._get_conn() as conn:
+            return conn.execute(
+                "SELECT id,user_id,panel_server_id,username,source,product_id,order_id "
+                "FROM custom_configs WHERE status='active' AND panel_server_id IS NOT NULL "
+                "ORDER BY panel_server_id ASC, id ASC"
+            ).fetchall()
+
+    def mark_custom_config_removed_from_panel(self, custom_config_id: int) -> bool:
+        """F139: کانفیگی که کاربر/کلاینتش دیگر روی پنل نیست را از لیست کاربر
+        حذف می‌کند (حذف منطقی؛ رکورد و تاریخچه برای گزارش باقی می‌ماند)."""
+        with self._get_conn() as conn:
+            cur = conn.execute(
+                "UPDATE custom_configs SET status='deleted', enabled=0 "
+                "WHERE id=? AND status='active'",
+                (int(custom_config_id),),
+            )
+            return cur.rowcount > 0
+
     def get_custom_configs_for_user(self, user_id: int, source: str = None):
         with self._get_conn() as conn:
             if source:
