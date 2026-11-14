@@ -1845,6 +1845,8 @@ ADMIN_PANEL_ITEMS = [
     ("adm_stock_alert_settings", "📦 آستانه‌ی هشدار موجودی", "adm_stock_alert_settings"),
     ("adm_custom_config_settings", "🛠 ساخت کانفیگ شخصی", "adm_custom_config_settings"),
     ("adm_payg_settings", "💳 پرداخت به‌ازای مصرف (قیمت/خاموش-روشن)", "adm_xs_g:payg"),
+    ("adm_wallet_set", "💳 تعیین مبلغ کیف پول کاربر", "adm_wallet_set"),
+    ("adm_wallet_zero", "🧹 صفر کردن کیف پول همه کاربران", "adm_wallet_zero"),
     ("adm_panel_servers", "🖥 مدیریت پنل‌های VPN", "adm_panel_servers"),
     ("adm_ssh_menu", "🔐 مدیریت SSH و سهمیه", "adm_ssh_menu"),
     ("adm_renewal_pricing", "💳 قیمت‌گذاری تمدید حجم/زمان", "adm_renewal_pricing"),
@@ -1952,7 +1954,10 @@ ADMIN_HUBS = [
             "adm_min_amount_settings", "adm_pmgate", "adm_wallet_paymethods",
             "adm_cc_paymethods", "adm_xs_parity_extra",
         ]),
-        ("کیف پول و کش‌بک", ["adm_cashback_settings", "adm_bulk_wallet_deduct", "adm_bulk_wallet_credit"]),
+        ("کیف پول و کش‌بک", [
+            "adm_cashback_settings", "adm_bulk_wallet_deduct", "adm_bulk_wallet_credit",
+            "adm_wallet_set", "adm_wallet_zero",
+        ]),
         ("پرداخت‌های ثبت‌شده", [
             "adm_crypto_payments", "adm_abangateway_payments", "adm_blupal_payments",
             "adm_noapay_payments", *[f"adm_xgw_pay_{_k}" for _k in extra_gateway_registry.GATEWAY_ORDER],
@@ -3353,6 +3358,20 @@ def admin_bulk_wallet_confirm_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=tr("✅ اعمال کاهش"), callback_data="adm_bwd_confirm"),
          InlineKeyboardButton(text=tr("❌ لغو"), callback_data="adm_bwd_cancel")],
+    ])
+
+
+def admin_wallet_zero_confirm_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=tr("✅ صفر کن"), callback_data="adm_wz_confirm"),
+         InlineKeyboardButton(text=tr("❌ لغو"), callback_data="adm_wz_cancel")],
+    ])
+
+
+def admin_wallet_set_confirm_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=tr("✅ ثبت مبلغ"), callback_data="adm_ws_confirm"),
+         InlineKeyboardButton(text=tr("❌ لغو"), callback_data="adm_ws_cancel")],
     ])
 
 

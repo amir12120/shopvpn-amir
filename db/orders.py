@@ -1347,6 +1347,8 @@ class OrdersMixin:
         "referral_invite": "پاداش دعوت", "reseller_commission": "کارمزد نمایندگی", "membership_fee": "هزینه‌ی عضویت نمایندگی",
         "lottery": "قرعه‌کشی", "location_fee": "تغییر لوکیشن", "location_refund": "بازگشت هزینه‌ی تغییر لوکیشن",
         "coin_convert": "تبدیل سکه", "coin_expire": "انقضای موجودی حاصل از سکه", "admin_adjust": "تنظیم دستی ادمین", "admin_bulk_deduct": "کاهش گروهی توسط ادمین",
+        "admin_bulk_credit": "افزایش گروهی توسط ادمین", "admin_wallet_zero": "صفر کردن موجودی توسط ادمین",
+        "admin_wallet_set": "تعیین مبلغ کیف پول توسط ادمین",
         "gift_card_out": "ساخت کارت هدیه", "gift_card_in": "دریافت کارت هدیه", "gift_card_refund": "بازگشت کارت هدیه",
         "season_prize": "جایزه فصل رقابتی",
         "lootbox_buy": "خرید صندوق شانس", "lootbox_prize": "جایزه صندوق شانس", "milestone_prize": "جایزه نقطه عطف پیشرفت",
@@ -1404,6 +1406,130 @@ class OrdersMixin:
             for r in rows
         ]
 
+
+    def preview_bulk_wallet_credit(self, status_filter: str = "all", user_type_filter: str = "all",
+                                   amount: int = 0):
+        """پیش‌نمایش افزایش گروهی موجودی: کاربران match‌شده با فیلتر + موجودی قبل/بعد."""
+        amount = int(amount)
+        now = datetime.utcnow().isoformat()
+        conditions, params = self._bulk_wallet_where(status_filter, user_type_filter, now)
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                f"SELECT u.telegram_id, u.username, u.first_name, COALESCE(u.referral_credit,0) AS balance "
+                f"FROM users u {where} ORDER BY u.id",
+                params,
+            ).fetchall()
+        return [
+            {
+                "telegram_id": r["telegram_id"], "username": r["username"], "first_name": r["first_name"],
+                "balance_before": r["balance"], "balance_after": r["balance"] + amount,
+            }
+            for r in rows
+        ]
+
+    def apply_bulk_wallet_credit(self, user_ids: list, amount: int, note: str = None) -> int:
+        """افزایش مبلغ ثابت به کیف پول لیست کاربران؛ تعداد کاربران به‌روزرسانی‌شده."""
+        amount = int(amount)
+        if amount <= 0 or not user_ids:
+            return 0
+        updated = 0
+        with self._get_conn() as conn:
+            for uid in user_ids:
+                with _wallet_tag(conn, uid, "admin_bulk_credit", note):
+                    cur = conn.execute(
+                        "UPDATE users SET referral_credit = COALESCE(referral_credit, 0) + ? WHERE telegram_id=?",
+                        (amount, uid),
+                    )
+                    updated += cur.rowcount
+        return updated
+
+    def preview_zero_wallets(self, status_filter: str = "all", user_type_filter: str = "all"):
+        """پیش‌نمایش صفر‌کردن کیف پول: فقط کاربرانی که موجودی‌شان صفر نیست."""
+        now = datetime.utcnow().isoformat()
+        conditions, params = self._bulk_wallet_where(status_filter, user_type_filter, now)
+        conditions.append("COALESCE(u.referral_credit, 0) <> 0")
+        where = "WHERE " + " AND ".join(conditions)
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                f"SELECT u.telegram_id, u.username, u.first_name, COALESCE(u.referral_credit,0) AS balance "
+                f"FROM users u {where} ORDER BY u.id",
+                params,
+            ).fetchall()
+        return [
+            {
+                "telegram_id": r["telegram_id"], "username": r["username"], "first_name": r["first_name"],
+                "balance_before": r["balance"], "balance_after": 0,
+            }
+            for r in rows
+        ]
+
+    def apply_zero_wallets(self, user_ids: list, note: str = None) -> int:
+        """موجودی کیف پول لیست کاربران را صفر می‌کند (اعم از بستانکار یا بدهکار).
+        تعداد کاربرانی که واقعاً تغییر کردند را برمی‌گرداند."""
+        if not user_ids:
+            return 0
+        updated = 0
+        with self._get_conn() as conn:
+            for uid in user_ids:
+                with _wallet_tag(conn, uid, "admin_wallet_zero", note):
+                    cur = conn.execute(
+                        "UPDATE users SET referral_credit = 0 WHERE telegram_id=? "
+                        "AND COALESCE(referral_credit, 0) <> 0",
+                        (uid,),
+                    )
+                    updated += cur.rowcount
+        return updated
+
+    def find_admin_user(self, query):
+        """یافتن کاربر برای تنظیم دستی کیف پول با آیدی عددی یا نام‌کاربری (با/بدون @).
+        خروجی: dict (telegram_id/username/first_name/balance) یا None اگر پیدا نشود یا
+        بیش از یک کاربر با آن نام‌کاربری وجود داشته باشد."""
+        raw = str(query or "").strip()
+        if not raw:
+            return None
+        with self._get_conn() as conn:
+            rows = []
+            if raw.lstrip("-").isdigit():
+                rows = conn.execute(
+                    "SELECT telegram_id, username, first_name, COALESCE(referral_credit,0) AS balance "
+                    "FROM users WHERE telegram_id=?",
+                    (int(raw),),
+                ).fetchall()
+            if not rows:
+                name = raw.lstrip("@").strip()
+                if not name:
+                    return None
+                rows = conn.execute(
+                    "SELECT telegram_id, username, first_name, COALESCE(referral_credit,0) AS balance "
+                    "FROM users WHERE LOWER(username)=LOWER(?) LIMIT 2",
+                    (name,),
+                ).fetchall()
+        if len(rows) != 1:
+            return None
+        return dict(rows[0])
+
+    def set_wallet_balance(self, tg_id: int, target: int, note: str = None):
+        """موجودی کیف پول یک کاربر را دقیقاً روی «target» می‌گذارد (مطلق، نه افزایشی).
+        خروجی: (before, after) یا None اگر کاربر پیدا نشود."""
+        target = int(target)
+        if target < 0:
+            return None
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(referral_credit, 0) AS balance FROM users WHERE telegram_id=?",
+                (int(tg_id),),
+            ).fetchone()
+            if not row:
+                return None
+            before = int(row["balance"])
+            if before == target:
+                return before, before
+            with _wallet_tag(conn, int(tg_id), "admin_wallet_set", note):
+                conn.execute(
+                    "UPDATE users SET referral_credit=? WHERE telegram_id=?", (target, int(tg_id)),
+                )
+        return before, target
 
     def apply_bulk_wallet_deduct(self, user_ids: list, amount: int, note: str = None) -> int:
         """کاهش مبلغ ثابت از موجودی کیف پول لیست کاربران؛ بدون سقف (می‌تواند بدهکار کند).

@@ -673,6 +673,18 @@ class AdminBulkWalletCredit(StatesGroup):
     waiting_confirm = State()
 
 
+class AdminWalletZero(StatesGroup):
+    waiting_status = State()
+    waiting_usertype = State()
+    waiting_confirm = State()
+
+
+class AdminWalletSet(StatesGroup):
+    waiting_user = State()
+    waiting_amount = State()
+    waiting_confirm = State()
+
+
 class AdminPanelServerTransfer(StatesGroup):
     waiting_price = State()
 

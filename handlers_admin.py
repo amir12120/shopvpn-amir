@@ -132,6 +132,8 @@ from states import (
     AdminBulkPrice,
     AdminBulkWalletDeduct,
     AdminBulkWalletCredit,
+    AdminWalletZero,
+    AdminWalletSet,
     AdminDeepLinkTools,
     AdminChannelButton,
     AdminAddAdmin,
@@ -1432,6 +1434,165 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
     async def cb_bulk_wallet_credit_cancel(call: CallbackQuery, state: FSMContext):
         await state.clear()
         await safe_edit(call, "❌ افزایش گروهی موجودی لغو شد.", reply_markup=kb.admin_back_kb("adm_cat:finance"))
+        await call.answer()
+
+    # -------------------------------------------------------------------
+    # صفر کردن موجودی کیف پول همه کاربران
+    # -------------------------------------------------------------------
+    @router.callback_query(F.data == "adm_wallet_zero")
+    async def cb_wallet_zero(call: CallbackQuery, state: FSMContext):
+        if not senior_admin_only(call.from_user.id):
+            return await deny_mid(call)
+        await state.clear()
+        rows = await asyncio.to_thread(db.preview_zero_wallets)
+        if not rows:
+            await safe_edit(
+                call, "🧹 موجودی کیف پول هیچ کاربری غیر از صفر نیست.",
+                reply_markup=kb.admin_back_kb("adm_cat:finance"),
+            )
+            return await call.answer()
+        await state.update_data(user_ids=[r["telegram_id"] for r in rows])
+        await state.set_state(AdminWalletZero.waiting_confirm)
+        credits = sum(max(int(r["balance_before"]), 0) for r in rows)
+        debts = sum(-min(int(r["balance_before"]), 0) for r in rows)
+        lines = [
+            f"🧹 صفر کردن موجودی کیف پول — {len(rows)} کاربر",
+            f"💰 مجموع موجودی مثبت: {credits:,} تومان",
+        ]
+        if debts:
+            lines.append(f"📉 مجموع بدهی (منفی): {debts:,} تومان")
+        lines.append("")
+        for r in rows[:20]:
+            label = f"@{r['username']}" if r["username"] else (r["first_name"] or str(r["telegram_id"]))
+            lines.append(f"• {label}: {int(r['balance_before']):,} ← ۰ تومان")
+        if len(rows) > 20:
+            lines.append(f"… و {len(rows)-20} کاربر دیگر")
+        lines.append("\n⚠️ این عملیات برگشت‌ناپذیر است؛ با تأیید، موجودی همهٔ این کاربران صفر می‌شود.")
+        await safe_edit(call, "\n".join(lines), reply_markup=kb.admin_wallet_zero_confirm_kb())
+        await call.answer()
+
+    @router.callback_query(AdminWalletZero.waiting_confirm, F.data == "adm_wz_confirm")
+    async def cb_wallet_zero_confirm(call: CallbackQuery, state: FSMContext):
+        if not senior_admin_only(call.from_user.id):
+            return await deny_mid(call)
+        data = await state.get_data()
+        user_ids = data.get("user_ids") or []
+        updated = await asyncio.to_thread(
+            db.apply_zero_wallets, user_ids, f"صفر کردن کیف پول توسط ادمین ({call.from_user.id})",
+        )
+        await asyncio.to_thread(
+            db.log_admin_action, call.from_user.id, "wallet_zero_all",
+            f"{updated} کاربر | صفر کردن موجودی کیف پول",
+        )
+        await state.clear()
+        await safe_edit(
+            call, f"✅ موجودی کیف پول {updated} کاربر صفر شد.",
+            reply_markup=kb.admin_back_kb("adm_cat:finance"),
+        )
+        await call.answer()
+
+    @router.callback_query(AdminWalletZero.waiting_confirm, F.data == "adm_wz_cancel")
+    async def cb_wallet_zero_cancel(call: CallbackQuery, state: FSMContext):
+        await state.clear()
+        await safe_edit(call, "❌ صفر کردن کیف پول لغو شد.", reply_markup=kb.admin_back_kb("adm_cat:finance"))
+        await call.answer()
+
+    # -------------------------------------------------------------------
+    # تعیین مبلغ کیف پول یک کاربر مشخص (آیدی عددی یا نام‌کاربری)
+    # -------------------------------------------------------------------
+    @router.callback_query(F.data == "adm_wallet_set")
+    async def cb_wallet_set(call: CallbackQuery, state: FSMContext):
+        if not senior_admin_only(call.from_user.id):
+            return await deny_mid(call)
+        await state.clear()
+        await state.set_state(AdminWalletSet.waiting_user)
+        await safe_edit(
+            call,
+            "💳 تعیین مبلغ کیف پول کاربر\n\nآیدی عددی کاربر (مثل 123456789) یا نام‌کاربری (با یا بدون @) را ارسال کنید:",
+            reply_markup=kb.admin_back_kb("adm_cat:finance"),
+        )
+        await call.answer()
+
+    @router.message(AdminWalletSet.waiting_user)
+    async def msg_wallet_set_user(message: Message, state: FSMContext):
+        if not senior_admin_only(message.from_user.id):
+            await state.clear()
+            return
+        user = await asyncio.to_thread(db.find_admin_user, (message.text or "").strip())
+        if not user:
+            return await message.answer(
+                "❌ کاربری با این مشخصات پیدا نشد. آیدی عددی یا نام‌کاربری را دقیق بفرستید."
+            )
+        await state.update_data(user_id=int(user["telegram_id"]))
+        await state.set_state(AdminWalletSet.waiting_amount)
+        label = f"@{user['username']}" if user["username"] else (user["first_name"] or str(user["telegram_id"]))
+        await message.answer(
+            f"👤 کاربر: {label}\n🆔 آیدی: <code>{int(user['telegram_id'])}</code>\n"
+            f"💰 موجودی فعلی: {int(user['balance']):,} تومان\n\n"
+            "مبلغ جدید کیف پول را به تومان ارسال کنید (فقط عدد؛ ۰ یعنی صفر شدن):",
+            parse_mode="HTML",
+        )
+
+    @router.message(AdminWalletSet.waiting_amount)
+    async def msg_wallet_set_amount(message: Message, state: FSMContext):
+        if not senior_admin_only(message.from_user.id):
+            await state.clear()
+            return
+        raw = (message.text or "").replace(",", "").replace("٬", "").strip()
+        if not raw.isdigit():
+            return await message.answer("❌ مبلغ نامعتبر است؛ فقط عدد صفر یا مثبت ارسال کنید.")
+        amount = int(raw)
+        if amount > 10_000_000_000:
+            return await message.answer("❌ مبلغ بیش از حد مجاز است.")
+        data = await state.get_data()
+        user_id = int(data.get("user_id") or 0)
+        before = await asyncio.to_thread(db.get_wallet_credit, user_id)
+        await state.update_data(amount=amount)
+        await state.set_state(AdminWalletSet.waiting_confirm)
+        await message.answer(
+            f"⚠️ تأیید نهایی\n\n🆔 کاربر: <code>{user_id}</code>\n"
+            f"💰 موجودی فعلی: {int(before or 0):,} تومان\n"
+            f"➡️ موجودی جدید: {amount:,} تومان\n\n"
+            "با تأیید، موجودی کیف پول این کاربر روی همین مبلغ تنظیم می‌شود.",
+            reply_markup=kb.admin_wallet_set_confirm_kb(),
+            parse_mode="HTML",
+        )
+
+    @router.callback_query(AdminWalletSet.waiting_confirm, F.data == "adm_ws_confirm")
+    async def cb_wallet_set_confirm(call: CallbackQuery, state: FSMContext):
+        if not senior_admin_only(call.from_user.id):
+            return await deny_mid(call)
+        data = await state.get_data()
+        user_id = int(data.get("user_id") or 0)
+        amount = int(data.get("amount") or 0)
+        result = await asyncio.to_thread(
+            db.set_wallet_balance, user_id, amount,
+            f"تعیین مبلغ کیف پول توسط ادمین ({call.from_user.id})",
+        )
+        await state.clear()
+        if not result:
+            await safe_edit(
+                call, "❌ کاربر پیدا نشد؛ مبلغ ثبت نشد.",
+                reply_markup=kb.admin_back_kb("adm_cat:finance"),
+            )
+            return await call.answer()
+        before, after = result
+        await asyncio.to_thread(
+            db.log_admin_action, call.from_user.id, "wallet_set_amount",
+            f"user={user_id} | {int(before):,} → {int(after):,} تومان",
+        )
+        await safe_edit(
+            call,
+            f"✅ موجودی کیف پول کاربر <code>{user_id}</code> از {int(before):,} به {int(after):,} تومان تنظیم شد.",
+            reply_markup=kb.admin_back_kb("adm_cat:finance"),
+            parse_mode="HTML",
+        )
+        await call.answer()
+
+    @router.callback_query(AdminWalletSet.waiting_confirm, F.data == "adm_ws_cancel")
+    async def cb_wallet_set_cancel(call: CallbackQuery, state: FSMContext):
+        await state.clear()
+        await safe_edit(call, "❌ تعیین مبلغ کیف پول لغو شد.", reply_markup=kb.admin_back_kb("adm_cat:finance"))
         await call.answer()
 
     # -------------------------------------------------------------------

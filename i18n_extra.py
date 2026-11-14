@@ -499,6 +499,8 @@ EXTRA_PHRASES = {
     '🏪 فقط نماینده\u200cها': '🏪 Resellers only',
     '🙍 فقط کاربران عادی': '🙍 Regular users only',
     '✅ اعمال کاهش': '✅ Apply reduction',
+    '✅ صفر کن': '✅ Zero them',
+    '✅ ثبت مبلغ': '✅ Save amount',
     '✅ افزایش موجودی و ارسال اعلان': '✅ Increase balance and send notification',
     '🔌 تغییر پنل/اینباند': '🔌 Change panel/inbound',
     '🗑 پاکسازی کانفیگ\u200cهای یتیم (F147)': '🗑 Clean up orphaned configs (F147)',
