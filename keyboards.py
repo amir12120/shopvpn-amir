@@ -102,7 +102,7 @@ def reseller_section_enabled(db) -> bool:
 
 
 def _menu_items(db, is_admin: bool, is_reseller: bool, is_main_bot: bool, show_reseller_request: bool,
-                 show_commission_reseller_request: bool = False):
+                 show_commission_reseller_request: bool = False, customs: dict = None):
     """لیست مشترک آیتم‌های منوی اصلی را برمی‌گرداند: (key, text, style).
     این تابع پایه‌ی هر دو نوع منو (معمولی/پایین و شیشه‌ای/بالا) است تا منطق
     نمایش/عدم‌نمایش هر دکمه دقیقاً یک‌بار نوشته شده و همیشه هماهنگ بماند."""
@@ -208,6 +208,11 @@ def _menu_items(db, is_admin: bool, is_reseller: bool, is_main_bot: bool, show_r
 
     items = []
     for key in order:
+        if customs and key in customs:
+            btn = customs[key]
+            if custom_menu_button(btn) is not None:
+                items.append((key, (btn.get("title") or "").strip()[:64], btn.get("style") or ""))
+            continue
         builder = builders.get(key)
         if not builder:
             continue
@@ -279,11 +284,19 @@ def main_menu_inline_kb(db, is_admin: bool, is_reseller: bool = False, is_main_b
     """منوی شیشه‌ای بالا (Inline Keyboard) - همان آیتم‌های منوی پایین، به شکل inline.
     روی کلیک هر دکمه، callback_data به‌صورت 'mm:<key>' ارسال می‌شود که در
     handlers_user.py / handlers_admin.py به همان هندلر متنی متناظرش وصل شده."""
-    items = _menu_items(db, is_admin, is_reseller, is_main_bot, show_reseller_request, show_commission_reseller_request)
+    customs = {}
+    if is_main_bot:
+        try:
+            customs = {f"custom_menu:{b['id']}": b for b in db.cm_list(only_active=True)}
+        except Exception:
+            customs = {}
+    items = _menu_items(db, is_admin, is_reseller, is_main_bot, show_reseller_request, show_commission_reseller_request, customs)
     item_rows = _menu_item_rows(db, items)
     miniapp_url = _miniapp_url(db, getattr(db, "_current_menu_language", ""))
 
     def _build_button(key, text, style):
+        if key in customs:
+            return custom_menu_button(customs[key])
         s = style if style in ("primary", "success", "danger") else None
         if key == "miniapp" and miniapp_url:
             return InlineKeyboardButton(text=text, web_app=WebAppInfo(url=miniapp_url), style=s)
@@ -291,6 +304,22 @@ def main_menu_inline_kb(db, is_admin: bool, is_reseller: bool = False, is_main_b
 
     rows = [[_build_button(key, tr(text), style) for key, text, style in row] for row in item_rows]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def custom_menu_button(btn: dict):
+    """یک دکمه‌ی inline از روی ردیف custom_menu_buttons می‌سازد (فقط برای منوی شیشه‌ای)."""
+    s = btn.get("style") if btn.get("style") in ("primary", "success", "danger") else None
+    text = (btn.get("title") or "").strip()[:64]
+    if not text:
+        return None
+    if btn.get("kind") == "url":
+        url = (btn.get("url") or "").strip()
+        if not url:
+            return None
+        return InlineKeyboardButton(text=text, url=url, style=s)
+    if not btn.get("parts"):
+        return None
+    return InlineKeyboardButton(text=text, callback_data=f"cmb:{btn['id']}", style=s)
 
 
 def _show_commission_reseller_request(db, user_tg_id: int, is_main_bot: bool) -> bool:
@@ -663,7 +692,7 @@ def service_inquiry_card_kb(cb_id: str, fields: list) -> InlineKeyboardMarkup:
 def service_detail_kb(db, cb_id: str, kind: str, deletable: bool, show_links: bool = False,
                        enabled: bool = True, auto_renew: bool = False, is_test: bool = False,
                        can_add_users: bool = False, is_invoiceable: bool = False,
-                       is_gift: bool = False) -> InlineKeyboardMarkup:
+                       is_gift: bool = False, is_payg: bool = False) -> InlineKeyboardMarkup:
     """دکمه‌های صفحه‌ی جزئیات یک سرویس.
     kind == 'custom' (کاربر واقعی روی پنل): هر سه نوع تمدید + قطع دسترسی +
     بروزرسانی + کیوآر + فعال/غیرفعال + تغییر نام + تمدید خودکار + انتقال +
@@ -684,7 +713,22 @@ def service_detail_kb(db, cb_id: str, kind: str, deletable: bool, show_links: bo
     def add(key, text, callback_data, allow_text=True):
         entries.append((key, text, _ubtn(db, key, text, callback_data, allow_text=allow_text)))
 
-    if kind == "custom" and not is_test:
+    if kind == "custom" and is_payg:
+        # سرویس «پرداخت به‌ازای مصرف»: حجم/زمان ثابت ندارد، پس تمدید (کامل/حجم/زمان)،
+        # تمدید خودکار، افزایش کاربر، انتقال مالکیت، تغییر لوکیشن و تاریخچه‌ی خرید معنا ندارند.
+        entries.append(("svc_payg_status", "📊 مصرف و هزینه",
+                        InlineKeyboardButton(text=tr("📊 مصرف و هزینه"), callback_data="payg:status")))
+        entries.append(("svc_payg_wallet", "💰 شارژ کیف پول",
+                        InlineKeyboardButton(text=tr("💰 شارژ کیف پول"), callback_data="acct:wallet")))
+        if on("svc_show_cut_access"):
+            add("svc_cut", "🚫 قطع دسترسی و لینک جدید", f"svc_cut:{cb_id}")
+        if on("svc_show_toggle"):
+            toggle_icon = "🔴 غیرفعال کردن کانفیگ" if enabled else "🟢 فعال کردن کانفیگ"
+            add("svc_toggle", toggle_icon, f"svc_toggle:{cb_id}", allow_text=False)
+        if on("svc_show_rename"):
+            add("svc_rename", "✏️ تغییر نام کانفیگ", f"svc_rename:{cb_id}")
+        add("svc_disruption", "⚠️ گزارش اختلال", f"svc_disruption:{cb_id}")
+    elif kind == "custom" and not is_test:
         if on("svc_show_renew_full"):
             add("svc_renew_full", "🛠 تمدید کامل سرویس", f"svc_renew:full:{cb_id}")
         if on("svc_show_renew_volume"):
@@ -1242,6 +1286,7 @@ def contact_reply_kb(user_tg_id) -> InlineKeyboardMarkup:
 # ---------------------------------------------------------------------------
 
 TICKET_STATUS_LABELS = {"open": "🟢 باز", "answered": "🟡 پاسخ داده‌شده", "closed": "🔴 بسته‌شده"}
+TICKET_PRIORITY_LABELS = {"low": "🟢 کم", "medium": "🟡 متوسط", "high": "🔴 زیاد"}
 
 
 SUPPORT_CONTACT_METHODS = [
@@ -1677,11 +1722,29 @@ def tickets_list_kb(tickets) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def ticket_services_kb(services, prefix: str = "ticket_svc", skip_text: str = "⏭ بدون اشاره به سرویس خاص",
+                       cancel_callback: str = "ticket_cancel") -> InlineKeyboardMarkup:
+    """انتخاب اختیاری یکی از سرویس‌های خریداری‌شده برای تیکت/چت زنده.
+    callback: {prefix}:{kind}:{id} یا {prefix}:skip"""
+    rows = []
+    for item in services:
+        label = str(item["label"])
+        if len(label) > 40:
+            label = label[:40] + "…"
+        rows.append([InlineKeyboardButton(text=f"📦 {label}", callback_data=f"{prefix}:{item['kind']}:{item['id']}")])
+    if prefix == "ticket_svc":
+        rows.append([InlineKeyboardButton(text=tr(skip_text), callback_data=f"{prefix}:skip")])
+    rows.append([InlineKeyboardButton(text=tr("❌ لغو"), callback_data=cancel_callback)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def ticket_thread_kb(ticket_id: int, is_closed: bool, back_callback: str = "tickets_mine") -> InlineKeyboardMarkup:
     rows = []
     if not is_closed:
         rows.append([InlineKeyboardButton(text=tr("✉️ ارسال پیام در این تیکت"), callback_data=f"ticket_reply:{ticket_id}")])
         rows.append([InlineKeyboardButton(text=tr("🔒 بستن تیکت"), callback_data=f"ticket_close:{ticket_id}")])
+    else:
+        rows.append([InlineKeyboardButton(text=tr("🔓 باز کردن مجدد تیکت"), callback_data=f"ticket_reopen:{ticket_id}")])
     rows.append([InlineKeyboardButton(text=tr("⬅️ بازگشت به لیست تیکت‌ها"), callback_data=back_callback)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1766,7 +1829,6 @@ ADMIN_PANEL_ITEMS = [
     ("adm_tickets_menu", "🎫 تیکت‌های پشتیبانی", "adm_tickets_menu"),
     ("adm_ticket_departments", "🧩 دپارتمان‌های پشتیبانی", "adm_ticket_departments"),
     ("adm_pending_topups", "👛 درخواست‌های شارژ کیف پول", "adm_pending_topups"),
-    ("adm_payg", "💳 مدیریت پرداخت به‌ازای مصرف", "adm_payg"),
     ("adm_crypto_payments", "🪙 پرداخت‌های کریپتو", "adm_crypto_payments"),
     ("adm_abangateway_payments", "💳 پرداخت‌های آبان گیت وی", "adm_abangateway_payments"),
     ("adm_blupal_payments", "💳 پرداخت‌های بلوپال", "adm_blupal_payments"),
@@ -1876,7 +1938,6 @@ ADMIN_HUBS = [
             "adm_test_menu", "adm_custom_config_settings", "adm_renewal_pricing",
         ]),
         ("قیمت و تخفیف", ["adm_discounts_menu"]),
-        ("پرداخت به‌ازای مصرف", ["adm_payg"]),
         ("موجودی و تحویل", ["adm_stock_alert_settings", "adm_delivery_settings"]),
     ]),
     ("finance", "💰 پرداخت و کیف پول", [
@@ -2022,8 +2083,6 @@ def _unmapped_xs_groups() -> list:
 
 
 def _is_item_visible(db, key: str, is_main_bot: bool) -> bool:
-    if key == "adm_payg":
-        return bool(is_main_bot)
     if key == "adm_extra_settings":
         return bool(_unmapped_xs_groups())
     if key == "adm_my_volume":
@@ -2148,6 +2207,7 @@ USER_SCREENS = {
             ("svc_delete", "🗑 حذف کامل این سرویس", "svc_show_delete", False),
         ],
         "default_rows": [
+            ["svc_payg_status", "svc_payg_wallet"],
             ["svc_renew_full"], ["svc_renew_volume", "svc_renew_time"], ["svc_add_users"], ["svc_cut"],
             ["svc_toggle", "svc_rename"], ["svc_autorenew"], ["svc_transfer", "svc_location"],
             ["svc_history", "svc_disruption"], ["svc_rating"], ["svc_inquiry"], ["svc_update", "svc_qr"],
@@ -3910,6 +3970,7 @@ def main_menu_settings_kb(db) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=inline_toggle, callback_data="adm_mm_toggle_inline")],
         [InlineKeyboardButton(text=tr(f"چیدمان فعلی: {columns} دکمه در هر ردیف"), callback_data="noop")],
         [InlineKeyboardButton(text=col_toggle, callback_data="adm_mm_toggle_columns")],
+        [InlineKeyboardButton(text=tr("🔘 کلیدهای سفارشی منوی شیشه‌ای"), callback_data="adm_cmb")],
         [InlineKeyboardButton(text=tr("⬅️ بازگشت"), callback_data="adm_cat:appearance")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)

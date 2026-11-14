@@ -43,6 +43,7 @@ class ContactFlow(StatesGroup):
 
 class TicketFlow(StatesGroup):
     waiting_department = State()
+    waiting_service = State()
     waiting_subject = State()
     waiting_message = State()
 
@@ -254,6 +255,15 @@ class AdminSetNoapay(StatesGroup):
 
 class AdminSetExtraGateway(StatesGroup):
     waiting_value = State()
+
+
+class AdminCustomMenuButton(StatesGroup):
+    waiting_title = State()
+    waiting_url = State()
+    waiting_content = State()
+    waiting_new_title = State()
+    waiting_new_url = State()
+    waiting_new_content = State()
 
 
 class AdminPayCard(StatesGroup):

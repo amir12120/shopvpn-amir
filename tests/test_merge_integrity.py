@@ -159,6 +159,13 @@ UPSTREAM_FEATURE_MODULES = (
     "category_media.py",
     "delivery_extras.py",
     "telegram_media.py",
+    # --- upstream batch: custom glass-menu buttons, accounting formulas,
+    # --- mini-app home tiles, web-panel assistant, web-admin 2FA ---
+    "custom_menu_buttons.py",
+    "db/custom_menu.py",
+    "accounting.py",
+    "home_tiles.py",
+    "web_assistant.py",
 )
 
 # Upstream keeps re-uploading these with a module-level `from i18n import tr`
@@ -227,7 +234,10 @@ def test_payg_widgets_profile_media_and_delivery_extras_are_wired():
                   "payg_provision_locks", "payg_provisioned_services"):
         assert f"CREATE TABLE IF NOT EXISTS {table}" in payg
     assert '@router.message(Command("payg"))' in payg
-    assert '@router.callback_query(F.data == "adm_payg")' in payg
+    # 9.4.0 moved the PayG admin surface to the web panel; the bot keeps the user flow.
+    assert '@router.callback_query(F.data == "payg:activate")' in payg
+    payg_overview = '@app.get("/api/payg/overview")'
+    assert payg_overview in (ROOT / "admin_panel/server.py").read_text(encoding="utf-8")
     assert "from payg import refresh_payg_quota" in (ROOT / "db/orders.py").read_text(encoding="utf-8")
 
     # Widgets are opened from the user account hub and the admin menu.
@@ -1330,3 +1340,74 @@ def test_phone_gate_user_groups_and_subscriptions_are_wired():
     app_js = (ROOT / "admin_panel/static/app.js").read_text(encoding="utf-8")
     assert "stealthNodeSettingsModal" in app_js
     assert "function renderSSHInstall()" in app_js  # fork's SSH install page survived
+
+
+def test_custom_menu_accounting_home_tiles_and_web_2fa_are_wired():
+    """9.4.0 batch: every new module is reachable from a real entry point."""
+    # Custom glass-menu buttons: admin editor -> DB -> inline keyboard -> mini app click.
+    handlers_admin = (ROOT / "handlers_admin.py").read_text(encoding="utf-8")
+    assert "import custom_menu_buttons" in handlers_admin
+    assert "custom_menu_buttons.register(" in handlers_admin
+    db_init = (ROOT / "db/__init__.py").read_text(encoding="utf-8")
+    assert "from .custom_menu import CustomMenuMixin" in db_init
+    assert "CustomMenuMixin," in db_init
+    base = (ROOT / "db/_base.py").read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS custom_menu_buttons" in base
+    custom_menu = (ROOT / "db/custom_menu.py").read_text(encoding="utf-8")
+    for method in ("def cm_list(", "def cm_create(", "def cm_delete(", "def cm_add_click("):
+        assert method in custom_menu, f"custom menu lost {method}"
+    keyboards = (ROOT / "keyboards.py").read_text(encoding="utf-8")
+    assert "def custom_menu_button(" in keyboards
+    orders_db = (ROOT / "db/orders.py").read_text(encoding="utf-8")
+    assert "custom_menu:" in orders_db  # the custom keys survive menu reordering
+
+    # Mini-app: custom button click, home tiles and home icons all hit the DB.
+    miniapp = (ROOT / "miniapp/server.py").read_text(encoding="utf-8")
+    assert "import home_tiles" in miniapp
+    assert "home_tiles.tile_rows(" in miniapp
+    assert "def api_custom_button_click(" in miniapp
+    assert "def api_home_config(" in miniapp
+    assert "def api_admin_save_home_icons(" in miniapp
+    assert "def api_support_state(" in miniapp
+    assert "def api_reopen_my_ticket(" in miniapp
+    system_db = (ROOT / "db/system.py").read_text(encoding="utf-8")
+    assert "def get_home_icons(" in system_db and "def set_home_icons(" in system_db
+
+    # Tickets/live chat: priority, service reference and reopen reachable from bot + web.
+    tickets_db = (ROOT / "db/tickets.py").read_text(encoding="utf-8")
+    assert "def normalize_priority(" in tickets_db
+    assert "def set_ticket_priority(" in tickets_db
+    assert "def reopen_ticket(" in tickets_db
+    assert "def set_support_reference(" in tickets_db
+    assert '("tickets", "priority", ' in base or "tickets\", \"priority\"" in base
+    handlers_user = (ROOT / "handlers_user.py").read_text(encoding="utf-8")
+    assert "db.reopen_ticket" in handlers_user
+    assert "kb.ticket_services_kb(" in handlers_user
+    assert "def ticket_services_kb(" in keyboards
+    schema = (ROOT / "extra_settings_schema.py").read_text(encoding="utf-8")
+    assert "tickets_default_sort" in schema and "support_default_sort" in schema
+
+    # Accounting formulas back the PayG panel-cost endpoints.
+    server = (ROOT / "admin_panel/server.py").read_text(encoding="utf-8")
+    assert "import accounting" in server
+    assert '@app.get("/api/accounting/panel-costs")' in server
+    accounting = (ROOT / "accounting.py").read_text(encoding="utf-8")
+    assert "def panel_costs(" in accounting
+    assert "def evaluate(" in accounting  # the formula engine behind every price
+    assert "def suggest(" in accounting
+
+    # Web assistant: chat/tab navigation/confirmed actions behind the panel API.
+    assert "import web_assistant" in server
+    assert "web_assistant.chat(" in server
+    assert "web_assistant.take_pending(" in server
+    assert "def chat(" in (ROOT / "web_assistant.py").read_text(encoding="utf-8")
+
+    # Web-admin 2FA: TOTP primitives stored on web_admins and enforced on login.
+    security = (ROOT / "admin_panel/security.py").read_text(encoding="utf-8")
+    assert "def generate_totp_secret(" in security
+    assert "def verify_totp(" in security
+    assert "def refresh_session_token(" in security
+    assert "verify_totp(" in server
+    assert "refresh_session_token(" in server
+    assert "def set_web_admin_totp_pending(" in system_db
+    assert "def consume_web_admin_backup_code(" in system_db

@@ -3090,6 +3090,16 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
         lines.append("قیمت نهایی = کل حجم انتخابی × نرخ همان بازه‌ای که حجم داخلش قرار می‌گیرد.")
         return "\n".join(lines)
 
+    def _custom_plan_cost_quote(panel_server_id, volume_gb, duration_days, fallback_price):
+        """Use the panel cost tariff when configured; otherwise retain legacy pricing."""
+        try:
+            import payg
+            configured = payg.custom_plan_cost(db, int(panel_server_id), int(volume_gb), int(duration_days), 1, "*")
+            return int(configured) if configured is not None else int(fallback_price or 0)
+        except Exception:
+            logging.getLogger("handlers_user").exception("محاسبه تعرفه تمام‌شده پلن شخصی ناموفق بود")
+            return int(fallback_price or 0)
+
     async def custom_config_start(message: Message, state: FSMContext):
         if not full_access_bot:
             await message.answer(db.get_text('handlers_user.auto_1be04045', 'این بخش در حال حاضر غیرفعال است.'))
@@ -3321,6 +3331,13 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
                 return
             price = (await asyncio.to_thread(db.calc_custom_config_price, volume_gb))
 
+        panel_server_id = data.get("panel_server_id")
+        if product and product["duration_mode"] == "user_choice":
+            quote_days = int(product["min_days"] or 1)
+        else:
+            quote_days = int(product["duration_days"] if product else (await asyncio.to_thread(db.get_custom_config_settings))["duration_days"])
+        price = _custom_plan_cost_quote(panel_server_id, volume_gb, quote_days, price)
+
         if price <= 0:
             await message.answer(db.get_text('handlers_user.auto_9aee5aa0', '⚠️ قیمت\u200cگذاری برای این بخش هنوز تنظیم نشده. لطفاً با پشتیبانی تماس بگیرید.'))
             await state.clear()
@@ -3387,6 +3404,8 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
             await state.clear()
             return
 
+        price = _custom_plan_cost_quote(server["id"], volume_gb, duration_days, price)
+        await state.update_data(custom_price=price)
         tier_info = await _tier_info(message.from_user.id, price, 1)
         price = tier_info["total_after"]
         allowed_methods = await asyncio.to_thread(db.get_effective_custom_config_payment_methods, product_id)
@@ -3509,6 +3528,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
                 return f"❌ مدت باید بین {min_days} تا {max_days} روز باشد.", None
         else:
             days = fixed_days
+        price = _custom_plan_cost_quote(data.get("panel_server_id"), volume_gb, days, price)
         if price <= 0:
             return "⚠️ قیمت‌گذاری این بخش هنوز تنظیم نشده.", None
 
@@ -4598,6 +4618,24 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
             return f"{gb:.2f} گیگابایت"
         return f"{n / (1024 ** 2):.2f} مگابایت"
 
+    def _payg_config_ids(user_tg_id: int) -> set:
+        """شناسه‌ی custom_configهایی که سرویس «پرداخت به‌ازای مصرف» هستند.
+        روی ربات‌های غیراصلی (که جدول payg ندارند) مجموعه‌ی خالی برمی‌گردد."""
+        ids = set()
+        try:
+            with db._get_conn() as conn:
+                rows = conn.execute(
+                    "SELECT service_id FROM payg_provisioned_services WHERE user_id=? AND service_kind='vpn'",
+                    (int(user_tg_id),),
+                ).fetchall()
+            for r in rows:
+                sid = str(r["service_id"])
+                if sid.startswith("custom_config:"):
+                    ids.add(int(sid.split(":", 1)[1]))
+        except Exception:
+            pass
+        return ids
+
     def _my_orders_items(user_tg_id: int):
         """هر آیتم یک ردیف/دکمه‌ی جدا در منوست: یک کانفیگ محصول، یک کانفیگ شخصی،
         یا (فقط برای سفارش‌های در انتظار بررسی که هنوز کانفیگی ندارند) خود
@@ -4674,13 +4712,19 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
                 "product_name": pname, "_ts": order_ts,
             })
 
+        payg_ids = _payg_config_ids(user_tg_id)
         for cc in db.get_custom_configs_for_user(user_tg_id):
             label_name = cc["display_name"] or cc["username"]
-            if cc["source"] == "test":
+            is_payg = int(cc["id"]) in payg_ids
+            if is_payg:
+                # سرویس «پرداخت به‌ازای مصرف»: حجم/مدت ثابت ندارد؛ با 💳 از بقیه جدا می‌شود.
+                label = f"💳 «{label_name}» (پرداخت به‌ازای مصرف)"
+            elif cc["source"] == "test":
                 label = f"🧪 «{label_name}» (تست، {cc['volume_gb']:g} گیگ / {cc['duration_days']:g} روز)"
             else:
                 label = f"🛠 «{label_name}» ({cc['volume_gb']} گیگ / {cc['duration_days']} روز)"
-            items.append({"cb_id": f"x{cc['id']}", "kind": "custom", "label": label, "custom": cc, "_ts": cc["created_at"] or ""})
+            items.append({"cb_id": f"x{cc['id']}", "kind": "custom", "label": label, "custom": cc,
+                          "payg": is_payg, "_ts": cc["created_at"] or ""})
 
         items.sort(key=lambda it: it["_ts"], reverse=True)
         return items
@@ -4703,6 +4747,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
             "is_gift": cc["source"] in ("welcome_gift", "gift"),
             "is_invoiceable": bool(cc["order_id"]),
             "can_add_users": ul.service_upgrade_info(db, cc) is not None,
+            "is_payg": bool(item.get("payg")),
         }
 
     def _is_test_item(item) -> bool:
@@ -4757,7 +4802,28 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
                         "خواندن اطلاعات تازه از پنل برای «%s» ناموفق بود؛ لینک ذخیره‌شده نمایش داده می‌شود.",
                         cc["username"],
                     )
-            text = (
+            if item.get("payg"):
+                import payg as _payg
+                st = await asyncio.to_thread(_payg.payg_status, db, cc["user_id"])
+                with db._get_conn() as conn:
+                    snap = conn.execute(
+                        "SELECT used_bytes FROM usage_snapshots WHERE service_kind='vpn' AND service_id=?",
+                        (f"custom_config:{int(cc['id'])}",),
+                    ).fetchone()
+                svc_gb = (int(snap["used_bytes"] or 0) / (1024 ** 3)) if snap else 0.0
+                enabled_now = (cc["enabled"] if "enabled" in cc.keys() else 1) == 1
+                text = (
+                    f"💳 سرویس پرداخت به‌ازای مصرف «{escape_md(cc['display_name'] or cc['username'])}»\n"
+                    f"📶 حجم: بدون سقف ثابت (هزینه بر اساس مصرف واقعی) | ⏳ مدت: بدون انقضای ثابت\n"
+                    f"وضعیت: {'🟢 فعال' if enabled_now else '🔴 غیرفعال'}\n"
+                    f"🗓 تاریخ ساخت: {to_jalali_str(cc['created_at'], with_time=True)}\n"
+                    f"💰 موجودی کیف پول: {int(st.get('balance') or 0):,} تومان\n"
+                    f"📊 مصرف این سرویس: {svc_gb:.2f} GB\n"
+                    f"🧾 هزینه این ماه (همه سرویس‌های مصرفی): {int(st.get('spent') or 0):,} تومان\n"
+                    "ℹ️ هزینه هر ۱۰ دقیقه بر اساس مصرف از کیف پول کسر می‌شود؛ تمدید ندارد، فقط کیف پول را شارژ نگه دارید.\n"
+                )
+            else:
+              text = (
                 f"🛠 کانفیگ شخصی «{escape_md(cc['display_name'] or cc['username'])}»\n"
                 f"📶 حجم: {cc['volume_gb']} گیگ | ⏳ مدت: {cc['duration_days']} روز\n"
                 f"وضعیت: {'🟢 فعال' if (cc['enabled'] if 'enabled' in cc.keys() else 1) == 1 else '🔴 غیرفعال'} | "
@@ -8546,27 +8612,75 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
             await call.answer(db.get_text('handlers_user.support_method_disabled', 'این روش ارتباطی در حال حاضر غیرفعال است.'), show_alert=True)
             return
         await state.set_state(ContactFlow.waiting_message)
+        await state.update_data(chat_ref_kind=None, chat_ref_id=None, chat_ref_label=None)
+        prompt = (await asyncio.to_thread(db.get_setting, "contact_text")) or ""
+        chat_state = await asyncio.to_thread(db.get_support_conversation_state, call.from_user.id)
+        if chat_state["status"] == "closed":
+            prompt = "🔒 گفتگوی قبلی شما بسته شده است؛ با ارسال پیام جدید، دوباره باز می‌شود.\n\n" + prompt
+        services = await asyncio.to_thread(db.list_user_support_services, call.from_user.id, 8)
+        if services:
+            # انتخاب سرویس اختیاری است؛ کاربر می‌تواند مستقیم پیامش را بنویسد.
+            prompt += "\n\n📦 اگر سؤالتان درباره‌ی یکی از سرویس‌های شماست، آن را انتخاب کنید (اختیاری):"
+            markup = kb.ticket_services_kb(services, prefix="contact_svc", cancel_callback="cancel_flow")
+        else:
+            markup = kb.cancel_kb()
+        await _safe_edit(call.message, prompt, reply_markup=markup)
+        await call.answer()
+
+    @router.callback_query(ContactFlow.waiting_message, F.data.startswith("contact_svc:"))
+    async def cb_contact_service(call: CallbackQuery, state: FSMContext):
+        parts = call.data.split(":")
+        if len(parts) != 3 or parts[1] not in ("custom", "bank") or not parts[2].isdigit():
+            await call.answer(db.get_text('handlers_user.auto_524e296b', '❌ درخواست نامعتبر است.'), show_alert=True)
+            return
+        kind, ref_id, label = await asyncio.to_thread(
+            db.resolve_support_service_ref, call.from_user.id, parts[1], int(parts[2])
+        )
+        if not kind:
+            await call.answer(db.get_text('handlers_user.ticket_service_invalid', '❌ این سرویس معتبر نیست.'), show_alert=True)
+            return
+        await state.update_data(chat_ref_kind=kind, chat_ref_id=ref_id, chat_ref_label=label)
         await _safe_edit(
-            call.message, (await asyncio.to_thread(db.get_setting, "contact_text")), reply_markup=kb.cancel_kb()
+            call.message,
+            f"📦 سرویس انتخاب‌شده: {label}\n\nحالا پیام خود را برای پشتیبانی ارسال کنید:",
+            reply_markup=kb.cancel_kb(),
         )
         await call.answer()
 
     @router.message(ContactFlow.waiting_message)
     async def contact_receive(message: Message, state: FSMContext, bot: Bot):
         user = message.from_user
+        chat_data = await state.get_data()
+        prev_state = await asyncio.to_thread(db.get_support_conversation_state, user.id)
+        was_closed = prev_state["status"] == "closed"
+        ref_label = chat_data.get("chat_ref_label")
         if message.text:
             (await asyncio.to_thread(db.add_support_message, user.id, "user", message.text))
+            # پیام کاربر چت بسته را خودکار باز می‌کند؛ اشاره‌ی سرویس هم ثبت یا (برای چت تازه‌بازشده) پاک می‌شود.
+            if chat_data.get("chat_ref_kind"):
+                await asyncio.to_thread(
+                    db.set_support_reference, user.id,
+                    chat_data.get("chat_ref_kind"), chat_data.get("chat_ref_id"), ref_label,
+                )
+            elif was_closed:
+                await asyncio.to_thread(db.set_support_reference, user.id, None, None, None)
+        current_ref = ref_label or ("" if was_closed else prev_state["ref_label"])
+        priority_label = kb.TICKET_PRIORITY_LABELS.get(prev_state["priority"], "")
         text = (
             f"📩 پیام جدید از کاربر\n"
             f"👤 {user.first_name or ''} (@{user.username or '---'})\n"
-            f"🆔 {user.id}\n\n"
-            f"✉️ {message.text or '(بدون متن / رسانه)'}"
+            f"🆔 {user.id}\n"
+            + ("🔓 این گفتگو قبلاً بسته شده بود و دوباره باز شد.\n" if was_closed else "")
+            + (f"📦 سرویس: {current_ref}\n" if current_ref else "")
+            + (f"🚦 اولویت: {priority_label}\n" if prev_state["priority"] == "high" else "")
+            + f"\n✉️ {message.text or '(بدون متن / رسانه)'}"
         )
+        event_rows = [("کاربر", report_router.user_link(user.id, user.first_name or "", user.username or ""))]
+        if current_ref:
+            event_rows.append(("سرویس", current_ref))
+        event_rows.append(("متن", (message.text or "(بدون متن / رسانه)")[:300]))
         await report_router.notify(bot, db, "support", report_router.format_event(
-            "پیام جدید از کاربر (چت مستقیم)", [
-                ("کاربر", report_router.user_link(user.id, user.first_name or "", user.username or "")),
-                ("متن", (message.text or "(بدون متن / رسانه)")[:300]),
-            ], icon="📩"))
+            "پیام جدید از کاربر (چت مستقیم)", event_rows, icon="📩"))
         # فقط به اولین ادمین/مالک آنلاین اطلاع بده تا مکالمه به او اختصاص یابد؛
         # اگر هیچ‌کس آنلاین نبود، طبق روال قدیم به همه‌ی ادمین‌ها اطلاع بده.
         target_admin = (await asyncio.to_thread(db.resolve_support_admin_for_message, user.id))
@@ -9328,7 +9442,10 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
         subject = f"گزارش اختلال سرویس «{cc['display_name'] or cc['username']}»"
         ticket_text = (f"کاربر گزارش اختلال سرویس را ثبت کرد.\n\nنام کاربری پنل: {cc['username']}\n"
                        f"شناسه سرویس: {cc['id']}\nپنل: {cc['panel_server_id'] or '-'}")
-        ticket_id = await asyncio.to_thread(db.create_ticket, call.from_user.id, subject, ticket_text, dep["id"] if dep else None)
+        ticket_id = await asyncio.to_thread(
+            db.create_ticket, call.from_user.id, subject, ticket_text, dep["id"] if dep else None,
+            ref_kind="custom", ref_id=cc["id"], ref_label=str(cc["display_name"] or cc["username"])[:120],
+        )
         await call.message.answer(tr(f"✅ گزارش اختلال ثبت شد. شماره تیکت: #{ticket_id}\nبخش فنی در حال بررسی است."))
         await report_router.notify_ticket(bot, db, ticket_id, report_router.format_event(
             "گزارش اختلال سرویس", [
@@ -9407,9 +9524,43 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
         if not department or not department["is_active"]:
             await call.answer(db.get_text('handlers_user.auto_cede281d', '❌ این دپارتمان در دسترس نیست.'), show_alert=True)
             return
-        await state.update_data(ticket_department_id=int(raw))
+        await state.update_data(ticket_department_id=int(raw), ticket_department_name=department["name"],
+                                ticket_ref_kind=None, ticket_ref_id=None, ticket_ref_label=None)
+        services = await asyncio.to_thread(db.list_user_support_services, call.from_user.id, 10)
+        if services:
+            # اشاره‌ی اختیاری به یکی از سرویس‌های خریداری‌شده
+            await state.set_state(TicketFlow.waiting_service)
+            await _safe_edit(
+                call.message,
+                f"🧩 بخش انتخاب‌شده: {department['name']}\n\nاگر درخواست شما درباره‌ی یکی از سرویس‌هایتان است، آن را انتخاب کنید (اختیاری):",
+                reply_markup=kb.ticket_services_kb(services),
+            )
+        else:
+            await state.set_state(TicketFlow.waiting_subject)
+            await _safe_edit(call.message, f"🧩 بخش انتخاب‌شده: {department['name']}\n\nموضوع تیکت را ارسال کنید:", reply_markup=kb.cancel_kb())
+        await call.answer()
+
+    @router.callback_query(TicketFlow.waiting_service, F.data.startswith("ticket_svc:"))
+    async def cb_ticket_service(call: CallbackQuery, state: FSMContext):
+        parts = call.data.split(":")
+        data = await state.get_data()
+        dep_name = data.get("ticket_department_name") or ""
+        ref_line = ""
+        if len(parts) == 3 and parts[1] in ("custom", "bank") and parts[2].isdigit():
+            kind, ref_id, label = await asyncio.to_thread(
+                db.resolve_support_service_ref, call.from_user.id, parts[1], int(parts[2])
+            )
+            if not kind:
+                await call.answer(db.get_text('handlers_user.ticket_service_invalid', '❌ این سرویس معتبر نیست.'), show_alert=True)
+                return
+            await state.update_data(ticket_ref_kind=kind, ticket_ref_id=ref_id, ticket_ref_label=label)
+            ref_line = f"\n📦 سرویس: {label}"
         await state.set_state(TicketFlow.waiting_subject)
-        await _safe_edit(call.message, f"🧩 بخش انتخاب‌شده: {department['name']}\n\nموضوع تیکت را ارسال کنید:", reply_markup=kb.cancel_kb())
+        await _safe_edit(
+            call.message,
+            f"🧩 بخش انتخاب‌شده: {dep_name}{ref_line}\n\nموضوع تیکت را ارسال کنید:",
+            reply_markup=kb.cancel_kb(),
+        )
         await call.answer()
 
     @router.message(TicketFlow.waiting_subject)
@@ -9432,23 +9583,30 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
         department_id = data.get("ticket_department_id")
         department = await asyncio.to_thread(db.get_ticket_department, department_id) if department_id else None
         user = message.from_user
-        ticket_id = (await asyncio.to_thread(db.create_ticket, user.id, subject, message.text, department_id))
+        ref_kind, ref_id, ref_label = data.get("ticket_ref_kind"), data.get("ticket_ref_id"), data.get("ticket_ref_label")
+        ticket_id = (await asyncio.to_thread(
+            db.create_ticket, user.id, subject, message.text, department_id,
+            ref_kind=ref_kind, ref_id=ref_id, ref_label=ref_label,
+        ))
         text = (
             f"🎫 تیکت جدید #{ticket_id}\n"
             f"👤 {user.first_name or ''} (@{user.username or '---'})\n"
             f"🆔 {user.id}\n"
             f"📌 موضوع: {subject}\n"
-            f"🧩 بخش: {(department['name'] if department else 'عمومی')}\n\n"
-            f"✉️ {message.text}"
+            f"🧩 بخش: {(department['name'] if department else 'عمومی')}\n"
+            + (f"📦 سرویس: {ref_label}\n" if ref_label else "")
+            + f"\n✉️ {message.text}"
         )
+        event_rows = [
+            ("شماره", report_router.code(f"#{ticket_id}")),
+            ("کاربر", report_router.user_link(user.id, user.first_name or "", user.username or "")),
+            ("بخش", department["name"] if department else "عمومی"),
+        ]
+        if ref_label:
+            event_rows.append(("سرویس", ref_label))
+        event_rows += [("موضوع", subject), ("متن", (message.text or "")[:300])]
         await report_router.notify_ticket(bot, db, ticket_id, report_router.format_event(
-            "تیکت جدید", [
-                ("شماره", report_router.code(f"#{ticket_id}")),
-                ("کاربر", report_router.user_link(user.id, user.first_name or "", user.username or "")),
-                ("بخش", department["name"] if department else "عمومی"),
-                ("موضوع", subject),
-                ("متن", (message.text or "")[:300]),
-            ], icon="🎫", note="↩️ برای پاسخ، روی همین پیام ریپلای کنید."))
+            "تیکت جدید", event_rows, icon="🎫", note="↩️ برای پاسخ، روی همین پیام ریپلای کنید."))
         for admin_id in (await asyncio.to_thread(db.list_ticket_admin_ids_for_department, department_id)):
             try:
                 await bot.send_message(admin_id, text, reply_markup=kb.ticket_admin_notify_kb(ticket_id))
@@ -9489,8 +9647,10 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
         lines = [
             f"🎫 تیکت #{ticket['id']} — {kb.TICKET_STATUS_LABELS.get(ticket['status'], ticket['status'])}",
             f"📌 موضوع: {ticket['subject']}",
-            "",
         ]
+        if ticket["ref_label"]:
+            lines.append(f"📦 سرویس: {ticket['ref_label']}")
+        lines.append("")
         for m in messages:
             sender_label = "👤 شما" if m["sender"] == "user" else "🛠 پشتیبانی"
             lines.append(f"{sender_label}: {m['message']}")
@@ -9567,6 +9727,40 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
         await message.answer(db.get_text('handlers_user.auto_49c8bedb', '✅ پیام شما ثبت شد.'), reply_markup=kb.menu_for_user(db, user.id, is_main_bot))
         await _send_inline_main_menu(message, user.id)
         await state.clear()
+
+    @router.callback_query(F.data.startswith("ticket_reopen:"))
+    async def cb_ticket_reopen(call: CallbackQuery, bot: Bot):
+        ticket_id_str = call.data.split(":", 1)[1]
+        if not ticket_id_str.isdigit():
+            await call.answer(db.get_text('handlers_user.auto_524e296b', '❌ درخواست نامعتبر است.'), show_alert=True)
+            return
+        ticket_id = int(ticket_id_str)
+        ticket = (await asyncio.to_thread(db.get_ticket, ticket_id))
+        if not ticket or ticket["user_id"] != call.from_user.id:
+            await call.answer(db.get_text('handlers_user.auto_01aac3cf', 'تیکت یافت نشد.'), show_alert=True)
+            return
+        changed = await asyncio.to_thread(db.reopen_ticket, ticket_id)
+        if changed:
+            admin_text = (
+                f"🔓 تیکت #{ticket_id} ({ticket['subject']}) توسط کاربر دوباره باز شد.\n"
+                f"👤 {call.from_user.first_name or ''} (@{call.from_user.username or '---'})\n"
+                f"🆔 {call.from_user.id}"
+            )
+            admin_ids = [ticket["claimed_by"]] if ticket["claimed_by"] else (
+                await asyncio.to_thread(db.list_ticket_admin_ids_for_department, ticket["department_id"]))
+            for admin_id in admin_ids:
+                try:
+                    await bot.send_message(admin_id, admin_text, reply_markup=kb.ticket_admin_notify_kb(ticket_id))
+                except Exception:
+                    logging.getLogger("handlers_user").exception(
+                        "ارسال اطلاع بازشدن مجدد تیکت #%s به ادمین %s ناموفق بود.", ticket_id, admin_id
+                    )
+        await _safe_edit(
+            call.message,
+            f"🔓 تیکت #{ticket_id} دوباره باز شد. می‌توانید پیام جدید خود را ارسال کنید.",
+            reply_markup=kb.ticket_thread_kb(ticket_id, False),
+        )
+        await call.answer()
 
     @router.callback_query(F.data.startswith("ticket_close:"))
     async def cb_ticket_close(call: CallbackQuery):

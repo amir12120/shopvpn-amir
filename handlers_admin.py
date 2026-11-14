@@ -60,6 +60,7 @@ import abangateway_payment
 import blupal_payment
 import noapay_payment
 import extra_gateway_admin
+import custom_menu_buttons
 import extra_settings_schema
 import ai_support
 import ai_admin
@@ -11473,6 +11474,7 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
         current = (await asyncio.to_thread(db.get_setting, "main_menu_columns", "1"))
         new_val = "2" if current != "2" else "1"
         (await asyncio.to_thread(db.set_setting, "main_menu_columns", new_val))
+        (await asyncio.to_thread(db.set_setting, "main_menu_row_breaks", ""))
         await safe_edit(call, db.get_text('handlers_admin.auto_1085e986', '🧩 تنظیمات منوی اصلی:'), reply_markup=kb.main_menu_settings_kb(db))
         await call.answer(db.get_text('handlers_admin.auto_236b18f2', '✅ اعمال شد.'))
 
@@ -17906,6 +17908,10 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
     extra_gateway_admin.register(
         router, db, is_main_bot, admin_only, full_admin_only, deny_support, replace_admin_view,
         safe_edit, callback_id,
+    )
+
+    custom_menu_buttons.register(
+        router, db, is_main_bot, full_admin_only, deny_support, replace_admin_view, safe_edit,
     )
 
     import ssh_admin_bot

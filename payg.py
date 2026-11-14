@@ -10,13 +10,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from aiogram import Router, F
-from aiogram.filters import Command, StateFilter
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
+from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 from db.constants import _wallet_tag
@@ -24,11 +23,6 @@ from db.constants import _wallet_tag
 logger = logging.getLogger("payg")
 GIB = 1024 ** 3
 DEFAULT_RATES = [5000, 4500, 4000, 3500]
-
-
-class PaygAdminStates(StatesGroup):
-    waiting_rate = State()
-    waiting_user_id = State()
 
 
 def _now():
@@ -100,6 +94,18 @@ def ensure_schema(db):
             conn.execute("ALTER TABLE payg_accounts ADD COLUMN last_balance INTEGER NOT NULL DEFAULT 0")
         if "month_rates" not in columns:
             conn.execute("ALTER TABLE payg_accounts ADD COLUMN month_rates TEXT NOT NULL DEFAULT ''")
+        service_columns = {r[1] for r in conn.execute("PRAGMA table_info(payg_services)").fetchall()}
+        for name, definition in (
+            ("panel_server_id", "INTEGER"),
+            ("target_key", "TEXT NOT NULL DEFAULT '*'"),
+            ("user_capacity", "INTEGER NOT NULL DEFAULT 1"),
+            ("charged_users", "INTEGER NOT NULL DEFAULT 0"),
+            ("active_since", "TEXT NOT NULL DEFAULT ''"),
+            ("day_billed_until", "REAL NOT NULL DEFAULT 0"),
+            ("is_active", "INTEGER NOT NULL DEFAULT 1"),
+        ):
+            if name not in service_columns:
+                conn.execute(f"ALTER TABLE payg_services ADD COLUMN {name} {definition}")
         # Upgrade accounts created by the first PAYG preview without resetting usage.
         conn.execute("UPDATE payg_accounts SET last_balance=initial_balance WHERE last_balance=0 AND initial_balance>0")
         conn.execute("UPDATE payg_accounts SET month_rates=? WHERE month_rates=''", (json.dumps(DEFAULT_RATES),))
@@ -171,6 +177,78 @@ def get_payg_panel_ids(db):
     return list(dict.fromkeys(x for x in ids if x > 0))
 
 
+def get_payg_targets(db):
+    """اینباند/گروه انتخاب‌شده برای هر پنل PayG: {panel_id: target_config}."""
+    raw = str(db.get_setting("payg_panel_targets", "") or "").strip()
+    out = {}
+    if not raw:
+        return out
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return out
+    if isinstance(data, dict):
+        for key, cfg in data.items():
+            if str(key).isdigit() and isinstance(cfg, dict) and "field" in cfg:
+                out[int(key)] = cfg
+    return out
+
+
+def _save_payg_targets(db, targets):
+    db.set_setting("payg_panel_targets",
+                   json.dumps({str(k): v for k, v in targets.items()}, ensure_ascii=False))
+
+
+MULTI_NEEDS_DSUB = ("⛔️ حالت «همه مقصدها» در PayG فقط با ساب اختصاصی فعال کار می‌کند؛ "
+                    "مدیریت باید ساب اختصاصی را روشن و آدرس پایه‌اش را تنظیم کند.")
+
+
+def _json_list(db, key):
+    try:
+        value = json.loads(str(db.get_setting(key, "") or "") or "[]")
+    except Exception:
+        return []
+    return value if isinstance(value, list) else []
+
+
+def get_payg_ssh_nodes(db):
+    """نودهای SSH انتخاب‌شده برای PayG (فقط در حالت «همه مقصدها» استفاده می‌شوند)."""
+    ids = [int(x) for x in _json_list(db, "payg_ssh_node_ids") if str(x).isdigit()]
+    return list(dict.fromkeys(x for x in ids if x > 0))
+
+
+def get_payg_ssh_protocols(db):
+    from ssh_service import SUPPORTED_PROTOCOLS
+    chosen = {str(x).strip().lower() for x in _json_list(db, "payg_ssh_protocols")}
+    picked = [p for p in SUPPORTED_PROTOCOLS if p in chosen]
+    return picked or ["ssh"]
+
+
+def get_payg_mode(db):
+    """'balance' = هر سرویس روی یک پنل (کم‌بارترین)؛ 'all' = هر سرویس روی همه مقصدها با ساب اختصاصی."""
+    return "all" if str(db.get_setting("payg_target_mode", "balance") or "") == "all" else "balance"
+
+
+def payg_multi_plan(db):
+    """(panel_ids, node_ids, protocols) اگر ساخت چندمقصدی لازم است؛ وگرنه None."""
+    if get_payg_mode(db) != "all":
+        return None
+    panels = get_payg_panel_ids(db)
+    nodes = get_payg_ssh_nodes(db)
+    if not panels or len(panels) + len(nodes) < 2:
+        return None
+    return panels, nodes, get_payg_ssh_protocols(db)
+
+
+def _target_count(cfg):
+    value = (cfg or {}).get("value")
+    if isinstance(value, dict):
+        return sum(len(v or []) for v in value.values())
+    if isinstance(value, list):
+        return len(value)
+    return 1 if value not in (None, "") else 0
+
+
 def _choose_payg_panel(db, panel_ids):
     """اختيار پنل فعال با ظرفیت و کمترین بار."""
     candidates = []
@@ -186,6 +264,143 @@ def _choose_payg_panel(db, panel_ids):
     candidates.sort(key=lambda item: (item[0], item[1]))
     return candidates[0][2] if candidates else None
 
+
+
+def get_panel_costs(db):
+    """Return configured cost rates keyed by panel and concrete inbound/group."""
+    try:
+        value = json.loads(str(db.get_setting("payg_panel_costs", "{}") or "{}"))
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+def save_panel_costs(db, panel_id: int, entries: list):
+    """Replace one panel's target-specific cost rates after strict validation."""
+    all_costs = get_panel_costs(db)
+    normalized = {}
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("target_key", "")).strip()
+        if not key or len(key) > 300:
+            raise ValueError("شناسه مقصد نامعتبر است.")
+        rates = {}
+        for field in ("gb_rate", "day_rate", "user_rate"):
+            raw = item.get(field, 0)
+            try:
+                amount = int(raw or 0)
+            except (TypeError, ValueError):
+                raise ValueError("تعرفه باید عدد صحیح باشد.")
+            if amount < 0 or amount > 10**12:
+                raise ValueError("تعرفه خارج از محدوده مجاز است.")
+            rates[field] = amount
+        normalized[key] = rates
+    all_costs[str(int(panel_id))] = normalized
+    db.set_setting("payg_panel_costs", json.dumps(all_costs, ensure_ascii=False, separators=(",", ":")))
+    return normalized
+
+def get_target_cost(db, panel_id: int, target_key: str):
+    costs = get_panel_costs(db)
+    panel = costs.get(str(int(panel_id)), {})
+    return panel.get(str(target_key)) or panel.get("*") or {"gb_rate": 0, "day_rate": 0, "user_rate": 0}
+
+
+def _target_keys_from_config(raw):
+    if not raw:
+        return ["*"]
+    try:
+        cfg = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return ["*"]
+    value = cfg.get("value") if isinstance(cfg, dict) else None
+    if value in (None, ""):
+        return ["*"]
+    if isinstance(value, dict):
+        keys = [f"{proto}::{inbound}" for proto, items in value.items() for inbound in (items or [])]
+        return keys or ["*"]
+    if isinstance(value, list):
+        return [str(x) for x in value] or ["*"]
+    return [str(value)]
+
+
+def get_service_target_cost(db, panel_id: int, raw_target_config):
+    """For a multi-inbound account, use the highest selected target tariff so it cannot underbill."""
+    keys = _target_keys_from_config(raw_target_config)
+    values = [get_target_cost(db, panel_id, key) for key in keys]
+    return {field: max((int(item.get(field, 0) or 0) for item in values), default=0)
+            for field in ("gb_rate", "day_rate", "user_rate")}
+
+
+def custom_plan_cost(db, panel_id: int, volume_gb: int, duration_days: int, user_capacity: int = 1, target_key: str = "*"):
+    """Return None when no cost tariff is configured; otherwise calculate the custom-plan invoice."""
+    panel = get_panel_costs(db).get(str(int(panel_id)), {})
+    rates = panel.get(str(target_key))
+    if rates is None or not any(int(rates.get(k, 0) or 0) for k in ("gb_rate", "day_rate", "user_rate")):
+        default_rates = panel.get("*")
+        if default_rates and any(int(default_rates.get(k, 0) or 0) for k in ("gb_rate", "day_rate", "user_rate")):
+            rates = default_rates
+        else:
+            # The current personal-plan flow selects a panel but does not ask the customer
+            # to pick an inbound/group. Use the highest configured target rate as a safe quote.
+            configured_targets = [v for k, v in panel.items() if k != "*" and isinstance(v, dict)
+                                  and any(int(v.get(field, 0) or 0) for field in ("gb_rate", "day_rate", "user_rate"))]
+            if configured_targets:
+                rates = {field: max(int(v.get(field, 0) or 0) for v in configured_targets)
+                         for field in ("gb_rate", "day_rate", "user_rate")}
+    if rates is None:
+        return None
+    volume = max(0, int(volume_gb or 0))
+    days = max(0, int(duration_days or 0))
+    users = max(1, int(user_capacity or 1))
+    return (volume * int(rates.get("gb_rate", 0) or 0)
+            + days * int(rates.get("day_rate", 0) or 0)
+            + users * int(rates.get("user_rate", 0) or 0))
+
+def _target_key_from_config(raw):
+    """Normalize the exact group/inbound value used by product_targets choices."""
+    if not raw:
+        return "*"
+    try:
+        cfg = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return "*"
+    value = cfg.get("value") if isinstance(cfg, dict) else None
+    if value in (None, ""):
+        return "*"
+    if isinstance(value, (dict, list)):
+        # protocol maps and multi-inbound selections are priced as a combined target.
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return str(value)
+
+
+def _epoch(value=None):
+    if value in (None, ""):
+        return time.time()
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return time.time()
+
+
+def calculate_target_cost(used_bytes: int, active_days: int, user_capacity: int, rates: dict, charged_users: int = 0) -> dict:
+    """Calculate PAYG variable usage, active-day and one-time capacity charges."""
+    gb_rate = max(0, int((rates or {}).get("gb_rate", 0) or 0))
+    day_rate = max(0, int((rates or {}).get("day_rate", 0) or 0))
+    user_rate = max(0, int((rates or {}).get("user_rate", 0) or 0))
+    used = max(0, int(used_bytes or 0))
+    days = max(0, int(active_days or 0))
+    capacity = max(0, int(user_capacity or 0))
+    already_charged = max(0, int(charged_users or 0))
+    # Charge traffic proportionally; cumulative byte counters prevent rounding loss across cycles.
+    traffic_cost = (used * gb_rate) // GIB if gb_rate else 0
+    day_cost = days * day_rate
+    new_users = max(0, capacity - already_charged)
+    user_cost = new_users * user_rate
+    return {"traffic_cost": traffic_cost, "day_cost": day_cost, "user_cost": user_cost,
+            "total": traffic_cost + day_cost + user_cost, "new_users": new_users}
 
 def get_rates(db):
     try:
@@ -218,28 +433,81 @@ def _month_key():
 
 
 def _sync_services(db, user_id: int, pool_id: int):
-    """Attach only services explicitly provisioned as PayG services."""
+    """Sync explicitly provisioned PayG services and retain each panel's tariff key."""
     attachments = []
+    targets = get_payg_targets(db)
+    now = _now()
+    with db._get_conn() as conn:
+        pool_row = conn.execute("SELECT status FROM quota_pools WHERE id=?", (int(pool_id),)).fetchone()
+        pool_active = bool(pool_row and str(pool_row["status"]) == "active")
     with db._get_conn() as conn:
         configs = conn.execute(
-            "SELECT cc.id,cc.panel_server_id FROM custom_configs cc "
-            "JOIN payg_provisioned_services p ON p.service_kind='vpn' "
-            "AND p.service_id=('custom_config:' || cc.id) AND p.user_id=cc.user_id "
-            "WHERE cc.user_id=? AND cc.status='active'",
-            (int(user_id),),
+            "SELECT cc.id,cc.panel_server_id,cc.user_limit,cc.status,cc.created_at,cc.panel_target_config "
+            "FROM custom_configs cc JOIN payg_provisioned_services p "
+            "ON p.service_kind='vpn' AND p.service_id=('custom_config:' || cc.id) AND p.user_id=cc.user_id "
+            "WHERE cc.user_id=?", (int(user_id),)
         ).fetchall()
         for row in configs:
             sid = f"custom_config:{int(row['id'])}"
-            snap = conn.execute(
-                "SELECT used_bytes FROM usage_snapshots WHERE service_kind='vpn' AND service_id=?",
-                (sid,),
-            ).fetchone()
+            panel_id = int(row['panel_server_id']) if row['panel_server_id'] else None
+            cfg = row["panel_target_config"] or (targets.get(panel_id, {}) if panel_id else {})
+            target_key = json.dumps(_target_keys_from_config(cfg), ensure_ascii=False, separators=(",", ":"))
+            capacity = max(1, int(row['user_limit'] or 1))
+            snap = conn.execute("SELECT used_bytes FROM usage_snapshots WHERE service_kind='vpn' AND service_id=?", (sid,)).fetchone()
             baseline = int(snap['used_bytes'] or 0) if snap else -1
+            active = 1 if str(row['status']) == 'active' and pool_active else 0
             conn.execute(
-                "INSERT OR IGNORE INTO payg_services(user_id,service_kind,service_id,last_billed_bytes,created_at) VALUES(?,?,?,?,?)",
-                (int(user_id), "vpn", sid, baseline, _now()),
+                "INSERT OR IGNORE INTO payg_services(user_id,service_kind,service_id,last_billed_bytes,created_at,panel_server_id,target_key,user_capacity,active_since,day_billed_until,is_active) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (int(user_id), 'vpn', sid, baseline, now, panel_id, target_key, capacity, row['created_at'] or now, _epoch(row['created_at']), active)
             )
-            attachments.append(("vpn", sid, int(row["panel_server_id"]) if row["panel_server_id"] else None))
+            prior = conn.execute("SELECT is_active FROM payg_services WHERE user_id=? AND service_kind='vpn' AND service_id=?", (int(user_id),sid)).fetchone()
+            if prior and int(prior['is_active'] or 0) != active and active:
+                # Resume starts a new active-day interval; downtime is never billed.
+                conn.execute("UPDATE payg_services SET active_since=?,day_billed_until=? WHERE user_id=? AND service_kind='vpn' AND service_id=?", (now, time.time(), int(user_id), sid))
+            conn.execute("UPDATE payg_services SET panel_server_id=?,target_key=?,user_capacity=?,is_active=? WHERE user_id=? AND service_kind='vpn' AND service_id=?",
+                         (panel_id, target_key, capacity, active, int(user_id), sid))
+            if active:
+                attachments.append(("vpn", sid, panel_id))
+
+        # Every secondary panel link is a separately metered service with its own target tariff.
+        links = conn.execute(
+            "SELECT l.id,l.panel_server_id,l.target_config,l.status,cc.status AS parent_status,l.created_at,cc.user_limit "
+            "FROM config_panel_links l JOIN custom_configs cc ON cc.id=l.custom_config_id "
+            "WHERE cc.user_id=? AND EXISTS (SELECT 1 FROM payg_provisioned_services p WHERE p.user_id=cc.user_id AND p.service_kind='vpn' AND p.service_id=('custom_config:' || cc.id))",
+            (int(user_id),)
+        ).fetchall()
+        for row in links:
+            sid = f"panel_link:{int(row['id'])}"
+            panel_id = int(row['panel_server_id'])
+            target_key = json.dumps(_target_keys_from_config(row['target_config']), ensure_ascii=False, separators=(",", ":"))
+            capacity = max(1, int(row['user_limit'] or 1))
+            snap = conn.execute("SELECT used_bytes FROM usage_snapshots WHERE service_kind='vpn' AND service_id=?", (sid,)).fetchone()
+            baseline = int(snap['used_bytes'] or 0) if snap else -1
+            active = 1 if str(row['status']) == 'active' and str(row['parent_status']) == 'active' and pool_active else 0
+            conn.execute(
+                "INSERT OR IGNORE INTO payg_services(user_id,service_kind,service_id,last_billed_bytes,created_at,panel_server_id,target_key,user_capacity,active_since,day_billed_until,is_active) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (int(user_id), 'vpn', sid, baseline, now, panel_id, target_key, capacity, row['created_at'] or now, _epoch(row['created_at']), active)
+            )
+            prior = conn.execute("SELECT is_active FROM payg_services WHERE user_id=? AND service_kind='vpn' AND service_id=?", (int(user_id),sid)).fetchone()
+            if prior and int(prior['is_active'] or 0) != active and active:
+                conn.execute("UPDATE payg_services SET active_since=?,day_billed_until=? WHERE user_id=? AND service_kind='vpn' AND service_id=?", (now, time.time(), int(user_id), sid))
+            conn.execute("UPDATE payg_services SET panel_server_id=?,target_key=?,user_capacity=?,is_active=? WHERE user_id=? AND service_kind='vpn' AND service_id=?",
+                         (panel_id, target_key, capacity, active, int(user_id), sid))
+            if active:
+                attachments.append(("vpn", sid, panel_id))
+
+        # SSH services remain on the legacy volume tariff until SSH target tariffs are configured.
+        extra_members = conn.execute(
+            "SELECT service_kind,service_id,node_id FROM quota_pool_members WHERE pool_id=? AND service_kind='ssh'",
+            (int(pool_id),),
+        ).fetchall()
+        for member in extra_members:
+            sid, kind = str(member['service_id']), str(member['service_kind'])
+            snap = conn.execute("SELECT used_bytes FROM usage_snapshots WHERE service_kind=? AND service_id=?", (kind,sid)).fetchone()
+            baseline = int(snap['used_bytes'] or 0) if snap else -1
+            conn.execute("INSERT OR IGNORE INTO payg_services(user_id,service_kind,service_id,last_billed_bytes,created_at,is_active) VALUES(?,?,?,?,?,1)",
+                         (int(user_id),kind,sid,baseline,now))
     attached = conflicts = 0
     for kind, sid, node_id in attachments:
         try:
@@ -249,14 +517,76 @@ def _sync_services(db, user_id: int, pool_id: int):
             conflicts += 1
             logger.warning("PAYG service could not be attached: %s/%s (%s)", kind, sid, exc)
             with db._get_conn() as conn:
-                conn.execute(
-                    "DELETE FROM payg_services WHERE user_id=? AND service_kind=? AND service_id=?",
-                    (int(user_id), kind, sid),
-                )
+                conn.execute("DELETE FROM payg_services WHERE user_id=? AND service_kind=? AND service_id=?", (int(user_id),kind,sid))
     return {"attached": attached, "conflicts": conflicts, "discovered": len(attachments)}
 
 
-def activate_payg(db, user_id: int):
+def _deduct_payg_amount(conn, uid: int, amount: int, reason: str) -> bool:
+    amount = max(0, int(amount or 0))
+    if amount <= 0:
+        return True
+    with _wallet_tag(conn, uid, 'payg_usage', reason):
+        cur = conn.execute("UPDATE users SET referral_credit=referral_credit-? WHERE telegram_id=? AND referral_credit>=?", (amount, int(uid), amount))
+    return cur.rowcount == 1
+
+
+def _bill_panel_fixed_costs(db, uid: int, pool_id: int, service: dict) -> bool:
+    """Bill one-time capacity and complete active 24h periods atomically."""
+    panel_id = service.get('panel_server_id')
+    if not panel_id:
+        return True
+    try:
+        raw_keys = json.loads(str(service.get('target_key') or '"*"'))
+    except Exception:
+        raw_keys = [str(service.get('target_key') or '*')]
+    if not isinstance(raw_keys, list): raw_keys = [str(raw_keys)]
+    selected_rates = [get_target_cost(db, int(panel_id), str(key)) for key in raw_keys]
+    rates = {field: max((int(item.get(field, 0) or 0) for item in selected_rates), default=0)
+             for field in ("gb_rate", "day_rate", "user_rate")}
+    now = time.time()
+    capacity = max(1, int(service.get('user_capacity') or 1))
+    charged = max(0, int(service.get('charged_users') or 0))
+    new_users = max(0, capacity - charged)
+    day_until = float(service.get('day_billed_until') or _epoch(service.get('active_since') or service.get('created_at')))
+    active = bool(service.get('is_active', 1))
+    elapsed_days = max(0, int((now - day_until) // 86400)) if active else 0
+    user_rate = max(0, int(rates.get('user_rate', 0) or 0))
+    day_rate = max(0, int(rates.get('day_rate', 0) or 0))
+    user_amount, day_amount = new_users * user_rate, elapsed_days * day_rate
+    total = user_amount + day_amount
+    with db._get_conn() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        wallet = conn.execute("SELECT COALESCE(referral_credit,0) b FROM users WHERE telegram_id=?", (int(uid),)).fetchone()
+        balance = int(wallet['b'] or 0) if wallet else 0
+        if total > balance:
+            return False
+        if total and not _deduct_payg_amount(conn, uid, total,
+                f"هزینه ظرفیت {new_users} کاربر و {elapsed_days} روز فعال · {service['service_id']}"):
+            return False
+        if new_users:
+            if user_amount:
+                cycle = f"fixed:users:{service['service_id']}:{capacity}"
+                conn.execute("INSERT OR IGNORE INTO payg_transactions(user_id,cycle_key,service_kind,service_id,used_bytes,amount,rate_snapshot,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                             (int(uid),cycle,service['service_kind'],service['service_id'],0,user_amount,
+                              json.dumps({"type":"users","capacity":capacity,"rate":user_rate,"panel_id":panel_id,"target_key":service.get('target_key')}),_now()))
+            conn.execute("UPDATE payg_services SET charged_users=MAX(charged_users,?) WHERE id=?", (capacity,service['id']))
+        if elapsed_days:
+            new_until = day_until + elapsed_days * 86400
+            if day_amount:
+                cycle = f"fixed:days:{service['service_id']}:{int(new_until)}"
+                conn.execute("INSERT OR IGNORE INTO payg_transactions(user_id,cycle_key,service_kind,service_id,used_bytes,amount,rate_snapshot,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                             (int(uid),cycle,service['service_kind'],service['service_id'],0,day_amount,
+                              json.dumps({"type":"days","days":elapsed_days,"rate":day_rate,"panel_id":panel_id,"target_key":service.get('target_key')}),_now()))
+            # Advance even when the configured rate is zero: later tariff edits must not bill history.
+            conn.execute("UPDATE payg_services SET day_billed_until=? WHERE id=?", (new_until,service['id']))
+        if total:
+            month = _month_key()
+            conn.execute("UPDATE payg_accounts SET month_cost=CASE WHEN month_key=? THEN month_cost+? ELSE ? END,updated_at=? WHERE user_id=?",
+                         (month,total,total,_now(),int(uid)))
+    return True
+
+
+def activate_payg(db, user_id: int, existing_pool_id: int = None):
     if db.get_setting("payg_enabled", "1") != "1":
         return {"ok": False, "reason": "disabled"}
     balance = int(db.get_wallet_credit(user_id) or 0)
@@ -275,14 +605,15 @@ def activate_payg(db, user_id: int):
         except Exception:
             active_rates = get_rates(db)
         active_month_used = int(existing['month_used_bytes'] or 0) if existing['month_key'] == _month_key() else 0
-        limit_bytes = _affordable_limit_bytes(balance, active_rates, _billing_base_bytes(db, user_id), active_month_used)
+        limit_bytes = _affordable_payg_limit(db, user_id, balance, _billing_base_bytes(db, user_id), active_month_used, active_rates)
         db.set_quota_pool_limit(int(existing['quota_pool_id']), limit_bytes / GIB)
         return {"ok": True, "existing": True, **sync}
     rates = get_rates(db)
     # Temporarily create a generous pool ceiling; after attaching services,
     # rebase it on settled usage and the wallet's exact tiered purchasing power.
-    pool_id = db.create_quota_pool(user_id, 1_000_000_000,
-                                   label="Pay As You Go", metadata={"payg": True})
+    pool_id = (int(existing_pool_id) if existing_pool_id else
+               db.create_quota_pool(user_id, 1_000_000_000,
+                                    label="Pay As You Go", metadata={"payg": True}))
     with db._get_conn() as conn:
         conn.execute(
             "INSERT INTO payg_accounts(user_id,status,quota_pool_id,initial_balance,last_balance,month_key,month_rates,month_used_bytes,month_cost,last_alert_level,created_at,updated_at) "
@@ -299,8 +630,8 @@ def activate_payg(db, user_id: int):
         db.delete_quota_pool(pool_id)
         return {"ok": False, "reason": "no_services", **sync}
     billed_base = _billing_base_bytes(db, user_id)
-    initial_limit = _affordable_limit_bytes(balance, rates, billed_base, 0)
-    db.set_quota_pool_limit(pool_id, max(1, initial_limit) / GIB)
+    initial_limit = _affordable_payg_limit(db, user_id, balance, billed_base, 0, rates)
+    db.set_quota_pool_limit(pool_id, initial_limit / GIB)
     return {"ok": True, "existing": False, "pool_id": pool_id, **sync}
 
 
@@ -308,7 +639,7 @@ def payg_status(db, user_id: int):
     with db._get_conn() as conn:
         row = conn.execute("SELECT * FROM payg_accounts WHERE user_id=?", (int(user_id),)).fetchone()
         services = conn.execute("SELECT COUNT(*) n FROM payg_services WHERE user_id=?", (int(user_id),)).fetchone()['n']
-        tx = conn.execute("SELECT COALESCE(SUM(amount),0) total FROM payg_transactions WHERE user_id=? AND substr(cycle_key,1,7)=?",
+        tx = conn.execute("SELECT COALESCE(SUM(amount),0) total FROM payg_transactions WHERE user_id=? AND strftime('%Y-%m',created_at,'+3 hours','+30 minutes')=?",
                           (int(user_id), _month_key())).fetchone()
     if not row:
         return {"active": False, "services": 0, "spent": 0}
@@ -345,6 +676,56 @@ def _billing_base_bytes(db, user_id: int) -> int:
         current = int(row['used_bytes'] if row['used_bytes'] is not None else billed)
         total += min(billed, max(0, current))
     return max(0, total)
+
+
+def _panel_traffic_rates(db, user_id: int):
+    """Return (rates, has_panel_services); multi-target services use their highest target rate."""
+    with db._get_conn() as conn:
+        rows = conn.execute("SELECT panel_server_id,target_key FROM payg_services WHERE user_id=? AND panel_server_id IS NOT NULL", (int(user_id),)).fetchall()
+    values = []
+    for row in rows:
+        try:
+            keys = json.loads(str(row["target_key"] or '["*"]'))
+        except Exception:
+            keys = ["*"]
+        if not isinstance(keys, list): keys = [str(keys)]
+        selected = [get_target_cost(db, int(row["panel_server_id"]), str(key)) for key in keys]
+        values.append(max((int(x.get("gb_rate", 0) or 0) for x in selected), default=0))
+    positive = [x for x in values if x > 0]
+    return ([min(positive)] * 4 if positive else [0, 0, 0, 0]), bool(rows)
+
+
+def _pending_panel_fixed_cost(db, user_id: int) -> int:
+    """Reserve one-time capacity and already-accrued active-day charges before granting quota."""
+    with db._get_conn() as conn:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT panel_server_id,target_key,user_capacity,charged_users,day_billed_until,is_active "
+            "FROM payg_services WHERE user_id=? AND panel_server_id IS NOT NULL", (int(user_id),)).fetchall()]
+    reserve = 0
+    now = time.time()
+    for row in rows:
+        try: keys = json.loads(str(row.get("target_key") or '["*"]'))
+        except Exception: keys = ["*"]
+        if not isinstance(keys, list): keys = [str(keys)]
+        selected = [get_target_cost(db, int(row["panel_server_id"]), str(key)) for key in keys]
+        rates = {field: max((int(x.get(field, 0) or 0) for x in selected), default=0)
+                 for field in ("gb_rate", "day_rate", "user_rate")}
+        seats = max(0, int(row.get("user_capacity") or 1) - int(row.get("charged_users") or 0))
+        days = max(0, int((now - float(row.get("day_billed_until") or now)) // 86400)) if row.get("is_active") else 0
+        reserve += seats * rates["user_rate"] + days * rates["day_rate"]
+    return reserve
+
+
+def _affordable_payg_limit(db, user_id: int, balance: int, base_bytes: int, month_used_bytes: int, legacy_rates: list[int]):
+    panel_rates, has_panel = _panel_traffic_rates(db, user_id)
+    reserve = _pending_panel_fixed_cost(db, user_id) if has_panel else 0
+    usable = max(0, int(balance) - reserve)
+    if has_panel and not any(panel_rates):
+        return 0 if usable > 0 or reserve == 0 else max(1, int(base_bytes))
+    rates = panel_rates if has_panel else legacy_rates
+    if has_panel and usable <= 0:
+        return max(1, int(base_bytes))
+    return _affordable_limit_bytes(usable, rates, base_bytes, month_used_bytes)
 
 
 def _affordable_limit_bytes(balance: int, rates: list[int], billed_base_bytes: int,
@@ -386,8 +767,7 @@ def refresh_payg_quota(db, user_id: int):
         rates = get_rates(db)
     balance = int(db.get_wallet_credit(user_id) or 0)
     month_used = int(account.get("month_used_bytes") or 0) if account.get("month_key") == month else 0
-    limit = _affordable_limit_bytes(balance, [int(x) for x in rates],
-                                    _billing_base_bytes(db, user_id), month_used)
+    limit = _affordable_payg_limit(db, user_id, balance, _billing_base_bytes(db, user_id), month_used, [int(x) for x in rates])
     db.set_quota_pool_limit(int(account["quota_pool_id"]), limit / GIB)
     with db._get_conn() as conn:
         if balance > int(account.get("last_balance") or 0):
@@ -427,8 +807,8 @@ class PaygEngine:
                     effective_rates = list(current_rates)
                 _sync_services(self.db, uid, pool_id)
                 account_month_used = int(account.get('month_used_bytes') or 0) if account.get('month_key') == month else 0
-                pre_limit = _affordable_limit_bytes(current_balance, effective_rates,
-                                                    _billing_base_bytes(self.db, uid), account_month_used)
+                pre_limit = _affordable_payg_limit(self.db, uid, current_balance,
+                                                   _billing_base_bytes(self.db, uid), account_month_used, effective_rates)
                 self.db.set_quota_pool_limit(pool_id, pre_limit / GIB)
 
                 with self.db._get_conn() as conn:
@@ -461,7 +841,14 @@ class PaygEngine:
                     account['last_balance'] = current_balance
                     account['initial_balance'] = current_balance
 
+                fixed_insufficient = False
+                billing_insufficient = False
                 for service in services:
+                    if service.get('panel_server_id'):
+                        if not _bill_panel_fixed_costs(self.db, uid, pool_id, service):
+                            fixed_insufficient = True
+                            billing_insufficient = True
+                            break
                     if service['used_bytes'] is None or not service['reported_at']:
                         continue
                     try:
@@ -507,7 +894,14 @@ class PaygEngine:
                             continue
                         acc = conn.execute("SELECT month_used_bytes,month_key FROM payg_accounts WHERE user_id=?", (uid,)).fetchone()
                         before_bytes = int(acc['month_used_bytes'] or 0) if acc and acc['month_key'] == month else 0
-                        amount = max(0, _progressive_cost(before_bytes + delta, month_rates) - _progressive_cost(before_bytes, month_rates))
+                        if service.get('panel_server_id'):
+                            panel_rates = get_service_target_cost(self.db, int(service['panel_server_id']), {'value': _target_keys_from_config({'value': json.loads(service.get('target_key') or '["*"]')})})
+                            gb_rate = max(0, int(panel_rates.get('gb_rate', 0) or 0))
+                            amount = ((current_bytes * gb_rate) // GIB - (previous * gb_rate) // GIB) if gb_rate else 0
+                            rate_snapshot = {"type":"traffic","gb_rate":gb_rate,"panel_id":service['panel_server_id'],"target_key":service.get('target_key')}
+                        else:
+                            amount = max(0, _progressive_cost(before_bytes + delta, month_rates) - _progressive_cost(before_bytes, month_rates))
+                            rate_snapshot = month_rates
                         wallet = conn.execute("SELECT COALESCE(referral_credit,0) b FROM users WHERE telegram_id=?", (uid,)).fetchone()
                         balance = int(wallet['b'] or 0) if wallet else 0
                         if amount > balance:
@@ -528,24 +922,35 @@ class PaygEngine:
                                     "INSERT INTO payg_transactions(user_id,cycle_key,service_kind,service_id,used_bytes,amount,rate_snapshot,created_at) "
                                     "VALUES(?,?,?,?,?,?,?,?)",
                                     (uid, cycle_key, service['service_kind'], service['service_id'], delta, amount,
-                                     json.dumps(month_rates), _now()))
+                                     json.dumps(rate_snapshot, ensure_ascii=False), _now()))
                                 conn.execute("UPDATE payg_services SET last_billed_bytes=? WHERE id=?",
                                              (current_bytes, service['id']))
                                 conn.execute("UPDATE payg_accounts SET month_used_bytes=month_used_bytes+?,month_cost=month_cost+?,updated_at=? WHERE user_id=?",
                                              (delta, amount, _now(), uid))
                     if insufficient:
+                        billing_insufficient = True
                         logger.warning("PAYG wallet insufficient; preserving unbilled usage for user=%s service=%s/%s",
                                        uid, service['service_kind'], service['service_id'])
                         break
 
                 balance = int(self.db.get_wallet_credit(uid) or 0)
+                if fixed_insufficient:
+                    # Positive limit equal to already-recorded usage makes the quota reconciler suspend all pool members.
+                    self.db.set_quota_pool_limit(pool_id, max(1, _billing_base_bytes(self.db, uid)) / GIB)
                 with self.db._get_conn() as conn:
                     latest = conn.execute("SELECT month_used_bytes FROM payg_accounts WHERE user_id=?", (uid,)).fetchone()
                     latest_month_used = int(latest['month_used_bytes'] or 0) if latest else 0
                     conn.execute("UPDATE payg_accounts SET last_balance=?,updated_at=? WHERE user_id=?",
                                  (balance, _now(), uid))
-                limit_bytes = _affordable_limit_bytes(balance, month_rates, _billing_base_bytes(self.db, uid), latest_month_used)
+                if fixed_insufficient:
+                    limit_bytes = max(1, _billing_base_bytes(self.db, uid))
+                else:
+                    # For mixed-panel pools use the cheapest configured per-GB rate as a conservative shared ceiling.
+                    limit_bytes = _affordable_payg_limit(self.db, uid, balance,
+                                                        _billing_base_bytes(self.db, uid), latest_month_used, month_rates)
                 self.db.set_quota_pool_limit(pool_id, limit_bytes / GIB)
+                if billing_insufficient:
+                    self.db.set_quota_pool_status(pool_id, "exceeded")
                 alert = self._alert_payload(uid, account)
                 if alert:
                     alerts.append(alert)
@@ -631,6 +1036,165 @@ async def _rollback_payg_vpn(db, server, provisioned: dict) -> None:
             conn.execute("DELETE FROM custom_configs WHERE id=?", (custom_id,))
 
 
+async def _provision_payg_multi(db, uid: int, panel_ids, node_ids, protocols) -> dict:
+    """ساخت یک سرویس PayG روی همه پنل‌ها (با اینباند انتخاب‌شده‌ی هرکدام) و نودهای SSH.
+
+    پنل اول سرویس اصلی (custom_config) است، بقیه با config_panel_links وصل می‌شوند و
+    ساب اختصاصی همه را یکجا می‌دهد. مصرف هر مقصد جدا خوانده و جمعش صورتحساب می‌شود.
+    همه‌یا‌هیچ: با هر خطا هرچه ساخته شده پاک می‌شود. ثبت‌نام در حساب PayG هم داخل همین تابع است."""
+    import dedicated_sub
+    from direct_panel_provision import _provision_vpn, provision_ssh_direct
+    from panel_providers import get_provider
+    from ssh_service import node_protocols
+
+    if not dedicated_sub.is_enabled(db):
+        raise RuntimeError(MULTI_NEEDS_DSUB)
+    targets = get_payg_targets(db)
+    for sid in panel_ids:
+        server = db.get_panel_server(int(sid))
+        if not server or not server["is_active"]:
+            raise RuntimeError(f"پنل #{sid} فعال نیست؛ مدیریت باید انتخاب پنل‌های PayG را اصلاح کند.")
+        if not db.panel_has_capacity(int(sid), 1):
+            raise RuntimeError(f"ظرفیت پنل «{server['name']}» تکمیل است.")
+    nodes_by_id = {int(n["id"]): n for n in db.list_ssh_nodes(active_only=True)}
+    node_plan = []
+    for nid in node_ids:
+        node = nodes_by_id.get(int(nid))
+        if not node or node.get("node_type") != "linux":
+            raise RuntimeError(f"نود SSH #{nid} فعال نیست؛ مدیریت باید انتخاب نودهای PayG را اصلاح کند.")
+        picks = [p for p in protocols if p in node_protocols(node)]
+        if not picks:
+            raise RuntimeError(f"هیچ‌یک از پروتکل‌های انتخابی PayG روی نود «{node.get('name') or nid}» نصب نیست.")
+        node_plan.append((int(nid), picks))
+
+    with db._get_conn() as conn:
+        account = conn.execute("SELECT status,quota_pool_id FROM payg_accounts WHERE user_id=?", (int(uid),)).fetchone()
+    created_pool = False
+    if account and account["status"] == "active" and account["quota_pool_id"]:
+        pool_id = int(account["quota_pool_id"])
+    else:
+        pool_id = int(db.create_quota_pool(int(uid), 1_000_000_000, label="Pay As You Go", metadata={"payg": True}))
+        created_pool = True
+
+    ssh_items, panel_users, link_ids = [], [], []
+    state = {"primary": None}
+
+    async def rollback():
+        for item in ssh_items:
+            try:
+                from ssh_providers import get_ssh_provider
+                from quota_reconciler import _env_secret_resolver
+                node = nodes_by_id.get(int(item["node_id"]))
+                await get_ssh_provider(node, secret_resolver=_env_secret_resolver).delete_account(item["account_id"])
+            except Exception:
+                logger.exception("PAYG multi rollback: SSH delete failed for %s", item.get("account_id"))
+            with db._get_conn() as conn:
+                conn.execute("DELETE FROM ssh_accounts WHERE account_id=?", (item["account_id"],))
+                for table in ("usage_snapshots", "quota_enforcement_state"):
+                    conn.execute(f"DELETE FROM {table} WHERE service_kind='ssh' AND service_id=?", (item["account_id"],))
+                conn.execute("DELETE FROM quota_pool_members WHERE service_kind='ssh' AND service_id=?", (item["account_id"],))
+        for sid, username in panel_users:
+            try:
+                await get_provider(db.get_panel_server(int(sid))).delete_user(username)
+            except Exception:
+                logger.exception("PAYG multi rollback: panel user delete failed %s on %s", username, sid)
+        primary = state["primary"]
+        if primary:
+            try:
+                db.delete_config_panel_links(int(primary["custom_config_id"]))
+            except Exception:
+                logger.exception("PAYG multi rollback: link cleanup failed")
+            sid_key = f"custom_config:{int(primary['custom_config_id'])}"
+            with db._get_conn() as conn:
+                conn.execute("DELETE FROM payg_provisioned_services WHERE service_kind='vpn' AND service_id=?", (sid_key,))
+                conn.execute("DELETE FROM payg_services WHERE service_kind='vpn' AND service_id=?", (sid_key,))
+                conn.execute("DELETE FROM quota_pool_members WHERE service_kind='vpn' AND service_id=?", (sid_key,))
+                conn.execute("DELETE FROM quota_enforcement_state WHERE service_kind='vpn' AND service_id=?", (sid_key,))
+                conn.execute("DELETE FROM usage_snapshots WHERE service_kind='vpn' AND service_id=?", (sid_key,))
+                conn.execute("DELETE FROM custom_configs WHERE id=?", (int(primary["custom_config_id"]),))
+        if created_pool:
+            db.delete_quota_pool(pool_id)
+
+    try:
+        ssh_product_base = {"name": "Pay As You Go", "auto_provision_volume_gb": 0, "duration_days": 0}
+        for nid, picks in node_plan:
+            for proto in picks:
+                prod = dict(ssh_product_base, provision_ssh_node_id=nid, provision_ssh_protocol=proto)
+                built = await provision_ssh_direct(db, prod, quantity=1, user_id=int(uid), order_id=None,
+                                                   allow_openvpn=True, node_id=nid, pool_id=pool_id, protocol=proto)
+                ssh_items.extend(built)
+                if any(not b.get("accounting_ready") for b in built):
+                    raise RuntimeError(f"نود #{nid} شمارنده‌ی مصرف معتبر ندارد؛ این نود برای Pay As You Go قابل استفاده نیست.")
+
+        primary_username = None
+        for index, sid in enumerate(panel_ids):
+            fake_product = {
+                "id": None, "name": "Pay As You Go", "auto_provision_volume_gb": 0, "duration_days": 0,
+                "provision_server_id": int(sid), "provision_ssh_node_id": None, "provision_ssh_protocol": "ssh",
+                "is_auto_provision": 1, "base_users": 0, "extra_user_price": 0, "max_users": 0,
+            }
+            override = json.dumps(targets[int(sid)], ensure_ascii=False) if int(sid) in targets else None
+            built = await _provision_vpn(db, fake_product, quantity=1, user_id=int(uid), order_id=None,
+                                         shared_pool=True, server_id=int(sid), register=(index == 0),
+                                         target_config_override=override)
+            item = built[0]
+            panel_users.append((int(sid), item["username"]))
+            if index == 0:
+                if not item.get("custom_config_id") or not item.get("subscription_url"):
+                    raise RuntimeError("ساخت سرویس اصلی روی پنل کامل نشد.")
+                state["primary"] = item
+                primary_username = item["username"]
+                with db._get_conn() as conn:
+                    conn.execute("INSERT OR REPLACE INTO payg_provisioned_services(service_kind,service_id,user_id,created_at) "
+                                 "VALUES('vpn',?,?,?)", (f"custom_config:{int(item['custom_config_id'])}", int(uid), _now()))
+                db.attach_custom_config_to_quota_pool(pool_id, int(item["custom_config_id"]))
+                for ssh_item in ssh_items:
+                    db.link_ssh_account_to_config(ssh_item["account_id"], int(item["custom_config_id"]))
+                snap_key = f"custom_config:{int(item['custom_config_id'])}"
+            else:
+                link_id = db.add_config_panel_link(int(state["primary"]["custom_config_id"]), int(sid), item["username"],
+                                                   item["subscription_url"], target_config=targets.get(int(sid)))
+                link_ids.append(link_id)
+                db.attach_quota_service(pool_id, "vpn", f"panel_link:{link_id}", node_id=int(sid))
+                snap_key = f"panel_link:{link_id}"
+            # Authoritative usage baseline per panel; never bill a panel without byte counters.
+            server = db.get_panel_server(int(sid))
+            usage = await get_provider(server).get_user_usage(item["username"])
+            if not isinstance(usage, dict) or usage.get("used_bytes") is None or int(usage["used_bytes"]) < 0:
+                raise RuntimeError(f"پنل «{server['name']}» شمارنده مصرف معتبر ندارد؛ برای Pay As You Go قابل استفاده نیست.")
+            db.record_usage_snapshot("vpn", snap_key, int(usage["used_bytes"]),
+                                     uploaded_bytes=usage.get("uploaded_bytes", 0),
+                                     downloaded_bytes=usage.get("downloaded_bytes", 0),
+                                     source=f"panel:{server['panel_type']}", reported_at=usage.get("reported_at") or _now())
+
+        primary = state["primary"]
+        link = dedicated_sub.link_for_config(db, int(primary["custom_config_id"]))
+        if not link:
+            raise RuntimeError("ساخت لینک ساب اختصاصی ناموفق بود.")
+        enrolled = await asyncio.to_thread(activate_payg, db, int(uid), pool_id if created_pool else None)
+        sid_key = f"custom_config:{int(primary['custom_config_id'])}"
+        with db._get_conn() as conn:
+            member = conn.execute("SELECT 1 FROM payg_services WHERE user_id=? AND service_kind='vpn' AND service_id=?",
+                                  (int(uid), sid_key)).fetchone()
+        if not enrolled.get("ok") or not member:
+            raise RuntimeError("اتصال سرویس ساخته‌شده به حساب مصرفی ناموفق بود.")
+    except Exception:
+        await rollback()
+        raise
+    return {"username": primary_username, "custom_config_id": int(primary["custom_config_id"]),
+            "subscription_url": link, "panels": len(panel_ids), "nodes": len(node_plan),
+            "ssh_accounts": len(ssh_items)}
+
+
+def _is_multi_service(db, custom_config_id: int) -> bool:
+    with db._get_conn() as conn:
+        n = conn.execute("SELECT COUNT(*) n FROM config_panel_links WHERE custom_config_id=? AND status='active'",
+                         (int(custom_config_id),)).fetchone()["n"]
+        m = conn.execute("SELECT COUNT(*) n FROM ssh_accounts WHERE custom_config_id=? AND status='active'",
+                         (int(custom_config_id),)).fetchone()["n"]
+    return bool(n or m)
+
+
 def create_payg_router(db, is_main_bot=True):
     router = Router(name="payg_router")
     if not is_main_bot:
@@ -651,9 +1215,8 @@ def create_payg_router(db, is_main_bot=True):
         status = payg_status(db, user_id)
         balance = int(db.get_wallet_credit(user_id) or 0)
         rates = status.get('rates') or get_rates(db)
-        rate_text = ("تعرفه پلکانی هر گیگابایت:\n"
-                     f"تا ۵۰ GB: {rates[0]:,} تومان | ۵۰ تا ۲۰۰ GB: {rates[1]:,} تومان\n"
-                     f"۲۰۰ تا ۵۰۰ GB: {rates[2]:,} تومان | بیشتر از ۵۰۰ GB: {rates[3]:,} تومان\n")
+        rate_text = ("تعرفه هر سرویس بر اساس پنل و گروه/اینباند محل ساخت محاسبه می‌شود؛ "
+                     "هزینه ترافیک مصرفی، روزهای فعال و ظرفیت کاربران از کیف پول مشترک کسر خواهد شد.\n")
         supported_text = "سرویس‌های قابل صورتحساب فعلی: VPN و SSH با شمارنده مصرف معتبر.\n"
         panel_ids = get_payg_panel_ids(db)
         panel_names = []
@@ -691,11 +1254,15 @@ def create_payg_router(db, is_main_bot=True):
             text += "\n\n🔗 <b>لینک‌های اشتراک اختصاصی فعال:</b>"
             for item in service_rows:
                 url = str(item["subscription_url"] or "").strip()
+                multi = await asyncio.to_thread(_is_multi_service, db, int(item["id"]))
+                if multi:
+                    import dedicated_sub
+                    url = str(dedicated_sub.display_link(db, int(item["id"]), url) or url).strip()
                 if not url:
                     continue
                 safe_url = url.replace("&", "&amp;").replace('"', "&quot;")
                 label = str(item["username"] or f"سرویس {item['id']}")
-                panel_label = str(item["panel_name"] or f"پنل {item['panel_server_id']}")
+                panel_label = ("چندمقصدی" if multi else str(item["panel_name"] or f"پنل {item['panel_server_id']}"))
                 text += f"\n• {label} · {panel_label}: <a href=\"{safe_url}\">باز کردن لینک</a>"
         with db._get_conn() as conn:
             configured = conn.execute("SELECT 1 FROM payg_accounts WHERE user_id=?", (int(user_id),)).fetchone() is not None
@@ -734,14 +1301,54 @@ def create_payg_router(db, is_main_bot=True):
     async def payg_history_callback(call: CallbackQuery):
         await call.answer()
         with db._get_conn() as conn:
-            rows = conn.execute("SELECT service_kind,used_bytes,amount,created_at FROM payg_transactions WHERE user_id=? ORDER BY id DESC LIMIT 10", (call.from_user.id,)).fetchall()
+            rows = conn.execute("SELECT service_kind,used_bytes,amount,rate_snapshot,created_at FROM payg_transactions WHERE user_id=? ORDER BY id DESC LIMIT 10", (call.from_user.id,)).fetchall()
         if not rows:
             await call.message.answer("هنوز تراکنشی برای Pay As You Go ثبت نشده است.")
             return
         lines = ["🧾 <b>آخرین برداشت‌های Pay As You Go</b>"]
         for row in rows:
-            lines.append(f"• {row['service_kind'].upper()} | {int(row['used_bytes'])/GIB:.3f} GB | {int(row['amount']):,} تومان | {str(row['created_at'])[:16]}")
+            try: snap = json.loads(row["rate_snapshot"] or "{}")
+            except Exception: snap = {}
+            if snap.get("type") == "users": detail = f"ظرفیت {int(snap.get('capacity') or 0)} کاربر"
+            elif snap.get("type") == "days": detail = f"{int(snap.get('days') or 0)} روز فعال"
+            elif snap.get("type") == "traffic": detail = f"ترافیک {int(row['used_bytes'])/GIB:.3f} GB"
+            else: detail = f"ترافیک {int(row['used_bytes'])/GIB:.3f} GB"
+            lines.append(f"• {row['service_kind'].upper()} | {detail} | {int(row['amount']):,} تومان | {str(row['created_at'])[:16]}")
         await call.message.answer("\n".join(lines), parse_mode="HTML")
+
+    async def _multi_provision_flow(call: CallbackQuery, uid: int, plan):
+        panel_ids, node_ids, protocols = plan
+        if not await asyncio.to_thread(_acquire_provision_lock, db, uid):
+            await call.message.answer("⏳ درخواست ساخت سرویس شما در حال پردازش است؛ لطفاً چند لحظه صبر کنید.")
+            return
+        try:
+            try:
+                result = await _provision_payg_multi(db, uid, panel_ids, node_ids, protocols)
+            except Exception as exc:
+                logger.exception("PAYG multi-target provisioning failed for user=%s", uid)
+                await call.message.answer(f"⛔️ ساخت سرویس Pay As You Go ناموفق بود: {str(exc)[:250]}\n"
+                                          "هیچ هزینه مصرفی برای این سرویس ثبت نشده است.")
+                return
+            try:
+                safe_url = str(result["subscription_url"]).replace("&", "&amp;").replace('"', "&quot;")
+                await call.message.answer(
+                    "✅ <b>سرویس Pay As You Go ساخته شد.</b>\n\n"
+                    f"👤 نام کاربری: <code>{result['username']}</code>\n"
+                    f"🧩 مقصدها: {result['panels']} پنل + {result['nodes']} نود\n"
+                    "📦 حجم: پرداخت به‌ازای مصرف\n⏳ مدت: بدون انقضای ثابت\n"
+                    "💳 هزینه از کیف پول تومانی شما کسر می‌شود.\n\n"
+                    f"🔗 <a href=\"{safe_url}\">دریافت لینک اشتراک</a>\n\n"
+                    "مصرف همه مقصدها با هم جمع و هر ۱۰ دقیقه تسویه می‌شود.",
+                    parse_mode="HTML", disable_web_page_preview=True)
+                await show(call.message, uid)
+            except Exception:
+                logger.exception("PAYG multi-target delivery message failed for user=%s", uid)
+                try:
+                    await call.message.answer("✅ سرویس Pay As You Go ساخته و فعال شده است. برای مشاهده لینک و وضعیت، دستور /payg را ارسال کنید.")
+                except Exception:
+                    pass
+        finally:
+            await asyncio.to_thread(_release_provision_lock, db, uid)
 
     @router.callback_query(F.data == "payg:provision")
     async def payg_provision_callback(call: CallbackQuery):
@@ -776,6 +1383,10 @@ def create_payg_router(db, is_main_bot=True):
         if not panel_ids:
             await call.message.answer("⛔️ هیچ پنل فعالی برای ساخت سرویس Pay As You Go توسط مدیریت انتخاب نشده است.")
             return
+        plan = payg_multi_plan(db)
+        if plan:
+            await _multi_provision_flow(call, uid, plan)
+            return
         server = await asyncio.to_thread(_choose_payg_panel, db, panel_ids)
         if not server:
             await call.message.answer("⛔️ هیچ‌یک از پنل‌های انتخاب‌شده فعال یا دارای ظرفیت کافی نیستند.")
@@ -792,7 +1403,10 @@ def create_payg_router(db, is_main_bot=True):
                 "id": None, "name": "Pay As You Go", "auto_provision_volume_gb": 0,
                 "duration_days": 0, "provision_server_id": server_id,
                 "provision_ssh_node_id": None, "provision_ssh_protocol": "ssh",
-                "provision_target_config": None, "is_auto_provision": 1,
+                "provision_target_config": (
+                    json.dumps(get_payg_targets(db)[server_id], ensure_ascii=False)
+                    if server_id in get_payg_targets(db) else None),
+                "is_auto_provision": 1,
                 "base_users": 0, "extra_user_price": 0, "max_users": 0,
             }
             results = await provision_direct(db, fake_product, quantity=1, user_id=uid, order_id=None)
@@ -886,375 +1500,22 @@ def create_payg_router(db, is_main_bot=True):
         await call.message.answer(confirmation)
         await show(call.message, call.from_user.id)
 
-    def _admin_home_kb(enabled: bool):
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=("🔴 توقف فروش جدید" if enabled else "🟢 فعال‌سازی فروش جدید"), callback_data="payg:admin_toggle")],
-            [InlineKeyboardButton(text="💵 تنظیم تعرفه‌ها", callback_data="payg:admin_rates")],
-            [InlineKeyboardButton(text="🖥 مدیریت چندپنل و توزیع سرویس", callback_data="payg:admin_servers")],
-            [InlineKeyboardButton(text="👥 جستجوی کاربر PayG", callback_data="payg:admin_user_search")],
-            [InlineKeyboardButton(text="📋 فهرست حساب‌های PayG", callback_data="payg:admin_users:0")],
-            [InlineKeyboardButton(text="📈 گزارش مصرف و درآمد", callback_data="payg:admin_report")],
-            [InlineKeyboardButton(text="🔄 تازه‌سازی", callback_data="adm_payg")],
-        ])
-
-    async def _show_admin_home(target):
-        rates = get_rates(db)
-        enabled = db.get_setting("payg_enabled", "1") == "1"
-        with db._get_conn() as conn:
-            stats = conn.execute("SELECT COUNT(*) total, SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) active, SUM(CASE WHEN status='suspended_admin' THEN 1 ELSE 0 END) suspended FROM payg_accounts").fetchone()
-            revenue = conn.execute("SELECT COALESCE(SUM(amount),0) amount FROM payg_transactions WHERE substr(cycle_key,1,7)=?", (_month_key(),)).fetchone()["amount"]
-            used = conn.execute("SELECT COALESCE(SUM(month_used_bytes),0) n FROM payg_accounts WHERE month_key=?", (_month_key(),)).fetchone()["n"]
-        selected_ids = get_payg_panel_ids(db)
-        selected_names = []
-        for pid in selected_ids:
-            panel = await asyncio.to_thread(db.get_panel_server, int(pid))
-            if panel:
-                selected_names.append(f"{panel['name']} (#{pid})")
-        server_label = "، ".join(selected_names) if selected_names else "تنظیم نشده"
-        text = ("⚙️ <b>مدیریت Pay As You Go</b>\n\n"
-                f"فروش جدید: {'فعال' if enabled else 'غیرفعال'}\n"
-                f"حساب‌ها: {int(stats['active'] or 0)} فعال | {int(stats['suspended'] or 0)} تعلیق مدیریتی | {int(stats['total'] or 0)} کل\n"
-                f"مصرف این ماه: {int(used or 0)/GIB:.3f} GB\n"
-                f"درآمد این ماه: {int(revenue or 0):,} تومان\n"
-                f"پنل‌های ساخت سرویس: {server_label}\n"
-                f"تعرفه‌ها (تومان/GB): {rates[0]:,} / {rates[1]:,} / {rates[2]:,} / {rates[3]:,}\n"
-                f"چرخه تسویه: هر {max(60, int(db.get_setting('payg_cycle_seconds', '600') or 600))} ثانیه")
-        await target.answer(text, reply_markup=_admin_home_kb(enabled), parse_mode="HTML")
-
-    @router.callback_query(F.data == "adm_payg")
-    async def payg_admin_panel(call: CallbackQuery):
-        await call.answer()
-        if not db.is_full_admin(call.from_user.id):
-            return
-        await _show_admin_home(call.message)
-
-    @router.callback_query(F.data == "payg:admin_rates")
-    async def payg_admin_rates(call: CallbackQuery):
-        await call.answer()
-        if not db.is_full_admin(call.from_user.id):
-            return
-        rates = get_rates(db)
-        rows = []
-        labels = ["تا ۵۰ گیگابایت", "۵۰ تا ۲۰۰ گیگابایت", "۲۰۰ تا ۵۰۰ گیگابایت", "بیشتر از ۵۰۰ گیگابایت"]
-        for i, label in enumerate(labels):
-            rows.append([InlineKeyboardButton(text=f"✏️ {label}: {rates[i]:,} تومان/GB", callback_data=f"payg:admin_rate:{i}")])
-        rows.append([InlineKeyboardButton(text="↩️ بازگشت", callback_data="adm_payg")])
-        await call.message.answer("💵 <b>تنظیم تعرفه‌های پلکانی</b>\nبرای تغییر هر بازه روی دکمه آن بزنید. نرخ جدید برای حساب‌های فعال از ابتدای ماه بعد اعمال می‌شود.", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="HTML")
-
-    @router.callback_query(F.data.startswith("payg:admin_rate:"))
-    async def payg_admin_rate_edit(call: CallbackQuery, state: FSMContext):
-        await call.answer()
-        if not db.is_full_admin(call.from_user.id):
-            return
-        try:
-            tier = int(call.data.rsplit(":", 1)[1])
-            if tier not in range(4):
-                raise ValueError
-        except ValueError:
-            await call.message.answer("بازه تعرفه نامعتبر است.")
-            return
-        await state.update_data(payg_rate_tier=tier)
-        await state.set_state(PaygAdminStates.waiting_rate)
-        await call.message.answer(f"قیمت جدید به تومان برای بازه {tier + 1} را به‌صورت عددی ارسال کنید.\nبرای لغو /cancel")
-
-    @router.message(PaygAdminStates.waiting_rate)
-    async def payg_admin_rate_save(message: Message, state: FSMContext):
-        if not db.is_full_admin(message.from_user.id):
-            await state.clear(); return
-        if (message.text or "").strip() == "/cancel":
-            await state.clear(); await message.answer("ویرایش تعرفه لغو شد."); return
-        try:
-            value = int((message.text or "").replace(",", "").strip())
-            data = await state.get_data(); tier = int(data["payg_rate_tier"])
-            rates = get_rates(db); rates[tier] = value
-            if value <= 0 or rates != sorted(rates, reverse=True):
-                raise ValueError
-        except Exception:
-            await message.answer("عدد نامعتبر است. همه تعرفه‌ها باید مثبت و به‌ترتیب نزولی باشند. دوباره ارسال کنید یا /cancel بزنید.")
-            return
-        db.set_setting("payg_rates", json.dumps(rates))
-        await state.clear()
-        await message.answer("✅ تعرفه ذخیره شد. نرخ جدید برای حساب‌های فعال از ابتدای ماه بعد اعمال می‌شود.")
-        await _show_admin_home(message)
-
-    @router.callback_query(F.data == "payg:admin_user_search")
-    async def payg_admin_user_search(call: CallbackQuery, state: FSMContext):
-        await call.answer()
-        if not db.is_full_admin(call.from_user.id): return
-        await state.set_state(PaygAdminStates.waiting_user_id)
-        await call.message.answer("آیدی عددی تلگرام کاربر را ارسال کنید. برای لغو /cancel")
-
-    @router.message(PaygAdminStates.waiting_user_id)
-    async def payg_admin_user_search_receive(message: Message, state: FSMContext):
-        if not db.is_full_admin(message.from_user.id): await state.clear(); return
-        raw = (message.text or "").strip()
-        if raw == "/cancel": await state.clear(); await message.answer("جستجو لغو شد."); return
-        if not raw.isdigit(): await message.answer("آیدی باید عددی باشد."); return
-        await state.clear()
-        await _show_admin_user(message, int(raw))
-
-    async def _show_admin_user(target, uid: int):
-        with db._get_conn() as conn:
-            row = conn.execute("SELECT * FROM payg_accounts WHERE user_id=?", (uid,)).fetchone()
-            services = conn.execute("SELECT id,service_kind,service_id,last_billed_bytes FROM payg_services WHERE user_id=?", (uid,)).fetchall()
-            tx = conn.execute("SELECT COUNT(*) n,COALESCE(SUM(amount),0) spent FROM payg_transactions WHERE user_id=?", (uid,)).fetchone()
-        if not row:
-            await target.answer("برای این کاربر حساب PayG ثبت نشده است."); return
-        balance = int(db.get_wallet_credit(uid) or 0)
-        pool = db.get_quota_usage(int(row['quota_pool_id'])) if row['quota_pool_id'] else None
-        status_label = {"active":"فعال", "suspended_admin":"تعلیق‌شده توسط مدیریت", "inactive":"غیرفعال"}.get(row['status'], row['status'])
-        lines = [f"👤 <b>حساب PayG کاربر {uid}</b>", f"وضعیت: {status_label}", f"کیف پول: {balance:,} تومان", f"مصرف ماه: {int(row['month_used_bytes'] or 0)/GIB:.3f} GB", f"هزینه ماه: {int(row['month_cost'] or 0):,} تومان", f"کل برداشت‌ها: {int(tx['spent'] or 0):,} تومان ({int(tx['n'] or 0)} تراکنش)", f"سرویس‌های متصل: {len(services)}"]
-        if pool:
-            lines.append(f"سقف استخر: {int(pool['limit_bytes'])/GIB:.3f} GB | مصرف ثبت‌شده استخر: {int(pool['used_bytes'])/GIB:.3f} GB")
-        for item in services[:8]: lines.append(f"• {item['service_kind'].upper()} · {item['service_id']}")
-        buttons = [[InlineKeyboardButton(text=f"🔍 جزئیات {item['service_kind'].upper()} · {item['service_id'][:18]}", callback_data=f"payg:admin_service:{uid}:{int(item['id'])}")] for item in services[:8]]
-        if row['status'] == 'active': buttons.append([InlineKeyboardButton(text="⛔ تعلیق دستی حساب", callback_data=f"payg:admin_suspend:{uid}")])
-        else: buttons.append([InlineKeyboardButton(text="🟢 فعال‌سازی مجدد حساب", callback_data=f"payg:admin_resume:{uid}")])
-        buttons.extend([[InlineKeyboardButton(text="🧾 تراکنش‌های اخیر", callback_data=f"payg:admin_user_tx:{uid}")], [InlineKeyboardButton(text="↩️ بازگشت به فهرست", callback_data="payg:admin_users:0")]])
-        await target.answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
-
-    @router.callback_query(F.data.startswith("payg:admin_suspend:"))
-    async def payg_admin_suspend(call: CallbackQuery):
-        await call.answer()
-        if not db.is_full_admin(call.from_user.id): return
-        uid = int(call.data.rsplit(":", 1)[1])
-        with db._get_conn() as conn:
-            row = conn.execute("SELECT quota_pool_id FROM payg_accounts WHERE user_id=?", (uid,)).fetchone()
-            if row:
-                conn.execute("UPDATE payg_accounts SET status='suspended_admin',updated_at=? WHERE user_id=?", (_now(), uid))
-        if row and row['quota_pool_id']:
-            usage = db.get_quota_usage(int(row['quota_pool_id']))
-            used = int((usage or {}).get('used_bytes') or 0)
-            db.set_quota_pool_limit(int(row['quota_pool_id']), max(1, used) / GIB)
-        await call.message.answer("⛔ حساب PayG کاربر تعلیق شد.")
-        await _show_admin_user(call.message, uid)
-
-    @router.callback_query(F.data.startswith("payg:admin_resume:"))
-    async def payg_admin_resume(call: CallbackQuery):
-        await call.answer()
-        if not db.is_full_admin(call.from_user.id): return
-        uid = int(call.data.rsplit(":", 1)[1])
-        with db._get_conn() as conn:
-            row = conn.execute("SELECT * FROM payg_accounts WHERE user_id=?", (uid,)).fetchone()
-        if not row:
-            await call.message.answer("حساب پیدا نشد."); return
-        balance = int(db.get_wallet_credit(uid) or 0)
-        if balance <= 0:
-            await call.message.answer("برای فعال‌سازی مجدد ابتدا کاربر باید کیف پولش را شارژ کند."); return
-        with db._get_conn() as conn:
-            conn.execute("UPDATE payg_accounts SET status='active',last_alert_level=0,updated_at=? WHERE user_id=?", (_now(), uid))
-        rates = [int(x) for x in json.loads(row['month_rates'] or json.dumps(get_rates(db)))]
-        limit = _affordable_limit_bytes(balance, rates, _billing_base_bytes(db, uid), int(row['month_used_bytes'] or 0))
-        db.set_quota_pool_limit(int(row['quota_pool_id']), limit / GIB)
-        await call.message.answer("✅ حساب PayG دوباره فعال شد.")
-        await _show_admin_user(call.message, uid)
-
-    @router.callback_query(F.data.startswith("payg:admin_users:"))
-    async def payg_admin_users(call: CallbackQuery):
-        await call.answer()
-        if not db.is_full_admin(call.from_user.id): return
-        offset = max(0, int(call.data.rsplit(":", 1)[1]))
-        with db._get_conn() as conn:
-            rows = conn.execute("SELECT user_id,status,month_used_bytes,month_cost FROM payg_accounts ORDER BY updated_at DESC LIMIT 10 OFFSET ?", (offset,)).fetchall()
-            total = conn.execute("SELECT COUNT(*) n FROM payg_accounts").fetchone()['n']
-        buttons = [[InlineKeyboardButton(text=f"{r['user_id']} · {r['status']} · {int(r['month_cost'] or 0):,} تومان", callback_data=f"payg:admin_user:{int(r['user_id'])}")] for r in rows]
-        nav=[]
-        if offset > 0: nav.append(InlineKeyboardButton(text="⬅️ قبلی", callback_data=f"payg:admin_users:{max(0,offset-10)}"))
-        if offset + 10 < int(total): nav.append(InlineKeyboardButton(text="بعدی ➡️", callback_data=f"payg:admin_users:{offset+10}"))
-        if nav: buttons.append(nav)
-        buttons.append([InlineKeyboardButton(text="🔎 جستجوی آیدی", callback_data="payg:admin_user_search"), InlineKeyboardButton(text="↩️ مدیریت PayG", callback_data="adm_payg")])
-        await call.message.answer(f"👥 حساب‌های PayG ({offset+1} تا {min(offset+10,int(total))} از {int(total)})", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-
-    @router.callback_query(F.data.startswith("payg:admin_user:"))
-    async def payg_admin_user_detail(call: CallbackQuery):
-        await call.answer()
-        if not db.is_full_admin(call.from_user.id): return
-        await _show_admin_user(call.message, int(call.data.rsplit(":", 1)[1]))
-
-    @router.callback_query(F.data.startswith("payg:admin_service:"))
-    async def payg_admin_service_detail(call: CallbackQuery):
-        await call.answer()
-        if not db.is_full_admin(call.from_user.id): return
-        try:
-            _, _, uid_raw, service_pk_raw = call.data.split(":", 3)
-            uid, service_pk = int(uid_raw), int(service_pk_raw)
-        except Exception:
-            await call.message.answer("شناسه سرویس نامعتبر است."); return
-        with db._get_conn() as conn:
-            row = conn.execute("SELECT ps.service_kind,ps.service_id,ps.last_billed_bytes,s.used_bytes,s.reported_at,s.source FROM payg_services ps LEFT JOIN usage_snapshots s ON s.service_kind=ps.service_kind AND s.service_id=ps.service_id WHERE ps.user_id=? AND ps.id=?", (uid, service_pk)).fetchone()
-        if not row:
-            await call.message.answer("سرویس پیدا نشد."); return
-        used = int(row['used_bytes'] or 0)
-        billed = int(row['last_billed_bytes'] or 0)
-        kind, sid = row['service_kind'], row['service_id']
-        await call.message.answer(f"🔍 <b>جزئیات سرویس</b>\nکاربر: {uid}\nنوع: {kind.upper()}\nشناسه: <code>{sid}</code>\nمصرف گزارش‌شده: {used/GIB:.3f} GB\nآخرین مصرف تسویه‌شده: {billed/GIB:.3f} GB\nمنبع آمار: {row['source'] or 'نامشخص'}\nآخرین گزارش: {row['reported_at'] or 'ندارد'}", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="↩️ بازگشت به کاربر", callback_data=f"payg:admin_user:{uid}")]]))
-
-    @router.callback_query(F.data.startswith("payg:admin_user_tx:"))
-    async def payg_admin_user_transactions(call: CallbackQuery):
-        await call.answer()
-        if not db.is_full_admin(call.from_user.id): return
-        uid = int(call.data.rsplit(":", 1)[1])
-        with db._get_conn() as conn:
-            rows = conn.execute("SELECT service_kind,service_id,used_bytes,amount,created_at FROM payg_transactions WHERE user_id=? ORDER BY id DESC LIMIT 20", (uid,)).fetchall()
-        lines=[f"🧾 <b>۲۰ برداشت آخر کاربر {uid}</b>"]
-        for r in rows: lines.append(f"{r['service_kind']} · {r['service_id']} | {int(r['used_bytes'])/GIB:.3f} GB | {int(r['amount']):,} تومان | {str(r['created_at'])[:16]}")
-        if not rows: lines.append("تراکنشی ثبت نشده است.")
-        await call.message.answer("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="↩️ بازگشت به کاربر", callback_data=f"payg:admin_user:{uid}")]]))
-
-    @router.callback_query(F.data == "payg:admin_report")
-    async def payg_admin_report(call: CallbackQuery):
-        await call.answer()
-        if not db.is_full_admin(call.from_user.id): return
-        with db._get_conn() as conn:
-            rows = conn.execute("SELECT service_kind,COUNT(*) tx,COALESCE(SUM(used_bytes),0) bytes,COALESCE(SUM(amount),0) amount FROM payg_transactions WHERE substr(cycle_key,1,7)=? GROUP BY service_kind", (_month_key(),)).fetchall()
-            alerts = conn.execute("SELECT COUNT(*) n FROM payg_accounts WHERE status='active' AND last_balance<=0").fetchone()['n']
-        lines=["📈 <b>گزارش ماه جاری PayG</b>", f"حساب‌های فعال با موجودی صفر: {int(alerts or 0)}"]
-        for r in rows: lines.append(f"{r['service_kind'].upper()}: {int(r['tx'])} تراکنش | {int(r['bytes'])/GIB:.3f} GB | {int(r['amount']):,} تومان")
-        if not rows: lines.append("هنوز تراکنشی ثبت نشده است.")
-        await call.message.answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="↩️ بازگشت", callback_data="adm_payg")]]), parse_mode="HTML")
-
-    @router.callback_query(F.data == "payg:admin_servers")
-    async def payg_admin_servers(call: CallbackQuery):
-        await call.answer()
-        if not db.is_full_admin(call.from_user.id):
-            return
-        servers = await asyncio.to_thread(db.get_panel_servers, True)
-        selected = set(get_payg_panel_ids(db))
-        rows = []
-        for server in servers:
-            sid = int(server["id"])
-            mark = "✅" if sid in selected else "▫️"
-            info = await asyncio.to_thread(db.get_panel_capacity_info, sid)
-            load = ""
-            if info:
-                load = (f" · {int(info['active_services'])}/{info['max_services']} ظرفیت"
-                        if info.get("max_services") else f" · {int(info['active_services'])} سرویس")
-            rows.append([InlineKeyboardButton(
-                text=f"{mark} {server['name']} · #{sid}{load}",
-                callback_data=f"payg:admin_server_toggle:{sid}",
-            )])
-        rows.append([InlineKeyboardButton(text="🧹 پاک‌کردن همه انتخاب‌ها", callback_data="payg:admin_server_clear")])
-        rows.append([InlineKeyboardButton(text="↩️ بازگشت", callback_data="adm_payg")])
-        await call.message.answer(
-            "🖥 <b>انتخاب چندپنل برای Pay As You Go</b>\n"
-            "هر تعداد پنل فعال می‌خواهید انتخاب کنید. هنگام ساخت سرویس، سیستم به‌صورت خودکار پنل دارای ظرفیت و بار کمتر را انتخاب می‌کند.\n"
-            "پنل‌های انتخاب‌شده فقط برای سرویس‌های جدید استفاده می‌شوند؛ سرویس‌های قبلی روی پنل خود باقی می‌مانند.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="HTML",
-        )
-
-    @router.callback_query(F.data.startswith("payg:admin_server_toggle:"))
-    async def payg_admin_set_server(call: CallbackQuery):
-        if not db.is_full_admin(call.from_user.id):
-            return
-        try:
-            server_id = int(call.data.rsplit(":", 1)[1])
-        except Exception:
-            await call.message.answer("شناسه پنل نامعتبر است.")
-            return
-        server = await asyncio.to_thread(db.get_panel_server, server_id)
-        if not server or not server["is_active"]:
-            await call.message.answer("پنل فعال پیدا نشد.")
-            return
-        selected = set(get_payg_panel_ids(db))
-        if server_id in selected:
-            selected.remove(server_id)
-        else:
-            selected.add(server_id)
-        ordered = sorted(selected)
-        db.set_setting("payg_panel_server_ids", json.dumps(ordered))
-        db.set_setting("payg_panel_server_id", str(ordered[0]) if ordered else "")
-        await payg_admin_servers(call)
-
-    @router.callback_query(F.data == "payg:admin_server_clear")
-    async def payg_admin_server_clear(call: CallbackQuery):
-        if not db.is_full_admin(call.from_user.id):
-            return
-        db.set_setting("payg_panel_server_ids", "[]")
-        db.set_setting("payg_panel_server_id", "")
-        await payg_admin_servers(call)
-
-    @router.callback_query(F.data == "payg:admin_toggle")
-    async def payg_admin_toggle(call: CallbackQuery):
-        await call.answer()
-        if not db.is_full_admin(call.from_user.id):
-            return
-        new_value = "0" if db.get_setting("payg_enabled", "1") == "1" else "1"
-        db.set_setting("payg_enabled", new_value)
-        await _show_admin_home(call.message)
-
     @router.message(Command("payg_history"))
     async def payg_history(message: Message):
         with db._get_conn() as conn:
-            rows = conn.execute("SELECT service_kind,used_bytes,amount,created_at FROM payg_transactions WHERE user_id=? ORDER BY id DESC LIMIT 10", (message.from_user.id,)).fetchall()
+            rows = conn.execute("SELECT service_kind,used_bytes,amount,rate_snapshot,created_at FROM payg_transactions WHERE user_id=? ORDER BY id DESC LIMIT 10", (message.from_user.id,)).fetchall()
         if not rows:
             await message.answer("هنوز تراکنشی برای Pay As You Go ثبت نشده است.")
             return
         lines = ["🧾 <b>آخرین برداشت‌های Pay As You Go</b>"]
         for row in rows:
-            lines.append(f"• {row['service_kind'].upper()} | {int(row['used_bytes'])/GIB:.3f} GB | {int(row['amount']):,} تومان | {str(row['created_at'])[:16]}")
+            try: snap = json.loads(row["rate_snapshot"] or "{}")
+            except Exception: snap = {}
+            if snap.get("type") == "users": detail = f"ظرفیت {int(snap.get('capacity') or 0)} کاربر"
+            elif snap.get("type") == "days": detail = f"{int(snap.get('days') or 0)} روز فعال"
+            elif snap.get("type") == "traffic": detail = f"ترافیک {int(row['used_bytes'])/GIB:.3f} GB"
+            else: detail = f"ترافیک {int(row['used_bytes'])/GIB:.3f} GB"
+            lines.append(f"• {row['service_kind'].upper()} | {detail} | {int(row['amount']):,} تومان | {str(row['created_at'])[:16]}")
         await message.answer("\n".join(lines), parse_mode="HTML")
-
-    @router.message(Command("payg_admin"))
-    async def payg_admin(message: Message):
-        if not db.is_full_admin(message.from_user.id):
-            return
-        await _show_admin_home(message)
-
-    @router.message(Command("payg_rate"))
-    async def payg_rate(message: Message):
-        if not db.is_full_admin(message.from_user.id):
-            return
-        parts = (message.text or "").split()
-        try:
-            rates = [int(x) for x in parts[1:]]
-            if len(rates) != 4 or any(x <= 0 for x in rates) or rates != sorted(rates, reverse=True):
-                raise ValueError
-        except Exception:
-            await message.answer("فرمت صحیح: /payg_rate 5000 4500 4000 3500\nقیمت‌ها باید مثبت و نزولی باشند.")
-            return
-        db.set_setting("payg_rates", json.dumps(rates))
-        await message.answer("✅ تعرفه‌های Pay As You Go ذخیره شد. برای حساب‌های فعال، تعرفه‌ی دوره‌ی جاری ثابت می‌ماند و نرخ جدید از ابتدای ماه بعد اعمال می‌شود.")
-
-    @router.message(Command("payg_cycle"))
-    async def payg_cycle_set(message: Message):
-        if not db.is_full_admin(message.from_user.id):
-            return
-        parts = (message.text or "").split()
-        try:
-            seconds = int(parts[1])
-            if not 60 <= seconds <= 86400:
-                raise ValueError
-        except Exception:
-            await message.answer("فرمت صحیح: /payg_cycle 600 (محدوده مجاز: ۶۰ تا ۸۶۴۰۰ ثانیه)")
-            return
-        db.set_setting("payg_cycle_seconds", str(seconds))
-        await message.answer(f"✅ چرخه تسویه از چرخه بعدی روی {seconds} ثانیه تنظیم شد.")
-
-    @router.message(Command("payg_max_services"))
-    async def payg_max_services_set(message: Message):
-        if not db.is_full_admin(message.from_user.id):
-            return
-        parts = (message.text or "").split()
-        try:
-            maximum = int(parts[1])
-            if not 1 <= maximum <= 100:
-                raise ValueError
-        except Exception:
-            await message.answer("فرمت صحیح: /payg_max_services 5 (محدوده مجاز: ۱ تا ۱۰۰)")
-            return
-        db.set_setting("payg_max_services_per_user", str(maximum))
-        await message.answer(f"✅ حداکثر سرویس PayG برای هر کاربر روی {maximum} تنظیم شد.")
-
-    @router.message(Command("payg_enable"))
-    async def payg_enable(message: Message):
-        if db.is_full_admin(message.from_user.id):
-            db.set_setting("payg_enabled", "1")
-            await message.answer("✅ فروش Pay As You Go فعال شد.")
-
-    @router.message(Command("payg_disable"))
-    async def payg_disable(message: Message):
-        if db.is_full_admin(message.from_user.id):
-            db.set_setting("payg_enabled", "0")
-            await message.answer("⛔ فروش جدید Pay As You Go غیرفعال شد. حساب‌های فعال طبق تسویه ادامه می‌دهند.")
 
     return router
