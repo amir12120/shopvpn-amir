@@ -207,7 +207,15 @@ class QuotaReconciler:
         فقط وقتی اجرا می‌شود که استخر سقف مشخص دارد، حداقل یک عضو SSH دارد و همه‌ی
         شمارنده‌ها تازه‌اند. خطای یک پنل هیچ‌وقت enforcement را مختل نمی‌کند."""
         limit = int(pool.get("limit_bytes") or 0)
-        if limit <= 0 or len(members) < 2:
+        vpn_members = [m for m in members if m.get("service_kind") == "vpn"]
+        ssh_members = [m for m in members if m.get("service_kind") == "ssh"]
+        if limit <= 0 or not members:
+            return []
+        # یک عضو VPN تنها (حالت پرداخت به‌ازای مصرف) می‌تواند سقف استخر را به‌صورت
+        # حجم خودش روی پنل بگیرد تا پنل هم بدون وابستگی به بات کاربر را قطع کند.
+        # با چند پنل VPN (بدون SSH) «باقی‌مانده» چند بار توزیع می‌شود، پس همان حالت
+        # قبلی (فقط فعال/غیرفعال کردن) حفظ می‌شود.
+        if len(vpn_members) > 1 and not ssh_members:
             return []
         remaining = max(limit - int((usage or {}).get("used_bytes") or 0), 0)
         results = []

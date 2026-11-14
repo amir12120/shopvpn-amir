@@ -429,7 +429,13 @@ def _progressive_cost(total_bytes: int, rates: list[int]) -> int:
 
 
 def _month_key():
-    return datetime.now(ZoneInfo("Asia/Tehran")).strftime("%Y-%m")
+    """ماه مالی به وقت تهران؛ بدون tzdata هم کار می‌کند (UTC+03:30 ثابت)."""
+    try:
+        zone = ZoneInfo("Asia/Tehran")
+    except Exception:
+        from datetime import timedelta
+        zone = timezone(timedelta(hours=3, minutes=30))
+    return datetime.now(zone).strftime("%Y-%m")
 
 
 def _sync_services(db, user_id: int, pool_id: int):
@@ -692,7 +698,12 @@ def _panel_traffic_rates(db, user_id: int):
         selected = [get_target_cost(db, int(row["panel_server_id"]), str(key)) for key in keys]
         values.append(max((int(x.get("gb_rate", 0) or 0) for x in selected), default=0))
     positive = [x for x in values if x > 0]
-    return ([min(positive)] * 4 if positive else [0, 0, 0, 0]), bool(rows)
+    if positive:
+        return [min(positive)] * 4, bool(rows)
+    # No panel tariff configured: fall back to the legacy progressive tariff.
+    # Returning zeros here used to mean "unlimited and free", which is exactly
+    # how a metered service could be handed out without ever charging the wallet.
+    return list(get_rates(db)), bool(rows)
 
 
 def _pending_panel_fixed_cost(db, user_id: int) -> int:
@@ -720,9 +731,11 @@ def _affordable_payg_limit(db, user_id: int, balance: int, base_bytes: int, mont
     panel_rates, has_panel = _panel_traffic_rates(db, user_id)
     reserve = _pending_panel_fixed_cost(db, user_id) if has_panel else 0
     usable = max(0, int(balance) - reserve)
-    if has_panel and not any(panel_rates):
-        return 0 if usable > 0 or reserve == 0 else max(1, int(base_bytes))
     rates = panel_rates if has_panel else legacy_rates
+    if not any(int(x or 0) for x in rates):
+        # Without a usable tariff the only safe allowance is the settled volume:
+        # zero would mean "unlimited" in the quota API and hand out free traffic.
+        return max(1, int(base_bytes))
     if has_panel and usable <= 0:
         return max(1, int(base_bytes))
     return _affordable_limit_bytes(usable, rates, base_bytes, month_used_bytes)
@@ -751,6 +764,57 @@ def _affordable_limit_bytes(balance: int, rates: list[int], billed_base_bytes: i
     return max(base + 1, base + low)
 
 
+def _kick_quota_enforcement(db) -> None:
+    """Re-run the quota reconciler immediately, in the background.
+
+    Raising the pool limit alone only takes effect on the reconciler's next tick, and
+    the panel account stays disabled until then; a top-up has to restore the service
+    right away, so one pool pass is started here.
+    """
+    import threading
+
+    def _run():
+        try:
+            import asyncio
+            from quota_reconciler import QuotaReconciler
+            asyncio.run(QuotaReconciler(db).poll_once())
+        except Exception:
+            logger.exception("Immediate PAYG quota enforcement failed")
+
+    threading.Thread(target=_run, name="payg-enforce", daemon=True).start()
+
+
+async def _reconcile_payg_pool_now(db, pool_id: int) -> None:
+    """Apply panel limits and enable/disable state for one pool right after a change."""
+    try:
+        pool = await asyncio.to_thread(db.get_quota_pool, int(pool_id))
+        if not pool:
+            return
+        from quota_reconciler import QuotaReconciler
+        await QuotaReconciler(db).reconcile_pool(pool)
+    except Exception:
+        logger.exception("PAYG pool reconcile failed for pool=%s", pool_id)
+
+
+async def _reconcile_user_pool(db, user_id: int) -> None:
+    with db._get_conn() as conn:
+        row = conn.execute("SELECT quota_pool_id FROM payg_accounts WHERE user_id=?",
+                           (int(user_id),)).fetchone()
+    if row and row["quota_pool_id"]:
+        await _reconcile_payg_pool_now(db, int(row["quota_pool_id"]))
+
+
+async def _deliver_payg_configs(bot, db, user_id: int, links, header_text: str = "") -> bool:
+    """Deliver the metered config the same way a paid order is delivered (QR + links)."""
+    links = [link for link in (links or []) if link]
+    if not links or bot is None:
+        return False
+    from config_delivery import deliver_config_to_user
+    await deliver_config_to_user(bot, int(user_id), "Pay As You Go", links, final_price=0,
+                                 db=db, header_text=header_text or None)
+    return True
+
+
 def refresh_payg_quota(db, user_id: int):
     """Immediately rebase an active PAYG pool after a wallet top-up."""
     ensure_schema(db)
@@ -760,6 +824,9 @@ def refresh_payg_quota(db, user_id: int):
         if not account or not account["quota_pool_id"]:
             return False
         account = dict(account)
+        pool_row = conn.execute("SELECT limit_bytes,status FROM quota_pools WHERE id=?",
+                                (int(account["quota_pool_id"]),)).fetchone()
+        previous_limit = int(pool_row["limit_bytes"] or 0) if pool_row else 0
     month = _month_key()
     rates = (json.loads(account.get("month_rates") or "[]")
              if account.get("month_key") == month else get_rates(db))
@@ -773,6 +840,10 @@ def refresh_payg_quota(db, user_id: int):
         if balance > int(account.get("last_balance") or 0):
             conn.execute("UPDATE payg_accounts SET last_balance=?,initial_balance=?,last_alert_level=0,updated_at=? WHERE user_id=?",
                          (balance, balance, _now(), int(user_id)))
+    if limit > previous_limit:
+        # The pool was capped at the settled volume while the wallet was empty, so the
+        # panel account is still disabled: enforce the new allowance right away.
+        _kick_quota_enforcement(db)
     return True
 
 
@@ -897,8 +968,15 @@ class PaygEngine:
                         if service.get('panel_server_id'):
                             panel_rates = get_service_target_cost(self.db, int(service['panel_server_id']), {'value': _target_keys_from_config({'value': json.loads(service.get('target_key') or '["*"]')})})
                             gb_rate = max(0, int(panel_rates.get('gb_rate', 0) or 0))
-                            amount = ((current_bytes * gb_rate) // GIB - (previous * gb_rate) // GIB) if gb_rate else 0
-                            rate_snapshot = {"type":"traffic","gb_rate":gb_rate,"panel_id":service['panel_server_id'],"target_key":service.get('target_key')}
+                            if gb_rate:
+                                amount = ((current_bytes * gb_rate) // GIB - (previous * gb_rate) // GIB)
+                                rate_snapshot = {"type":"traffic","gb_rate":gb_rate,"panel_id":service['panel_server_id'],"target_key":service.get('target_key')}
+                            else:
+                                # The panel has no per-GB tariff: bill the delta on the legacy
+                                # progressive tariff instead of silently charging nothing.
+                                amount = max(0, _progressive_cost(before_bytes + delta, month_rates) - _progressive_cost(before_bytes, month_rates))
+                                rate_snapshot = {"type":"traffic","fallback":"legacy","rates":month_rates,
+                                                 "panel_id":service['panel_server_id'],"target_key":service.get('target_key')}
                         else:
                             amount = max(0, _progressive_cost(before_bytes + delta, month_rates) - _progressive_cost(before_bytes, month_rates))
                             rate_snapshot = month_rates
@@ -1182,7 +1260,8 @@ async def _provision_payg_multi(db, uid: int, panel_ids, node_ids, protocols) ->
         await rollback()
         raise
     return {"username": primary_username, "custom_config_id": int(primary["custom_config_id"]),
-            "subscription_url": link, "panels": len(panel_ids), "nodes": len(node_plan),
+            "subscription_url": link, "config_link": primary.get("subscription_url"),
+            "panels": len(panel_ids), "nodes": len(node_plan),
             "ssh_accounts": len(ssh_items)}
 
 
@@ -1330,6 +1409,15 @@ def create_payg_router(db, is_main_bot=True):
                                           "هیچ هزینه مصرفی برای این سرویس ثبت نشده است.")
                 return
             try:
+                try:
+                    await _reconcile_user_pool(db, uid)
+                except Exception:
+                    logger.exception("PAYG pool reconcile failed for user=%s", uid)
+                try:
+                    await _deliver_payg_configs(call.bot, db, uid, [result.get("config_link")],
+                                                header_text="🍃 سرویس پرداخت به ازای مصرف شما")
+                except Exception:
+                    logger.exception("PAYG multi-target config delivery failed for user=%s", uid)
                 safe_url = str(result["subscription_url"]).replace("&", "&amp;").replace('"', "&quot;")
                 await call.message.answer(
                     "✅ <b>سرویس Pay As You Go ساخته شد.</b>\n\n"
@@ -1440,14 +1528,24 @@ def create_payg_router(db, is_main_bot=True):
             if not enrolled.get("ok") or not member:
                 raise RuntimeError("اتصال سرویس ساخته‌شده به حساب مصرفی ناموفق بود.")
             enrolled_ok = True
-            safe_url = str(provisioned["subscription_url"]).replace("&", "&amp;").replace('"', "&quot;")
+            # Put the panel limit and enable/disable state in place before the user gets
+            # the config, so the metered service is never handed over as "unlimited".
+            try:
+                await _reconcile_user_pool(db, uid)
+            except Exception:
+                logger.exception("PAYG pool reconcile failed for user=%s", uid)
+            try:
+                await _deliver_payg_configs(call.bot, db, uid, [provisioned.get("subscription_url")],
+                                            header_text="🍃 سرویس پرداخت به ازای مصرف شما")
+            except Exception:
+                logger.exception("PAYG config delivery failed for user=%s", uid)
+                await call.message.answer("⚠️ سرویس ساخته شد ولی ارسال کانفیگ ناموفق بود؛ از «کانفیگ‌های من» یا /payg اقدام کنید.")
             await call.message.answer(
                 "✅ <b>سرویس Pay As You Go ساخته شد.</b>\n\n"
                 f"👤 نام کاربری: <code>{provisioned['username']}</code>\n"
-                "📦 حجم: پرداخت به‌ازای مصرف\n⏳ مدت: بدون انقضای ثابت\n"
-                "💳 هزینه از کیف پول تومانی شما کسر می‌شود.\n\n"
-                f"🔗 <a href=\"{safe_url}\">دریافت لینک اشتراک</a>\n\n"
-                "مصرف هر ۱۰ دقیقه محاسبه و تسویه می‌شود.", parse_mode="HTML", disable_web_page_preview=True)
+                "📦 حجم: پرداخت به‌ازای مصرف؛ سقف متناسب با موجودی کیف پول تنظیم می‌شود.\n"
+                "💳 هزینه مصرف از کیف پول تومانی کسر می‌شود و با خالی‌شدن کیف پول سرویس تا شارژ بعدی متوقف می‌شود.\n"
+                "📊 وضعیت و تاریخچه: /payg", parse_mode="HTML")
             await show(call.message, uid)
         except Exception as exc:
             logger.exception("PAYG service provisioning/notification failed for user=%s", uid)
