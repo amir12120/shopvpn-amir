@@ -685,6 +685,10 @@ class AdminWalletSet(StatesGroup):
     waiting_confirm = State()
 
 
+class AdminPurgeMissing(StatesGroup):
+    waiting_confirm = State()
+
+
 class AdminPanelServerTransfer(StatesGroup):
     waiting_price = State()
 

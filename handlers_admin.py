@@ -134,6 +134,7 @@ from states import (
     AdminBulkWalletCredit,
     AdminWalletZero,
     AdminWalletSet,
+    AdminPurgeMissing,
     AdminDeepLinkTools,
     AdminChannelButton,
     AdminAddAdmin,
@@ -1593,6 +1594,75 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
     async def cb_wallet_set_cancel(call: CallbackQuery, state: FSMContext):
         await state.clear()
         await safe_edit(call, "❌ تعیین مبلغ کیف پول لغو شد.", reply_markup=kb.admin_back_kb("adm_cat:finance"))
+        await call.answer()
+
+    # -------------------------------------------------------------------
+    # حذف کانفیگ‌هایی که دیگر روی پنل وجود ندارند (اجرای دستی از سرور و سرویس)
+    # -------------------------------------------------------------------
+    @router.callback_query(F.data == "adm_purge_missing_configs")
+    async def cb_purge_missing_configs(call: CallbackQuery, state: FSMContext):
+        if not senior_admin_only(call.from_user.id):
+            return await deny_mid(call)
+        await state.clear()
+        await call.answer("⏳ در حال خواندن فهرست کانفیگ‌های پنل…")
+        import config_audit
+        result = await config_audit.collect_audit(db)
+        missing = result["missing"]
+        inventory_panels = sum(1 for m in result["method"].values() if m == "inventory")
+        lookup_panels = sum(1 for m in result["method"].values() if m == "lookup")
+        lines = [
+            "🗑 حذف کانفیگ‌های بدون پنل",
+            "",
+            f"🔍 بررسی‌شده: {result['checked']} کانفیگ روی {result['panels']} پنل",
+            f"📋 روش تشخیص: {inventory_panels} پنل با فهرست کلاینت‌ها"
+            + (f"، {lookup_panels} پنل با پرس‌وجوی تک‌تک" if lookup_panels else ""),
+        ]
+        if result["failed"]:
+            lines.append(f"⚠️ قابل بررسی نبود (خطای پنل): {result['failed']} کانفیگ")
+        if result["offline"]:
+            lines.append("🔌 پنل در دسترس نبود (هیچ حذفی برایش انجام نشد): " + "، ".join(result["offline"]))
+        if result["suspicious"]:
+            lines.append("🛑 به‌احتیاط رد شد (هیچ کانفیگی روی پنل پیدا نشد): " + "، ".join(result["suspicious"]))
+        lines.append("")
+        if not missing:
+            await safe_edit(
+                call, "\n".join(lines + ["✅ هیچ کانفیگی بدون پنل نبود؛ چیزی برای حذف نیست."]),
+                reply_markup=kb.admin_back_kb("adm_cat:infra"),
+            )
+            return
+        lines.append(f"❌ کانفیگ‌هایی که روی پنل نیستند: {len(missing)}")
+        for item in missing[:20]:
+            lines.append(f"• {item['username']} · کاربر {item['user_id']} · {item['panel']}")
+        if len(missing) > 20:
+            lines.append(f"… و {len(missing)-20} مورد دیگر")
+        lines.append("\nبا تأیید، این کانفیگ‌ها از لیست «کانفیگ‌های من» کاربران حذف می‌شوند (حذف منطقی + تاریخچه).")
+        await state.update_data(missing=missing)
+        await state.set_state(AdminPurgeMissing.waiting_confirm)
+        await safe_edit(call, "\n".join(lines), reply_markup=kb.admin_purge_missing_configs_kb())
+
+    @router.callback_query(AdminPurgeMissing.waiting_confirm, F.data == "adm_pmc_apply")
+    async def cb_purge_missing_apply(call: CallbackQuery, state: FSMContext):
+        if not senior_admin_only(call.from_user.id):
+            return await deny_mid(call)
+        data = await state.get_data()
+        items = data.get("missing") or []
+        import config_audit
+        removed = await config_audit.apply_missing(db, items, admin_id=call.from_user.id)
+        await asyncio.to_thread(
+            db.log_admin_action, call.from_user.id, "config_audit_purge",
+            f"{removed} کانفیگ بدون پنل حذف شد (از {len(items)} مورد تأییدشده)",
+        )
+        await state.clear()
+        await safe_edit(
+            call, f"✅ {removed} کانفیگ که روی پنل وجود نداشت از حساب کاربران حذف شد.",
+            reply_markup=kb.admin_back_kb("adm_cat:infra"),
+        )
+        await call.answer()
+
+    @router.callback_query(AdminPurgeMissing.waiting_confirm, F.data == "adm_pmc_cancel")
+    async def cb_purge_missing_cancel(call: CallbackQuery, state: FSMContext):
+        await state.clear()
+        await safe_edit(call, "❌ حذف کانفیگ‌های بدون پنل لغو شد.", reply_markup=kb.admin_back_kb("adm_cat:infra"))
         await call.answer()
 
     # -------------------------------------------------------------------

@@ -500,6 +500,7 @@ EXTRA_PHRASES = {
     '🙍 فقط کاربران عادی': '🙍 Regular users only',
     '✅ اعمال کاهش': '✅ Apply reduction',
     '✅ صفر کن': '✅ Zero them',
+    '✅ حذف کن': '✅ Delete',
     '✅ ثبت مبلغ': '✅ Save amount',
     '✅ افزایش موجودی و ارسال اعلان': '✅ Increase balance and send notification',
     '🔌 تغییر پنل/اینباند': '🔌 Change panel/inbound',

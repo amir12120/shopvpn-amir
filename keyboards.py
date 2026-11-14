@@ -1845,6 +1845,7 @@ ADMIN_PANEL_ITEMS = [
     ("adm_stock_alert_settings", "📦 آستانه‌ی هشدار موجودی", "adm_stock_alert_settings"),
     ("adm_custom_config_settings", "🛠 ساخت کانفیگ شخصی", "adm_custom_config_settings"),
     ("adm_payg_settings", "💳 پرداخت به‌ازای مصرف (قیمت/خاموش-روشن)", "adm_xs_g:payg"),
+    ("adm_purge_missing_configs", "🗑 حذف کانفیگ‌های بدون پنل", "adm_purge_missing_configs"),
     ("adm_wallet_set", "💳 تعیین مبلغ کیف پول کاربر", "adm_wallet_set"),
     ("adm_wallet_zero", "🧹 صفر کردن کیف پول همه کاربران", "adm_wallet_zero"),
     ("adm_panel_servers", "🖥 مدیریت پنل‌های VPN", "adm_panel_servers"),
@@ -1969,7 +1970,7 @@ ADMIN_HUBS = [
         ("پاکسازی و اعلان", ["adm_cleanup_settings", "adm_service_alert_channel"]),
     ]),
     ("infra", "🖥 سرور و سرویس", [
-        ("پنل‌ها و نودها", ["adm_panel_servers", "adm_ssh_menu", "adm_my_volume"]),
+        ("پنل‌ها و نودها", ["adm_panel_servers", "adm_purge_missing_configs", "adm_ssh_menu", "adm_my_volume"]),
         ("ساب و لینک‌ها", ["adm_dsub", "adm_links"]),
         ("امنیت سرویس", ["adm_leak"]),
     ]),
@@ -2099,6 +2100,9 @@ def _is_item_visible(db, key: str, is_main_bot: bool) -> bool:
         return False
     if key == "adm_payg_settings":
         # پرداخت به‌ازای مصرف فقط در بات اصلی وجود دارد (مثل دکمه‌ی کاربر)
+        return is_main_bot
+    if key == "adm_purge_missing_configs":
+        # حذف کانفیگ‌های بدون پنل روی دیتابیس و پنل‌های بات اصلی اجرا می‌شود
         return is_main_bot
     if key == "adm_cfg_search":
         # جستجوی کانفیگ فعلاً فقط روی بات اصلی
@@ -3358,6 +3362,13 @@ def admin_bulk_wallet_confirm_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=tr("✅ اعمال کاهش"), callback_data="adm_bwd_confirm"),
          InlineKeyboardButton(text=tr("❌ لغو"), callback_data="adm_bwd_cancel")],
+    ])
+
+
+def admin_purge_missing_configs_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=tr("✅ حذف کن"), callback_data="adm_pmc_apply"),
+         InlineKeyboardButton(text=tr("❌ لغو"), callback_data="adm_pmc_cancel")],
     ])
 
 

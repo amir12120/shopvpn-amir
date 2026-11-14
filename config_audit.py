@@ -1,86 +1,59 @@
 # -*- coding: utf-8 -*-
-"""بررسی روزانهٔ وجود کانفیگ‌ها روی پنل (F139).
+"""حذف کانفیگ‌هایی که دیگر روی پنل وجود ندارند (F139).
 
-هر شب (پیش‌فرض: ساعت ۱۲ شب به وقت تهران) یک‌بار همهٔ کانفیگ‌های فعالی که روی
-پنل ساخته شده‌اند با خود پنل مقایسه می‌شوند؛ اگر کاربر/کلاینت دیگر روی پنل
-وجود نداشته باشد (ادمین یا خود کاربر از پنل پاکش کرده)، رکورد از لیست
-«کانفیگ‌های من» کاربر حذف می‌شود.
+روش کار (بازطراحی‌شده): به‌جای زمان‌بندی شبانه، ادمین از مسیر
+«سرور و سرویس → حذف کانفیگ‌های بدون پنل» خودش اجرا می‌کند.
 
-اصل ایمنی (مهم): حذف فقط وقتی انجام می‌شود که «اطمینان کامل» داشته باشیم پنل
-در دسترس است و کاربر واقعاً پاک شده است. برای همین:
+تشخیص «روشن بودن پنل» عوض شده است: به‌جای تست اتصال/احراز هویت، **فهرست
+واقعی کلاینت‌های پنل** خوانده می‌شود (برای 3x-ui از همان endpoint لیست
+inboundها). اگر این خواندن موفق شود، یعنی پنل روشن و قابل خواندن است و همان
+فهرست، مرجع قطعی «وجود/عدم‌وجود» هر کانفیگ است:
 
-۱) قبل از بررسی، سلامت پنل با test_connection (اتصال + احراز هویت) چک می‌شود؛
-   پنل خاموش/در دسترس نبودنِ پنل یعنی «هیچ حذفی» برای آن پنل.
-۲) هر کانفیگی که «پیدا نشد» می‌دهد بلافاصله حذف نمی‌شود؛ یک‌بار دیگر هم
-   مستقیم از پنل پرسیده می‌شود و فقط اگر بار دوم هم صریحاً نبود، حذف می‌شود.
-۳) اگر همهٔ کانفیگ‌های یک پنل (وقتی بیشتر از یکی دارند) «پیدا نشد»
-   برگردانند (پاسخ ناقص/خراب پنل)، هیچ‌چیز حذف نمی‌شود.
-۴) درست قبل از ثبت حذف، سلامت پنل دوباره چک می‌شود؛ اگر پنل در همین فاصله از
-   دسترس خارج شده باشد، حذف انجام نمی‌شود.
+- کانفیگی که نامش در فهرست پنل نیست = از پنل حذف شده → قابل حذف از حساب کاربر.
+- هر خطای شبکه/timeout/401/403 = پنل در دسترس نیست → برای آن پنل هیچ حذفی
+  انجام نمی‌شود (فقط گزارش می‌شود).
+- اگر همهٔ کانفیگ‌های یک پنل «موجود نبودند» ولی تعدادشان بیشتر از یکی است،
+  پاسخ پنل ناقص فرض می‌شود و برای احتیاط چیزی حذف نمی‌شود.
+- برای providerهایی که فهرست کلاینت ندارند، همان روش قبلی (تأیید دوبارِ
+  get_user) استفاده می‌شود و خطای ارتباطی هرگز حذف نمی‌کند.
 
-خطای شبکه، timeout، 401/403 و هر خطای نامشخص فقط «failed» شمرده می‌شود و هرگز
-باعث حذف نیست.
+حذف به‌صورت «حذف منطقی» است (status='deleted' + رکورد تاریخچه)، پس کانفیگ از
+لیست «کانفیگ‌های من» کاربر و از آمار فعال خارج می‌شود ولی گزارش‌ها می‌مانند.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 
 from panel_providers import get_provider
 
 logger = logging.getLogger(__name__)
 
-SCHEDULE = (0, 0)          # ساعت اجرا به وقت تهران: ۱۲ شب
-LAST_RUN_KEY = "config_audit_last_run"
 NOT_FOUND_MARKERS = (
     "پیدا نشد", "not found", "notfound", "not_found", "does not exist", "non-existent",
 )
+# اگر همهٔ کانفیگ‌های یک پنل «موجود نبودند» و تعدادشان از این کمتر نبود،
+# احتمالاً فهرست پنل ناقص خوانده شده است.
+SUSPICIOUS_MIN_TOTAL = 2
 
 
-def _tehran_zone():
-    try:
-        return ZoneInfo("Asia/Tehran")
-    except Exception:
-        # سرورهایی که tzdata ندارند؛ ۱۲ شب تهران = ۲۰:۳۰ UTC
-        return timezone(timedelta(hours=3, minutes=30))
-
-
-def _tehran_now():
-    return datetime.now(_tehran_zone())
-
-
-def _utc_iso():
+def _utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 def is_not_found_error(exc) -> bool:
-    """آیا خطای پنل صراحتاً یعنی «کاربر روی پنل نیست»؟
-
-    همه‌ی providerها برای کاربر ناموجود PanelError با متن «... پیدا نشد»
-    پرتاب می‌کنند (همین قرارداد در delete_user آن‌ها هم استفاده شده است).
-    هر خطای دیگری (اتصال، timeout، احراز هویت، پاسخ نامعتبر) «نامشخص» است.
-    """
+    """آیا خطای پنل صراحتاً یعنی «کاربر روی پنل نیست»؟"""
     text = str(exc or "").strip().lower()
     return any(marker in text for marker in NOT_FOUND_MARKERS)
 
 
-async def _panel_reachable(provider) -> bool:
-    """اتصال و احراز هویت پنل در همین لحظه سالم است؟ (هر خطایی = خیر)"""
-    try:
-        return bool(await provider.test_connection())
-    except Exception as exc:
-        logger.info("config-audit: پنل در دسترس نیست: %s", str(exc)[:200])
-        return False
+def supports_inventory(provider) -> bool:
+    """آیا این provider می‌تواند فهرست کلاینت‌های پنل را بدهد؟"""
+    return callable(getattr(provider, "list_client_usernames", None))
 
 
-async def _audit_panel(provider, rows):
-    """(missing, unknown)
-
-    missing = پنل دو بار پشت‌سرهم و صریح گفت وجود ندارد
-    unknown = قابل تشخیص نبود (خطای پنل) و هرگز حذف نمی‌شود
-    """
+async def _confirm_by_lookup(provider, rows):
+    """مسیر جایگزین: پرسیدن تک‌تک کلاینت‌ها با تأیید دوباره. (missing, unknown)"""
     missing, unknown = [], 0
     for row in rows:
         username = row["username"]
@@ -92,7 +65,6 @@ async def _audit_panel(provider, rows):
                 unknown += 1
                 logger.info("config-audit: بررسی %s ممکن نبود: %s", username, str(exc)[:200])
                 continue
-        # تأیید دوباره: اگر بار دوم پیدا شد یا خطای دیگری داد، چیزی حذف نمی‌شود.
         try:
             await provider.get_user(username)
             logger.warning("config-audit: %s بار اول پیدا نشد و بار دوم پیدا شد؛ حذف نشد.", username)
@@ -105,98 +77,100 @@ async def _audit_panel(provider, rows):
     return missing, unknown
 
 
-async def _notify_admins(bot, db, text: str) -> None:
-    if bot is None:
-        return
-    try:
-        import report_router
-        await report_router.report(bot, db, "service", text)
-    except Exception:
-        logger.warning("config-audit: ارسال گزارش به ادمین ناموفق بود.", exc_info=True)
+async def collect_audit(db) -> dict:
+    """بدون تغییر چیزی: کانفیگ‌های موجود روی پنل را پیدا می‌کند.
 
-
-async def audit_configs_once(bot, db, *, force: bool = False) -> dict:
-    """یک دور بررسی. force=True برای تست/اجرای دستی، بدون توجه به زمان‌بندی."""
-    now = _tehran_now()
-    today = now.date().isoformat()
-    last_run = str(await asyncio.to_thread(db.get_setting, LAST_RUN_KEY, "") or "")
-    if not force:
-        if (now.hour, now.minute) < SCHEDULE:
-            return {"skipped": "before_schedule", "checked": 0, "removed": 0, "failed": 0}
-        if last_run == today:
-            return {"skipped": "already_ran", "checked": 0, "removed": 0, "failed": 0}
-    await asyncio.to_thread(db.set_setting, LAST_RUN_KEY, today)
-
-    rows = await asyncio.to_thread(db.get_custom_configs_for_panel_audit)
+    خروجی:
+      missing     ردیف‌های {id,username,user_id,panel} که باید حذف شوند
+      checked     تعداد کانفیگ بررسی‌شده
+      failed      تعداد کانفیگی که بررسی‌شان ممکن نبود
+      offline     نام پنل‌هایی که در دسترس نبودند (هیچ حذفی برایشان انجام نشد)
+      suspicious  نام پنل‌هایی که به‌احتیاط بررسی نشدند
+    """
+    rows = await _to_thread(db.get_custom_configs_for_panel_audit)
     by_server: dict[int, list] = {}
     for row in rows:
         by_server.setdefault(int(row["panel_server_id"]), []).append(row)
 
-    checked = removed = failed = 0
+    missing: list[dict] = []
+    checked = failed = 0
     offline: list[str] = []
     suspicious: list[str] = []
+    method: dict[str, str] = {}
+
     for server_id, items in by_server.items():
-        server = await asyncio.to_thread(db.get_panel_server, server_id)
+        server = await _to_thread(db.get_panel_server, server_id)
         if not server or not server["is_active"]:
             continue
+        name = str(server["name"])
         try:
             provider = get_provider(server)
-        except Exception:
-            logger.exception("config-audit: ساخت provider برای پنل #%s ناموفق بود", server_id)
-            offline.append(str(server["name"]))
-            continue
-        if not await _panel_reachable(provider):
-            offline.append(str(server["name"]))
-            logger.warning(
-                "config-audit: پنل «%s» در دسترس نیست؛ %s کانفیگ آن بررسی و حذف نشد.",
-                server["name"], len(items),
-            )
+        except Exception as exc:
+            logger.warning("config-audit: ساخت provider پنل «%s» ناموفق بود: %s", name, str(exc)[:200])
+            offline.append(name)
             continue
 
-        missing, unknown = await _audit_panel(provider, items)
+        if supports_inventory(provider):
+            # خواندن فهرست کلاینت‌ها هم‌زمان «تست روشن بودن پنل» است: اگر این
+            # درخواست شکست بخورد یعنی پنل در دسترس نیست و هیچ حذفی نمی‌کنیم.
+            try:
+                names = await provider.list_client_usernames()
+            except Exception as exc:
+                logger.warning("config-audit: فهرست کلاینت‌های پنل «%s» خوانده نشد: %s",
+                               name, str(exc)[:200])
+                offline.append(name)
+                continue
+            inventory = {str(n) for n in (names or ())}
+            missing_rows = [r for r in items if str(r["username"]) not in inventory]
+            unknown = 0
+            method[name] = "inventory"
+            logger.info("config-audit: پنل «%s» فهرست %s کلاینت را داد؛ %s کانفیگ موجود نیست.",
+                        name, len(inventory), len(missing_rows))
+        else:
+            missing_rows, unknown = await _confirm_by_lookup(provider, items)
+            method[name] = "lookup"
         checked += len(items)
         failed += unknown
-        if not missing:
+
+        if not missing_rows:
             continue
-        if len(missing) == len(items) and len(items) >= 2:
-            suspicious.append(str(server["name"]))
+        if len(missing_rows) == len(items) and len(items) >= SUSPICIOUS_MIN_TOTAL:
+            suspicious.append(name)
             logger.warning(
-                "config-audit: هیچ‌کدام از %s کانفیگ پنل «%s» روی پنل پیدا نشد؛ برای احتیاط چیزی حذف نشد.",
-                len(items), server["name"],
+                "config-audit: همهٔ %s کانفیگ پنل «%s» موجود نبودند؛ برای احتیاط چیزی حذف نشد.",
+                len(items), name,
             )
             continue
-        # آخرین دروازه: اگر پنل در همین فاصله از دسترس خارج شده، حذف نکن.
-        if not await _panel_reachable(provider):
-            offline.append(str(server["name"]))
-            logger.warning(
-                "config-audit: پنل «%s» حین بررسی قطع شد؛ %s کانفیگ ناموجود حذف نشد.",
-                server["name"], len(missing),
-            )
+        for row in missing_rows:
+            missing.append({
+                "id": int(row["id"]), "username": row["username"],
+                "user_id": row["user_id"], "panel": name,
+            })
+
+    return {
+        "missing": missing, "checked": checked, "failed": failed,
+        "offline": offline, "suspicious": suspicious, "method": method,
+        "panels": len(by_server), "run_at": _utc_iso(),
+    }
+
+
+async def apply_missing(db, items: list, admin_id=None) -> int:
+    """حذف منطقی کانفیگ‌های تأییدشده از حساب کاربر؛ تعداد حذف‌شده."""
+    removed = 0
+    for item in items or []:
+        config_id = int(item["id"])
+        if not await _to_thread(db.mark_custom_config_removed_from_panel, config_id):
             continue
+        removed += 1
+        detail = "F139: این کاربر/کلاینت روی پنل وجود نداشت و از لیست کانفیگ‌های کاربر حذف شد"
+        if admin_id:
+            detail += f" (اجرای دستی ادمین {admin_id})"
+        await _to_thread(db.add_custom_config_history, config_id, "removed_from_panel", detail)
+        logger.info("config-audit: کانفیگ #%s (%s) از پنل «%s» نبود و حذف شد",
+                    config_id, item.get("username"), item.get("panel"))
+    return removed
 
-        for row in missing:
-            if await asyncio.to_thread(db.mark_custom_config_removed_from_panel, int(row["id"])):
-                removed += 1
-                await asyncio.to_thread(
-                    db.add_custom_config_history, int(row["id"]), "removed_from_panel",
-                    "F139: این کاربر/کلاینت روی پنل وجود نداشت و از لیست کانفیگ‌های کاربر حذف شد",
-                )
-                logger.info("config-audit: کانفیگ #%s (%s) روی پنل نبود و از لیست حذف شد",
-                            row["id"], row["username"])
 
-    if removed or suspicious or offline or failed:
-        lines = ["🧾 F139 — بررسی روزانهٔ کانفیگ‌های حذف‌شده از پنل", ""]
-        lines.append(f"🔍 بررسی‌شده: {checked} کانفیگ روی {len(by_server)} پنل")
-        lines.append(f"🗑 حذف‌شده از لیست کاربران: {removed}")
-        if failed:
-            lines.append(f"⚠️ قابل بررسی نبود (خطای پنل): {failed}")
-        if offline:
-            lines.append("🔌 پنل در دسترس نبود و بررسی نشد (هیچ حذفی انجام نشد): "
-                         + "، ".join(offline))
-        if suspicious:
-            lines.append("🛑 برای احتیاط چیزی از این پنل‌ها حذف نشد (هیچ کانفیگی روی پنل پیدا نشد): "
-                         + "، ".join(suspicious))
-        await _notify_admins(bot, db, "\n".join(lines))
-
-    return {"skipped": None, "checked": checked, "removed": removed, "failed": failed,
-            "offline": offline, "suspicious": suspicious, "run_at": _utc_iso()}
+async def _to_thread(fn, *args):
+    import asyncio
+    return await asyncio.to_thread(fn, *args)

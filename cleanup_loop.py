@@ -350,13 +350,8 @@ async def cleanup_loop(bot: Bot, db, interval: int = 3600):
             raise
         except Exception:
             logger.exception("خطا در حلقه F14 cleanup")
-        try:
-            import config_audit
-            await config_audit.audit_configs_once(bot, db)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("خطا در بررسی روزانهٔ کانفیگ‌های حذف‌شده از پنل (F139)")
+        # بررسی «کانفیگ‌های بدون پنل» عمداً زمان‌بندی ندارد و از دکمهٔ
+        # «سرور و سرویس → حذف کانفیگ‌های بدون پنل» به‌صورت دستی اجرا می‌شود.
         try:
             await expire_stale_discount_orders_once(bot, db)
         except asyncio.CancelledError:

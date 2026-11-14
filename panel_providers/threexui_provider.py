@@ -290,6 +290,39 @@ class ThreeXUIProvider(BasePanelProvider):
                     return PanelUserResult(username=username, subscription_url=sub_url, raw=client)
         raise PanelError(f"کاربری با نام «{username}» روی پنل پیدا نشد.")
 
+    async def list_client_usernames(self):
+        """email همهٔ کلاینت‌های پنل (همهٔ inboundها، فعال یا غیرفعال).
+
+        برای بررسی «کانفیگ‌هایی که از پنل حذف شده‌اند» استفاده می‌شود: اگر این
+        متد خطا بدهد یعنی پنل در دسترس نیست و هیچ تصمیم حذفی نباید گرفته شود
+        (caller باید خطای PanelError را گرفته و آن پنل را رد کند).
+        """
+        async with self._session() as session:
+            try:
+                async with session.get(f"{self._base_url()}/panel/api/inbounds/list") as resp:
+                    if resp.status in (401, 403):
+                        raise PanelError(f"خطا در احراز هویت (کد {resp.status}): API Token را بررسی کن.")
+                    if resp.status >= 400:
+                        text = await resp.text()
+                        raise PanelError(f"خطا در دریافت لیست inbound (کد {resp.status}): {text[:300]}")
+                    data = await resp.json()
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                raise PanelError(f"خطا در اتصال به پنل: {e or 'پاسخی از سرور در زمان مقرر دریافت نشد (timeout)'}") from e
+        if data.get("success") is False:
+            raise PanelError(data.get("msg") or "دریافت فهرست کلاینت‌های پنل ناموفق بود.")
+        names = set()
+        for ib in (data.get("obj") or []):
+            settings_raw = ib.get("settings")
+            try:
+                settings = json.loads(settings_raw) if isinstance(settings_raw, str) else (settings_raw or {})
+            except (ValueError, TypeError):
+                continue
+            for client in (settings.get("clients") or []):
+                email = client.get("email")
+                if email:
+                    names.add(str(email))
+        return names
+
     async def find_username_by_sub_id(self, sub_id: str):
         """email کلاینتی که subId آن برابر sub_id است (یا None)."""
         async with self._session() as session:
