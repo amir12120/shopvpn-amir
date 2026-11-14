@@ -25,17 +25,32 @@ USER_ID = 7701
 
 
 class FakeProvider:
-    """get_user فقط برای نام‌هایی که روی «پنل» هستن��د موفق است."""
+    """get_user فقط برای نام‌هایی که روی «پنل» هستند موفق است."""
 
-    def __init__(self, existing, error=None):
+    def __init__(self, existing, error=None, up=True, health_results=None, fail_once=()):
         self.existing = set(existing)
         self.error = error
+        self.up = up
+        self.health_results = list(health_results or [])
+        self.fail_once = set(fail_once)
         self.checked = []
+        self.health_checks = 0
+
+    async def test_connection(self):
+        self.health_checks += 1
+        if self.health_results:
+            return self.health_results.pop(0)
+        return self.up
 
     async def get_user(self, username):
         self.checked.append(username)
+        if not self.up:
+            raise PanelError("خطا در اتصال به پنل: Cannot connect to host")
         if self.error:
             raise self.error
+        if username in self.fail_once:
+            self.fail_once.discard(username)
+            raise PanelError(f"کاربری با نام «{username}» روی پنل پیدا نشد.")
         if username not in self.existing:
             raise PanelError(f"کاربری با نام «{username}» روی پنل پیدا نشد.")
         return mock.Mock(username=username, subscription_url="http://sub/" + username)
@@ -97,6 +112,34 @@ class ConfigAuditTest(unittest.TestCase):
         self.assertEqual(result["removed"], 0)
         self.assertEqual(result["failed"], 2)
         self.assertEqual(len(self._visible_configs()), 2)
+
+    def test_unreachable_panel_deletes_nothing(self):
+        ids = [self._config("a"), self._config("b")]
+        self.provider.up = False
+        result = self._run(force=True)
+        self.assertEqual(result["removed"], 0)
+        self.assertEqual(result["offline"], ["Panel A"])
+        self.assertEqual(result["checked"], 0)
+        for cid in ids:
+            self.assertEqual(self._status(cid)["status"], "active")
+
+    def test_flaky_not_found_is_rechecked_before_deleting(self):
+        cid = self._config("flaky")
+        self.provider.existing = {"flaky"}
+        self.provider.fail_once = {"flaky"}
+        result = self._run(force=True)
+        self.assertEqual(result["removed"], 0)
+        self.assertEqual(self._status(cid)["status"], "active")
+
+    def test_panel_going_down_mid_audit_deletes_nothing(self):
+        cid = self._config("gone")
+        self._config("stays")
+        self.provider.existing = {"stays"}
+        self.provider.health_results = [True, False]
+        result = self._run(force=True)
+        self.assertEqual(result["removed"], 0)
+        self.assertEqual(result["offline"], ["Panel A"])
+        self.assertEqual(self._status(cid)["status"], "active")
 
     def test_all_configs_missing_looks_like_a_broken_panel_response(self):
         ids = [self._config(f"u{i}") for i in range(5)]
