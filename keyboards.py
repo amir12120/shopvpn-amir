@@ -1844,6 +1844,7 @@ ADMIN_PANEL_ITEMS = [
     ("adm_early_renewal_discount", "🎁 تخفیف تمدید کامل زودهنگام", "adm_early_renewal_discount"),
     ("adm_stock_alert_settings", "📦 آستانه‌ی هشدار موجودی", "adm_stock_alert_settings"),
     ("adm_custom_config_settings", "🛠 ساخت کانفیگ شخصی", "adm_custom_config_settings"),
+    ("adm_payg_settings", "💳 پرداخت به‌ازای مصرف (قیمت/خاموش-روشن)", "adm_xs_g:payg"),
     ("adm_panel_servers", "🖥 مدیریت پنل‌های VPN", "adm_panel_servers"),
     ("adm_ssh_menu", "🔐 مدیریت SSH و سهمیه", "adm_ssh_menu"),
     ("adm_renewal_pricing", "💳 قیمت‌گذاری تمدید حجم/زمان", "adm_renewal_pricing"),
@@ -1937,7 +1938,7 @@ ADMIN_HUBS = [
             "adm_categories", "adm_products", "adm_add_configs", "adm_random_cfg",
             "adm_test_menu", "adm_custom_config_settings", "adm_renewal_pricing",
         ]),
-        ("قیمت و تخفیف", ["adm_discounts_menu"]),
+        ("قیمت و تخفیف", ["adm_discounts_menu", "adm_payg_settings"]),
         ("موجودی و تحویل", ["adm_stock_alert_settings", "adm_delivery_settings"]),
     ]),
     ("finance", "💰 پرداخت و کیف پول", [
@@ -2022,6 +2023,7 @@ ADMIN_PANEL_CATEGORIES = [
 ADMIN_CATEGORY_ALIASES = {"daily": "products", "access": "management"}
 
 ADMIN_XS_GROUP_ITEMS = {
+    "payg": "adm_payg_settings",
     "card_to_card_ui": "adm_card_ui",
     "ai_general": "adm_xs_ai_general",
     "support_texts": "adm_xs_support_texts",
@@ -2090,6 +2092,9 @@ def _is_item_visible(db, key: str, is_main_bot: bool) -> bool:
         return (not is_main_bot) and _is_volume_credit_owner(db)
     if key.startswith(("adm_set_xgw_", "adm_xgw_pay_")) and not is_main_bot:
         return False
+    if key == "adm_payg_settings":
+        # پرداخت به‌ازای مصرف فقط در بات اصلی وجود دارد (مثل دکمه‌ی کاربر)
+        return is_main_bot
     if key == "adm_cfg_search":
         # جستجوی کانفیگ فعلاً فقط روی بات اصلی
         return is_main_bot

@@ -403,13 +403,20 @@ def calculate_target_cost(used_bytes: int, active_days: int, user_capacity: int,
             "total": traffic_cost + day_cost + user_cost, "new_users": new_users}
 
 def get_rates(db):
+    """تعرفه‌ی هر گیگ (پله‌ای). فرم ادمین بات یک عدد ساده ذخیره می‌کند و پنل وب
+    لیست JSON چهارپله‌ای؛ هر دو پشتیبانی می‌شوند."""
+    raw = db.get_setting("payg_rates", json.dumps(DEFAULT_RATES))
     try:
-        rates = json.loads(db.get_setting("payg_rates", json.dumps(DEFAULT_RATES)))
-        if not isinstance(rates, list) or len(rates) != 4:
-            raise ValueError
-        rates = [max(1, int(x)) for x in rates]
-        return rates
-    except Exception:
+        rates = json.loads(raw)
+    except (TypeError, ValueError):
+        rates = raw
+    if isinstance(rates, (int, float)):
+        rates = [rates] * 4
+    if not isinstance(rates, list) or len(rates) != 4:
+        return list(DEFAULT_RATES)
+    try:
+        return [max(1, int(x)) for x in rates]
+    except (TypeError, ValueError):
         return list(DEFAULT_RATES)
 
 
