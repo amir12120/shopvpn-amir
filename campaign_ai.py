@@ -396,7 +396,6 @@ async def generate_campaigns(db, goal: str = "", count: int = 3, facts: dict = N
             return variants, facts
         last_error = ValueError("هیچ‌کدام از نسخه‌های AI معتبر نبود.")
     raise last_error
-#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 # 		   		 		  	 	 		 		   		  	 	 		 			  		 				 			  	 
 
 

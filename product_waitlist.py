@@ -1,4 +1,3 @@
-#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 import asyncio
 import logging
 
@@ -9,7 +8,6 @@ SEND_DELAY = 0.05
 
 def available_markup(product_id: int, button_text: str) -> dict:
     return {"inline_keyboard": [[{"text": button_text, "callback_data": f"prod:{product_id}"}]]}
-#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 
 
 async def notify_waitlist(db, product_id: int, send) -> int:
@@ -60,5 +58,4 @@ def token_sender(send_message, bot_token: str):
         return await send_message(bot_token, user_id, text, reply_markup=markup)
 
     return send
-#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 # 		   		 		  	 	 		 		   		  	 	 		 			  		 				 			  	 

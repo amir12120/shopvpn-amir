@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 """
 نقشه‌ی پس‌زمینه‌ی «نقشه‌ی جهانی سرورها»ی داشبورد.
 
@@ -46,7 +45,6 @@ def _get_lock() -> asyncio.Lock:
     if _fetch_lock is None:
         _fetch_lock = asyncio.Lock()
     return _fetch_lock
-#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 
 
 # ------------------------------------------------------------- projection --
@@ -236,7 +234,6 @@ async def get_world_map(force_refresh: bool = False) -> dict:
         _mem_cache = result
         _save_disk_cache(result)
         return result
-#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 # 		   		 		  	 	 		 		   		  	 	 		 			  		 				 			  	 
 
 

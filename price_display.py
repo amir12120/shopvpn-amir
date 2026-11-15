@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 """نمایش قیمت تخفیف‌دار محصول (فقط نمایشی).
 
 compare_price = قیمت قبل از تخفیف. اگر از قیمت فعلی بزرگ‌تر باشد، در ربات
@@ -33,7 +32,6 @@ def strike(text: str) -> str:
         else:
             out.append(ch)
     return "".join(out)
-#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 
 
 def compare_price_for(product, unit_price: int = None) -> int:
@@ -98,5 +96,4 @@ def price_label_button(product, unit_price: int = None, name: str = "") -> str:
         return price_range(old, price, "ت")
     return _rtl(f"{_ltr(new_s)}ت ({_ltr(str(_percent(old, price)) + '٪')} تخفیف)")
 
-#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 # 		   		 		  	 	 		 		   		  	 	 		 			  		 				 			  	 

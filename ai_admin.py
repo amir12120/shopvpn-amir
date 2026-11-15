@@ -299,7 +299,6 @@ def _fit(result):
         if len(json.dumps(shrunk, ensure_ascii=False, default=str)) <= _TOOL_RESULT_CHARS:
             return shrunk
     return {"error": "نتیجه خیلی بزرگ است؛ بازه یا تعداد را کوچک‌تر کن."}
-#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 
 
 def _valid_date(value):

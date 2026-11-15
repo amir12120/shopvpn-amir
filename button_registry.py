@@ -253,7 +253,6 @@ def build_registry(db) -> dict:
 
     categories = [{"key": c[0], "label": c[1]} for c in kb.ADMIN_PANEL_CATEGORIES]
     return {"groups": groups, "style_options": _style_options(), "admin_categories": categories}
-#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 
 
 def _group_valid_keys(db, group: str):

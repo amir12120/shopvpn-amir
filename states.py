@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 from aiogram.fsm.state import State, StatesGroup
 
 
@@ -44,6 +43,7 @@ class ContactFlow(StatesGroup):
 class TicketFlow(StatesGroup):
     waiting_department = State()
     waiting_service = State()
+    waiting_priority = State()
     waiting_subject = State()
     waiting_message = State()
 
@@ -176,6 +176,7 @@ class AdminAddProduct(StatesGroup):
     waiting_base_users = State()
     waiting_user_extra_price = State()
     waiting_user_max = State()
+    waiting_start_mode = State()
     waiting_renew_rules = State()
     waiting_payment_methods = State()
 
@@ -211,6 +212,7 @@ class AdminCleanupSettings(StatesGroup):
     waiting_test_days = State()
     waiting_warning_days = State()
     waiting_inactive_time = State()
+    waiting_interval_hours = State()
 
 
 class AdminForceJoin(StatesGroup):
@@ -232,6 +234,10 @@ class AdminEditButton(StatesGroup):
 class AdminSetCard(StatesGroup):
     waiting_number = State()
     waiting_holder = State()
+    waiting_bank = State()
+    waiting_photo = State()
+    waiting_edit_bank = State()
+    waiting_edit_photo = State()
     waiting_autodelete_custom = State()
 
 
@@ -269,6 +275,8 @@ class AdminCustomMenuButton(StatesGroup):
 class AdminPayCard(StatesGroup):
     waiting_number = State()
     waiting_holder = State()
+    waiting_bank = State()
+    waiting_edit_bank = State()
     waiting_weight = State()
     waiting_edit_weight = State()
     waiting_photo = State()
@@ -429,7 +437,6 @@ class AdminReferralPercent(StatesGroup):
 
 class AdminReferralMultilevel(StatesGroup):
     waiting_value = State()
-#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 
 class AdminReferralCommissionMax(StatesGroup):
     waiting_value = State()
@@ -890,7 +897,6 @@ class AdminLinksInput(StatesGroup):
 
 class AdminAIChat(StatesGroup):
     chatting = State()
-#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 # 		   		 		  	 	 		 		   		  	 	 		 			  		 				 			  	 
 
 

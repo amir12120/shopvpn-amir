@@ -21,6 +21,8 @@ from starlette.middleware.gzip import GZipMiddleware
 from asset_versioning import ApiNoStoreMiddleware, static_version
 from i18n import normalize_language, reset_language, set_language
 from miniapp import server as core
+from web_store import customize as wcustom
+from web_store import maintenance_page
 from web_store.routes import router as web_router
 
 log = logging.getLogger("web_store")
@@ -80,6 +82,12 @@ SCENE_MODES = {
     "waves": ([], ["scene-extra.js"]),
 }
 DEFAULT_SCENE_MODE = "cinema"
+# فاوآیکون پیش‌فرض (SVG درون‌خطی)؛ اگر ادمین آدرس HTTPS تنظیم کند جایگزین می‌شود.
+DEFAULT_FAVICON = (
+    "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E"
+    "%3Crect width='64' height='64' rx='16' fill='%23070A1A'/%3E"
+    "%3Cpath d='M12 44C24 12 40 52 52 20' fill='none' stroke='%2335E6CB' stroke-width='6' stroke-linecap='round'/%3E%3C/svg%3E"
+)
 
 
 def _scene_settings(request: Request) -> dict:
@@ -164,6 +172,25 @@ async def _security_headers(request: Request, call_next):
     return response
 
 
+_MAINT_DEFAULT_MSG = "فروشگاه موقتاً در حال بروزرسانی است؛ ثبت سفارش جدید فعلاً امکان‌پذیر نیست. لطفاً کمی بعد دوباره تلاش کنید."
+
+
+@app.middleware("http")
+async def _maintenance_guard(request: Request, call_next):
+    """حالت تعمیرات فروشگاه وب: فقط ثبت سفارش/فاکتور/تمدید رد می‌شود؛ بقیه‌ی سایت باز می‌ماند."""
+    if wcustom.is_blocked_in_maintenance(request.method, request.url.path):
+        try:
+            msg = wcustom.maintenance_message(lambda k, d="": core.main_db.get_setting(k, d))
+        except Exception:
+            log.exception("خواندن حالت تعمیرات ناموفق بود؛ درخواست رد نمی‌شود")
+            msg = ""
+        if msg:
+            text = core.tr(_MAINT_DEFAULT_MSG) if msg == "__default__" else msg
+            return JSONResponse({"detail": text, "code": "maintenance"}, status_code=503,
+                                headers={"Cache-Control": "no-store", "Retry-After": "600"})
+    return await call_next(request)
+
+
 @app.middleware("http")
 async def _request_language(request: Request, call_next):
     language = normalize_language(request.headers.get("x-language") or request.headers.get("accept-language"))
@@ -189,6 +216,16 @@ def healthz():
 
 
 def _render_index(lang: str, request: Request) -> HTMLResponse:
+    # حالت تعمیرات: صفحه‌ی «در حال ساخت‌وساز». با ?live=1 مدیر می‌تواند خودِ فروشگاه را ببیند.
+    if request.query_params.get("live") != "1":
+        try:
+            maint = wcustom.maintenance_message(lambda k, d="": core.main_db.get_setting(k, d))
+        except Exception:
+            log.exception("خواندن حالت تعمیرات ناموفق بود؛ صفحه‌ی عادی")
+            maint = ""
+        if maint:
+            return HTMLResponse(maintenance_page.render(lang, maint), status_code=503,
+                                headers={"Cache-Control": "no-store", "Retry-After": "600"})
     meta = PAGE_META[lang]
     base = os.getenv("SHOPVPN_SEO_SITE_URL", "").strip().rstrip("/")
     if not base:
@@ -196,17 +233,30 @@ def _render_index(lang: str, request: Request) -> HTMLResponse:
         host = request.headers.get("x-forwarded-host", "").split(",")[0].strip() or request.headers.get("host", "")
         base = f"{proto}://{host}".rstrip("/")
     canonical = base + ("/" if lang == "fa" else "/en/")
+    seo_title = seo_desc = ""
+    if lang == "fa":  # عنوان/توضیح سئو فقط برای صفحه‌ی فارسی؛ صفحه‌ی انگلیسی همان پیش‌فرض می‌ماند
+        try:
+            seo_title = (core.main_db.get_setting("web_store_seo_title", "") or "").strip()[:120]
+            seo_desc = (core.main_db.get_setting("web_store_seo_description", "") or "").strip()[:300]
+        except Exception:
+            log.exception("خواندن تنظیم سئوی فروشگاه وب ناموفق بود")
     page = INDEX_FILE.read_text(encoding="utf-8")
+    try:
+        head = wcustom.head_assets(lambda k, d="": core.main_db.get_setting(k, d))
+    except Exception:
+        log.exception("خواندن فاوآیکون/تصویر اشتراک‌گذاری ناموفق بود؛ پیش‌فرض")
+        head = {"favicon": "", "og_image": ""}
     asset_ver = static_version(str(STATIC_DIR / "assets"))
     values = {
         "LANG": meta["lang"],
         "DIR": meta["dir"],
-        "TITLE": html_lib.escape(meta["title"]),
-        "DESC": html_lib.escape(meta["desc"], quote=True),
+        "TITLE": html_lib.escape(seo_title or meta["title"]),
+        "DESC": html_lib.escape(seo_desc or meta["desc"], quote=True),
         "CANON": html_lib.escape(canonical),
         "ALT_FA": html_lib.escape(base + "/"),
         "ALT_EN": html_lib.escape(base + "/en/"),
-        "OG_IMAGE": html_lib.escape(base + "/assets/og-image.png"),
+        "OG_IMAGE": html_lib.escape(head["og_image"] or (base + "/assets/og-image.png"), quote=True),
+        "FAVICON": html_lib.escape(head["favicon"], quote=True) if head["favicon"] else DEFAULT_FAVICON,
         "ASSET_VERSION": html_lib.escape(asset_ver),
     }
     try:

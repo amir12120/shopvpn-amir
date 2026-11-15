@@ -166,6 +166,15 @@ UPSTREAM_FEATURE_MODULES = (
     "accounting.py",
     "home_tiles.py",
     "web_assistant.py",
+    # --- upstream 9.6.0: hidden web entry path, slash-command registry, ledger,
+    # --- web-store customization/maintenance, per-product start mode ---
+    "web_entry_gate.py",
+    "admin_panel/entry_path_cli.py",
+    "admin_panel/telegram_notify.py",
+    "bot_commands.py",
+    "gear_svg.py",
+    "web_store/customize.py",
+    "web_store/maintenance_page.py",
 )
 
 # Upstream keeps re-uploading these with a module-level `from i18n import tr`
@@ -1411,3 +1420,71 @@ def test_custom_menu_accounting_home_tiles_and_web_2fa_are_wired():
     assert "refresh_session_token(" in server
     assert "def set_web_admin_totp_pending(" in system_db
     assert "def consume_web_admin_backup_code(" in system_db
+    # Upstream 9.6.0: hidden web-panel entry path (gate + CLI behind it).
+    assert "import web_entry_gate" in server
+    assert '@app.get("/api/security/entry-path")' in server
+    assert '@app.post("/api/security/entry-path")' in server
+    gate = (ROOT / "web_entry_gate.py").read_text(encoding="utf-8")
+    assert "def validate_slug(" in gate
+    assert "def with_entry_path(" in gate
+    entry_cli = (ROOT / "admin_panel/entry_path_cli.py").read_text(encoding="utf-8")
+    assert "web_entry_gate" in entry_cli and "--set" in entry_cli
+    assert "import web_entry_gate" in (ROOT / "admin_links.py").read_text(encoding="utf-8")
+
+    # Central slash-command registry drives set_my_commands for users and admins.
+    bot_manager = (ROOT / "bot_manager.py").read_text(encoding="utf-8")
+    assert "import bot_commands" in bot_manager
+    assert "bot_commands.schedule_sync(" in bot_manager
+    commands = (ROOT / "bot_commands.py").read_text(encoding="utf-8")
+    assert "def schedule_sync(" in commands
+    assert "USER_COMMANDS" in commands and "ADMIN_COMMANDS" in commands
+    assert "BotCommandScopeChat" in commands
+
+    # Accounting ledger: entries CRUD + summary/CSV behind the web panel API.
+    assert '@app.post("/api/accounting/ledger/entries")' in server
+    assert '@app.get("/api/accounting/ledger/summary")' in server
+    assert "def ledger_summary(" in accounting
+    assert "def export_ledger_csv(" in accounting
+    assert "def create_ledger_entry(" in accounting
+
+    # Web-store customization + maintenance page, both without a heavy dependency.
+    store_routes = (ROOT / "web_store/routes.py").read_text(encoding="utf-8")
+    assert "from web_store import customize as wcustom" in store_routes
+    store_server = (ROOT / "web_store/server.py").read_text(encoding="utf-8")
+    assert "from web_store import maintenance_page" in store_server
+    maint = (ROOT / "web_store/maintenance_page.py").read_text(encoding="utf-8")
+    assert "from gear_svg import gear_path" in maint
+    assert "def render(" in maint
+    assert "def gear_path(" in (ROOT / "gear_svg.py").read_text(encoding="utf-8")
+    custom = (ROOT / "web_store/customize.py").read_text(encoding="utf-8")
+    assert "def safe_link(" in custom
+    assert "def is_blocked_in_maintenance(" in custom
+    assert "def build_custom_payload(" in custom
+    assert "wcustom.build_custom_payload(" in store_routes
+    assert "wcustom.is_blocked_in_maintenance(" in store_server
+
+    # Web panel can notify users through the raw Bot API when it acts alone.
+    assert "from admin_panel.telegram_notify import (" in server
+    notify = (ROOT / "admin_panel/telegram_notify.py").read_text(encoding="utf-8")
+    assert "async def copy_message(" in notify
+
+    # Cleanup report: interval setting, one announcement per run, dry-run supported.
+    cleanup = (ROOT / "cleanup_loop.py").read_text(encoding="utf-8")
+    assert "def _cleanup_due(" in cleanup
+    assert "def cleanup_once(" in cleanup
+    assert "adm_cleanup_interval" in handlers_admin
+    assert "adm_cleanup_report_toggle" in handlers_admin
+
+    # Per-product start mode (purchase vs first connection).
+    provision = (ROOT / "direct_panel_provision.py").read_text(encoding="utf-8")
+    assert "def product_first_use(" in provision
+    assert "start_on_first_use" in (ROOT / "db/_base.py").read_text(encoding="utf-8")
+    assert "adm_prod_setstart" in handlers_admin
+
+    # Ticket priority + group-topic ticket buttons are reachable from the bot.
+    router = (ROOT / "report_router.py").read_text(encoding="utf-8")
+    assert "def ticket_group_kb(" in router
+    assert "def handle_group_ticket_callback(" in router
+    assert "def notify_ticket_raw(" in router
+    assert "def ticket_priority_buttons(" in keyboards
+    assert "ticket_priority" in (ROOT / "db/tickets.py").read_text(encoding="utf-8")

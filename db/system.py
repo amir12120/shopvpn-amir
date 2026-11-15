@@ -2159,5 +2159,4 @@ class SystemMixin:
         with self._get_conn() as conn:
             conn.execute("DELETE FROM channel_posts WHERE id=?", (post_id,))
 
-#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 # 		   		 		  	 	 		 		   		  	 	 		 			  		 				 			  	 

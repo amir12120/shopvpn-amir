@@ -17,7 +17,6 @@ import channel_ai
 import jarvis_guide
 import post_image
 from i18n import tr
-#‍​‌‌​​​‌‌​‌‌​​‌​‌​‌‌​‌‌​​​‌‌​​‌​‌​‌‌​‌‌‌​​‌‌​‌‌‌‌​‌‌‌​​‌​‍
 from states import AdminCampaign, AdminChannelAI, AdminChannelPost
 
 _log = logging.getLogger("admin_campaign")
