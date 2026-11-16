@@ -175,6 +175,9 @@ UPSTREAM_FEATURE_MODULES = (
     "gear_svg.py",
     "web_store/customize.py",
     "web_store/maintenance_page.py",
+    # --- upstream 9.7.0: Doctor DNS panel type, license source offer ---
+    "panel_providers/doctordns_provider.py",
+    "source_offer.py",
 )
 
 # Upstream keeps re-uploading these with a module-level `from i18n import tr`
@@ -1488,3 +1491,50 @@ def test_custom_menu_accounting_home_tiles_and_web_2fa_are_wired():
     assert "def notify_ticket_raw(" in router
     assert "def ticket_priority_buttons(" in keyboards
     assert "ticket_priority" in (ROOT / "db/tickets.py").read_text(encoding="utf-8")
+
+def test_doctor_dns_and_source_offer_stay_wired():
+    """Doctor DNS panel type and the license `/source` offer reach real code paths."""
+    providers = (ROOT / "panel_providers/__init__.py").read_text(encoding="utf-8")
+    assert "from .doctordns_provider import DoctorDNSProvider" in providers
+    assert '"doctordns": DoctorDNSProvider' in providers
+    assert '"doctordns": "doctordns"' in providers  # token-only, no template
+
+    # The bot offers the panel type, and the panel type list matches the provider map.
+    assert "adm_panel_type:doctordns" in (ROOT / "keyboards.py").read_text(encoding="utf-8")
+    miniapp_js = (ROOT / "miniapp/static/app.js").read_text(encoding="utf-8")
+    assert "doctordns" in miniapp_js
+    admin_js = (ROOT / "admin_panel/static/app.js").read_text(encoding="utf-8")
+    assert "'doctordns', 'Doctor DNS'" in admin_js
+
+    # DNS addresses and WireGuard files are delivered through the dedicated-sub page
+    # and through order delivery, not just declared in the provider.
+    dedicated = (ROOT / "dedicated_sub.py").read_text(encoding="utf-8")
+    assert "def dns_for_page(" in dedicated
+    assert "DNS_DSUB_WARNING" in dedicated
+    sub_server = (ROOT / "sub_server/server.py").read_text(encoding="utf-8")
+    assert "async def _dns_bundle(" in sub_server
+    assert "get_dns_bundle" in sub_server
+    assert "get_dns_bundle" in (ROOT / "delivery_extras.py").read_text(encoding="utf-8")
+    assert "dnssec" in (ROOT / "sub_server/sub_page.html").read_text(encoding="utf-8")
+
+    # LICENSE section 6 source offer: bot command, mini app and web store routes.
+    handlers_user = (ROOT / "handlers_user.py").read_text(encoding="utf-8")
+    assert 'Command("source")' in handlers_user
+    assert "source_offer.build_text" in handlers_user
+    assert '"source"' in (ROOT / "bot_commands.py").read_text(encoding="utf-8")
+    assert "/source" in (ROOT / "miniapp/server.py").read_text(encoding="utf-8")
+    assert "/source" in (ROOT / "web_store/routes.py").read_text(encoding="utf-8")
+    assert "SHOPVPN_SOURCE_URL" in (ROOT / "source_offer.py").read_text(encoding="utf-8")
+
+    # The mini-app pinball game and the Glass Ops admin dashboard are real pages.
+    assert (ROOT / "miniapp/static/pinball.js").stat().st_size > 10000
+    assert "renderPinball" in miniapp_js
+    assert "renderDashboardGlassOps" in admin_js
+
+    # The new upstream tests live in tests/ so CI runs them.
+    for name in ("test_doctordns_provider.py", "test_source_offer.py",
+                 "test_reminder_renew_button.py", "test_dedicated_sub_multi.py"):
+        assert (ROOT / "tests" / name).is_file(), f"{name} is missing from tests/"
+
+    # The license this fork ships with is the source-available 1.0 one.
+    assert "SOURCE-AVAILABLE" in (ROOT / "LICENSE").read_text(encoding="utf-8").upper()
