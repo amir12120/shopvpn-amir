@@ -1190,10 +1190,15 @@ install_bot() {
         cat > "$INSTALL_DIR/.env" <<EOF
 BOT_TOKEN=$BOT_TOKEN_INPUT
 OWNER_ID=$OWNER_ID_INPUT
+SHOPVPN_SOURCE_URL=https://github.com/amir12120/shopvpn-amir
 EOF
         echo -e "${GREEN}$(t env_created)${RESET}"
     else
         echo -e "${GREEN}$(t env_exists)${RESET}"
+        # LICENSE section 6: /source must offer the code of the version being run.
+        if ! grep -q '^SHOPVPN_SOURCE_URL=' "$INSTALL_DIR/.env" 2>/dev/null; then
+            echo "SHOPVPN_SOURCE_URL=https://github.com/amir12120/shopvpn-amir" >> "$INSTALL_DIR/.env"
+        fi
     fi
 
     echo -e "${CYAN}🌍 نصب سبک موتور ترجمه محلی (Argos؛ بدون LibreTranslate سنگین)...${RESET}"

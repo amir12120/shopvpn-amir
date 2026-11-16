@@ -206,6 +206,7 @@ if [ ! -f "$INSTALL_DIR/.env" ]; then
     cat > "$INSTALL_DIR/.env" <<EOF
 BOT_TOKEN=$BOT_TOKEN_INPUT
 OWNER_ID=$OWNER_ID_INPUT
+SHOPVPN_SOURCE_URL=https://github.com/amir12120/shopvpn-amir
 EOF
 
     echo ""
