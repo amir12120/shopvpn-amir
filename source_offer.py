@@ -30,21 +30,9 @@ def license_url() -> str:
 
 
 def build_text(lang: str = "fa") -> str:
-    """HTML text for the /source command (fa or en; other languages get English)."""
-    src, lic = html.escape(source_url(), quote=True), html.escape(license_url(), quote=True)
-    if lang == "fa":
-        return (
-            "📦 <b>سورس‌کد این ربات</b>\n\n"
-            f"سورس‌کد کامل همین نسخه (ربات، مینی‌اپ و پنل وب) رایگان در دسترس است:\n{src}\n\n"
-            f"📄 لایسنس: <a href=\"{lic}\">{LICENSE_NAME}</a>\n"
-            "فروش کانفیگ و اشتراک VPN مجاز است؛ فروش یا اجاره‌ی خود نرم‌افزار بدون لایسنس تجاری مجاز نیست.\n\n"
-            "ساخته‌شده با ShopVPN — Mehdi Rafatpanah (@celenor)"
-        )
-    return (
-        "📦 <b>Source code</b>\n\n"
-        f"The full source code of this version (bot, mini app and web panel) is available for free:\n{src}\n\n"
-        f"📄 License: <a href=\"{lic}\">{LICENSE_NAME}</a>\n"
-        "Selling VPN configurations and subscriptions is allowed; selling or renting the software itself "
-        "needs a commercial license.\n\n"
-        "Built with ShopVPN — Mehdi Rafatpanah (@celenor)"
-    )
+    """The /source answer: the repository address alone, with no extra wording.
+
+    The text is sent with parse_mode=HTML, so the URL is escaped for HTML (it still
+    renders as the plain address). ``lang`` is kept for the existing callers.
+    """
+    return html.escape(source_url(), quote=False)

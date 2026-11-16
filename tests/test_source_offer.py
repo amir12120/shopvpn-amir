@@ -22,12 +22,14 @@ class SourceOfferTest(unittest.TestCase):
         os.environ["SHOPVPN_SOURCE_URL"] = "javascript:alert(1)"
         self.assertEqual(source_offer.source_url(), source_offer.FORK_REPO)
 
-    def test_text_both_languages_and_escaping(self):
-        os.environ["SHOPVPN_SOURCE_URL"] = 'https://x.io/a"b<c'
+    def test_text_is_only_the_url(self):
+        os.environ.pop("SHOPVPN_SOURCE_URL", None)
         for lang in ("fa", "en"):
-            t = source_offer.build_text(lang)
-            self.assertNotIn('"b<c', t)
-            self.assertIn(source_offer.LICENSE_NAME, t)
+            self.assertEqual(source_offer.build_text(lang), source_offer.FORK_REPO)
+        os.environ["SHOPVPN_SOURCE_URL"] = 'https://x.io/a"b<c'
+        # HTML escaping only; the answer stays a single address and no other text.
+        self.assertEqual(source_offer.build_text("fa"), 'https://x.io/a"b&lt;c')
+        self.assertNotIn("\n", source_offer.build_text("en"))
 
 
 if __name__ == "__main__":
