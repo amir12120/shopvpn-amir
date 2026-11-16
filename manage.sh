@@ -1302,6 +1302,12 @@ update_bot() {
     fi
     cd "$INSTALL_DIR"
 
+    # LICENSE section 6: /source must offer the code of the version being run, so an
+    # update pins the fork's repository once instead of leaving the key out of .env.
+    if [ -f "$INSTALL_DIR/.env" ] && ! grep -q '^SHOPVPN_SOURCE_URL=' "$INSTALL_DIR/.env" 2>/dev/null; then
+        echo "SHOPVPN_SOURCE_URL=https://github.com/amir12120/shopvpn-amir" >> "$INSTALL_DIR/.env"
+    fi
+
     MINIAPP_SERVICE="${SERVICE_NAME}-miniapp"
     PANEL_SERVICE="${SERVICE_NAME}-adminpanel"
     API_SERVICE="${SERVICE_NAME}-api"

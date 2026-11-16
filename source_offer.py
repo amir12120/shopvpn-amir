@@ -4,19 +4,23 @@
 If you modify ShopVPN and let people use your version through the bot, the mini app, the web
 panel or the web store, you must offer them the source code of the version you run.
 Set SHOPVPN_SOURCE_URL (in .env) to the public repository of YOUR version.
-Unmodified installs can leave it empty: it points to the official repository.
+When it is empty the offer points at the repository of the code being run (this fork).
 """
 import html
 import os
 
 OFFICIAL_REPO = "https://github.com/mehdirafatpanah/Shopvpn"
+# The code running here is this fork, so an unset SHOPVPN_SOURCE_URL must not send
+# admins to the upstream project: LICENSE section 6 asks for the source of the
+# version actually served, which is this fork's repository.
+FORK_REPO = "https://github.com/amir12120/shopvpn-amir"
 LICENSE_NAME = "ShopVPN Source-Available Network Copyleft License 1.0"
 
 
 def source_url() -> str:
     url = (os.getenv("SHOPVPN_SOURCE_URL") or "").strip()
     if not url.lower().startswith(("https://", "http://")):
-        url = OFFICIAL_REPO
+        url = FORK_REPO
     return url
 
 
