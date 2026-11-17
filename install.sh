@@ -208,6 +208,19 @@ export GIT_TERMINAL_PROMPT=0
 fetch_project_code() {
     local ok=0
     local git_timeout="${SHOPVPN_GIT_TIMEOUT:-300}"
+    # A stalled clone, a dropped SSH or `kill -9` can leave a half-written checkout
+    # that git refuses to repair ("not a git repository" / unborn HEAD), and the
+    # re-run then looks just as stuck. Such a leftover is removed only when it
+    # clearly holds no data: no .env, no database, no main.py and no venv.
+    if [ -d "$INSTALL_DIR" ] && [ ! -d "$INSTALL_DIR/venv" ] \
+        && [ ! -f "$INSTALL_DIR/.env" ] && [ ! -f "$INSTALL_DIR/main.py" ] \
+        && ! compgen -G "$INSTALL_DIR/*.db*" > /dev/null; then
+        if [ -d "$INSTALL_DIR/.git" ] \
+            && ! git -C "$INSTALL_DIR" rev-parse --verify -q HEAD > /dev/null 2>&1; then
+            echo "🧹 Removing the interrupted checkout left in $INSTALL_DIR (no .env, database or venv to lose)..."
+            rm -rf "$INSTALL_DIR"
+        fi
+    fi
     if [ -d "$INSTALL_DIR/.git" ]; then
         echo "🔄 Existing checkout found, fetching the latest changes..."
         if timeout "$git_timeout" git -C "$INSTALL_DIR" pull --progress; then ok=1; fi
@@ -266,13 +279,21 @@ source venv/bin/activate
 # argostranslate -> stanza -> torch. pip installs the CUDA build on Linux by
 # default, which pulls ~5 GB of nvidia libraries. We pre-install the CPU-only
 # build from the official PyTorch index so pip never fetches the heavy one.
+# pip has per-request timeouts but no overall one, so a stalled connection could
+# still leave the install silent forever. SHOPVPN_PIP_TIMEOUT bounds each step.
+PIP_TIMEOUT="${SHOPVPN_PIP_TIMEOUT:-1800}"
 echo "   installing CPU-only torch..."
-if ! pip -q --no-cache-dir --disable-pip-version-check install \
+if ! timeout "$PIP_TIMEOUT" pip -q --no-cache-dir --disable-pip-version-check install \
         --index-url https://download.pytorch.org/whl/cpu torch; then
     echo "⚠️ Could not install CPU-only torch; continuing (the heavy build may be used)."
 fi
 echo "   installing requirements.txt (downloads a few hundred MB; this is the slowest step)..."
-pip install -q --no-cache-dir -r requirements.txt
+if ! timeout "$PIP_TIMEOUT" pip install -q --no-cache-dir -r requirements.txt; then
+    echo "❌ Installing the Python packages failed or took longer than ${PIP_TIMEOUT}s." >&2
+    echo "   Fix the network/proxy and run the installer again; it resumes from here." >&2
+    echo "   Raise the limit with SHOPVPN_PIP_TIMEOUT=<seconds> if the server is just slow." >&2
+    exit 1
+fi
 deactivate
 echo "   python packages ready."
 
@@ -282,6 +303,13 @@ echo "   python packages ready."
 echo "🔑 Step 4/${TOTAL_STEPS} — configuring .env..."
 if [ ! -f "$INSTALL_DIR/.env" ]; then
     echo ""
+    if [ ! -t 0 ]; then
+        # `read` on a closed/piped stdin used to wait forever with no way out.
+        echo "❌ No .env file was found and this run has no terminal to ask on." >&2
+        echo "   Create $INSTALL_DIR/.env containing BOT_TOKEN and OWNER_ID (see .env.example)" >&2
+        echo "   and run the installer again." >&2
+        exit 1
+    fi
     echo "🔑 No .env file found. Enter the details below:"
     read -rp "Bot token (from BotFather): " BOT_TOKEN_INPUT
     read -rp "Admin numeric ID (e.g. from @userinfobot): " OWNER_ID_INPUT

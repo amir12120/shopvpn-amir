@@ -68,6 +68,12 @@ def test_fetch_step_shows_progress_and_cannot_hang_forever():
     assert "git clone --progress" in text
     assert "SHOPVPN_GIT_TIMEOUT" in text
     assert 'timeout "$git_timeout" git' in text
+    # `kill -9` / dropped SSH leftovers must not wedge the next run, and pip plus
+    # the .env prompts need a bound and a way out instead of an endless wait.
+    assert "interrupted checkout" in text
+    assert "SHOPVPN_PIP_TIMEOUT" in text
+    assert 'timeout "$PIP_TIMEOUT" pip' in text
+    assert "no terminal to ask on" in text
 
 
 def test_install_creates_shopvpn_launcher():
