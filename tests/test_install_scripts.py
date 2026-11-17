@@ -73,7 +73,11 @@ def test_fetch_step_shows_progress_and_cannot_hang_forever():
     assert "interrupted checkout" in text
     assert "SHOPVPN_PIP_TIMEOUT" in text
     assert 'timeout "$PIP_TIMEOUT" pip' in text
-    assert "no terminal to ask on" in text
+    # Piped answers must keep working (CI installs that way) while a closed stdin
+    # must fail loudly instead of exiting silently under `set -e`.
+    assert "ask() {" in text
+    assert 'read -r -t 900 -p "$1" answer' in text
+    assert "read -rp" not in text
 
 
 def test_install_creates_shopvpn_launcher():

@@ -156,6 +156,21 @@ apt_run() {   # apt_run <label> <apt-get arguments...>
     return "$rc"
 }
 
+# ask <prompt> <variable> : read one answer without ever hanging silently.
+# A plain `read` under `set -e` exits with no message when stdin is closed
+# (nohup, `ssh host 'bash ...'`, a broken pty), while a piped run must keep working
+# (CI and automation answer with `printf ... | bash install.sh`).
+ask() {
+    local answer=""
+    if ! read -r -t 900 -p "$1" answer; then
+        echo "" >&2
+        echo "❌ No answer to \"$1\" (stdin closed, or nothing typed for 15 minutes)." >&2
+        echo "   Run the installer from an interactive terminal, or create .env from .env.example first." >&2
+        exit 1
+    fi
+    printf -v "$2" '%s' "$answer"
+}
+
 # ----------------------------------------------------------------------------
 # 1/7. System prerequisites (always first, so the Python/translation steps
 #      never stall on a slow or interactive apt call later).
@@ -303,16 +318,9 @@ echo "   python packages ready."
 echo "🔑 Step 4/${TOTAL_STEPS} — configuring .env..."
 if [ ! -f "$INSTALL_DIR/.env" ]; then
     echo ""
-    if [ ! -t 0 ]; then
-        # `read` on a closed/piped stdin used to wait forever with no way out.
-        echo "❌ No .env file was found and this run has no terminal to ask on." >&2
-        echo "   Create $INSTALL_DIR/.env containing BOT_TOKEN and OWNER_ID (see .env.example)" >&2
-        echo "   and run the installer again." >&2
-        exit 1
-    fi
     echo "🔑 No .env file found. Enter the details below:"
-    read -rp "Bot token (from BotFather): " BOT_TOKEN_INPUT
-    read -rp "Admin numeric ID (e.g. from @userinfobot): " OWNER_ID_INPUT
+    ask "Bot token (from BotFather): " BOT_TOKEN_INPUT
+    ask "Admin numeric ID (e.g. from @userinfobot): " OWNER_ID_INPUT
     cat > "$INSTALL_DIR/.env" <<EOF
 BOT_TOKEN=$BOT_TOKEN_INPUT
 OWNER_ID=$OWNER_ID_INPUT
@@ -323,11 +331,11 @@ EOF
     echo "How should the bot receive Telegram updates?"
     echo "  1) Polling  (default - simpler, no domain/SSL required)"
     echo "  2) Webhook  (requires a domain whose DNS points to this server's IP)"
-    read -rp "Choose [1]: " BOT_MODE_CHOICE
+    ask "Choose [1]: " BOT_MODE_CHOICE
     BOT_MODE_CHOICE="${BOT_MODE_CHOICE:-1}"
 
     if [ "$BOT_MODE_CHOICE" = "2" ]; then
-        read -rp "Domain to use for the bot webhook (e.g. bot.example.com): " WEBHOOK_DOMAIN
+        ask "Domain to use for the bot webhook (e.g. bot.example.com): " WEBHOOK_DOMAIN
         if [ -z "$WEBHOOK_DOMAIN" ]; then
             echo "⚠️ No domain entered; starting the bot with Polling (you can enable webhook later from the manage CLI)."
         else
