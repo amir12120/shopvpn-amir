@@ -30,13 +30,31 @@ def test_install_scripts_have_no_persian(name):
 def test_install_is_one_command():
     """install.sh installs prerequisites, the bot, the CLI and opens the menu."""
     text = _read("install.sh")
-    assert "apt-get install" in text                     # prerequisites
+    assert "apt-get" in text                             # prerequisites
+    assert "PREREQ_PACKAGES" in text                     # the packages it installs
     assert "setup_local_translation.sh" in text          # bot install steps
     assert "shopvpn" in text                             # CLI command name
     assert "/usr/local/bin" in text                      # where the CLI goes
     assert "manage.sh" in text                           # the menu that opens
     assert "SHOPVPN_SKIP_MENU" in text                   # opt-out for CI
     assert "-t 0" in text                                # only open on a terminal
+
+
+def test_prerequisite_step_cannot_fail_silently():
+    """Step 1 used `timeout 240` plus `> /dev/null`.
+
+    A slow mirror, a half-configured package or a frozen dpkg lock then killed the
+    whole installer inside step 1 with no output at all (`set -e` swallowed the
+    exit code), which is exactly the "installation stops after step 1" report.
+    The apt helper must keep its output, retry the lock and explain a real failure.
+    """
+    text = _read("install.sh")
+    assert not re.search(r"timeout 240\s+sudo", text), "a four-minute hard timeout killed installs"
+    assert "apt_run()" in text and "PIPESTATUS[0]" in text
+    assert "frontend lock" in text, "a busy dpkg lock must be retried, not fatal"
+    assert "--force-confdef" in text, "an unattended install must never wait for a conffile prompt"
+    assert "The system prerequisites could not be installed" in text
+    assert "SHOPVPN_APT_TIMEOUT" in text, "a slow server must be able to raise the timeout"
 
 
 def test_install_creates_shopvpn_launcher():

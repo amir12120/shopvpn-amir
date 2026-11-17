@@ -106,17 +106,88 @@ unit_missing_binary() {
     printf '%s' "$(printf '%s' "$line" | awk '{print $1}')"
 }
 
+# ---------------------------------------------------------------------------
+# apt helper
+#
+# apt used to run with `> /dev/null` and a hard four-minute `timeout`, so a slow
+# frozen dpkg lock or a half-configured package killed the installer inside step 1
+# with no message at all (`set -e` + hidden exit code). Now:
+#   * the output is shown and kept in a log, and a failure prints its reason;
+#   * the dpkg lock is retried instead of aborting (unattended-upgrades runs at boot);
+#   * a conffile prompt can never block an unattended install (force-confdef/old);
+#   * the timeout is generous and configurable with SHOPVPN_APT_TIMEOUT.
+# ---------------------------------------------------------------------------
+APT_LOG="${SHOPVPN_APT_LOG:-${TMPDIR:-/tmp}/shopvpn-apt.log}"
+APT_TIMEOUT="${SHOPVPN_APT_TIMEOUT:-900}"
+
+apt_run() {   # apt_run <label> <apt-get arguments...>
+    local label="$1"; shift
+    local attempt=1 rc=0
+    while [ "$attempt" -le 3 ]; do
+        rc=0
+        timeout "$APT_TIMEOUT" sudo env DEBIAN_FRONTEND=noninteractive \
+            NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1 \
+            apt-get -o Dpkg::Options::=--force-confdef \
+                    -o Dpkg::Options::=--force-confold \
+                    -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+                    -o Acquire::Retries=3 "$@" 2>&1 \
+            | tee -a "$APT_LOG"
+        rc=${PIPESTATUS[0]}
+        if [ "$rc" -eq 0 ]; then
+            return 0
+        fi
+        if [ "$rc" -eq 124 ]; then
+            echo "   ⚠️ ${label}: still running after ${APT_TIMEOUT}s and was stopped."
+            echo "      Slow mirror or stuck download. Raise SHOPVPN_APT_TIMEOUT (seconds) and run again."
+            return 124
+        fi
+        if tail -n 60 "$APT_LOG" 2>/dev/null \
+            | grep -qiE 'could not get lock|frontend lock|another process using it'; then
+            echo "   ⏳ ${label}: apt/dpkg is busy (another update or unattended-upgrades),"
+            echo "      retrying in $((attempt * 20))s (attempt ${attempt}/3)..."
+            sleep $((attempt * 20))
+            attempt=$((attempt + 1))
+            continue
+        fi
+        break
+    done
+    echo "   ⚠️ ${label} failed (exit ${rc}). Full output: ${APT_LOG}"
+    tail -n 12 "$APT_LOG" 2>/dev/null | sed 's/^/      /'
+    return "$rc"
+}
+
 # ----------------------------------------------------------------------------
 # 1/7. System prerequisites (always first, so the Python/translation steps
 #      never stall on a slow or interactive apt call later).
 # ----------------------------------------------------------------------------
 echo "📦 Step 1/${TOTAL_STEPS} — installing system prerequisites first..."
+: > "$APT_LOG" 2>/dev/null || APT_LOG="${TMPDIR:-/tmp}/shopvpn-apt.$$.log"
+echo "   apt log: $APT_LOG"
+
+# A stale mirror or one broken third-party source must not stop the install: the
+# package lists already on the server are usually enough for the step below.
+if ! apt_run "apt-get update" update -qq; then
+    echo "   ⚠️ Package lists could not be refreshed; continuing with the lists already on this server."
+fi
+
 # --no-install-recommends keeps the apt footprint small.
-sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1 apt-get update -qq
-timeout 240 sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1 \
-    apt-get install -y -qq --no-install-recommends \
-    git curl ca-certificates python3 python3-pip python3-venv \
-    build-essential python3-dev pkg-config libffi-dev libssl-dev zlib1g-dev libjpeg-dev > /dev/null
+PREREQ_PACKAGES="git curl ca-certificates python3 python3-pip python3-venv build-essential python3-dev pkg-config libffi-dev libssl-dev zlib1g-dev libjpeg-dev"
+if ! apt_run "system prerequisites" install -y -q --no-install-recommends $PREREQ_PACKAGES; then
+    # A killed or interrupted apt leaves dpkg half-configured; repair it once and retry.
+    echo "   🔧 Repairing the dpkg state and retrying once..."
+    sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a >> "$APT_LOG" 2>&1 || true
+    if ! apt_run "system prerequisites (retry)" install -y -q --no-install-recommends $PREREQ_PACKAGES; then
+        echo ""
+        echo "❌ The system prerequisites could not be installed." >&2
+        echo "   The installer cannot continue without git, python3 and the build tools." >&2
+        echo "   Usual causes and their fix:" >&2
+        echo "     • the server cannot reach the distro mirrors: sudo apt-get update" >&2
+        echo "     • another update is running (unattended-upgrades): wait and run again" >&2
+        echo "     • a package is half-installed: sudo dpkg --configure -a && sudo apt-get -f install" >&2
+        echo "   Full log: $APT_LOG" >&2
+        exit 1
+    fi
+fi
 
 echo "   git: $(git --version 2>/dev/null || echo MISSING) | python3: $(python3 --version 2>/dev/null || echo MISSING)"
 
@@ -162,7 +233,7 @@ fetch_project_code() {
     rm -f "$tmp_tar"
     mkdir -p "$INSTALL_DIR"
     if ! command -v rsync > /dev/null 2>&1; then
-        sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rsync > /dev/null
+        apt_run "rsync" install -y -qq rsync || true
     fi
     rsync -a --exclude='.env' --exclude='*.db' --exclude='*.db-journal' \
         --exclude='*.sqlite3' --exclude='venv' --exclude='.git' --exclude='backups' \
@@ -223,8 +294,8 @@ EOF
         else
             WEBHOOK_PORT=8010
             echo "📦 Installing nginx and certbot..."
-            sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1 \
-                apt-get install -y -qq nginx certbot python3-certbot-nginx > /dev/null
+            apt_run "nginx + certbot" install -y -qq nginx certbot python3-certbot-nginx \
+                || echo "⚠️ nginx/certbot did not install cleanly; the webhook setup below may fail (Polling still works)."
 
             echo "🌐 Configuring nginx for $WEBHOOK_DOMAIN..."
             sudo bash -c "cat > /etc/nginx/sites-available/${WEBHOOK_DOMAIN}.conf" <<NGXEOF
