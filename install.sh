@@ -207,24 +207,31 @@ export GIT_TERMINAL_PROMPT=0
 # ----------------------------------------------------------------------------
 fetch_project_code() {
     local ok=0
+    local git_timeout="${SHOPVPN_GIT_TIMEOUT:-300}"
     if [ -d "$INSTALL_DIR/.git" ]; then
         echo "🔄 Existing checkout found, fetching the latest changes..."
-        if git -C "$INSTALL_DIR" pull --quiet; then ok=1; fi
+        if timeout "$git_timeout" git -C "$INSTALL_DIR" pull --progress; then ok=1; fi
     else
-        echo "📥 Downloading the project from GitHub..."
+        # --quiet used to hide a clone that got throttled or blocked by GitHub:
+        # the install looked frozen for minutes with no line after step 1. The
+        # progress meter plus a timeout make a stalled fetch visible and let the
+        # archive fallback below take over.
+        echo "📥 Downloading the project from GitHub (a few tens of MB, progress below)..."
         # Shallow clone: the full history is never stored on the server disk.
-        if git clone --quiet --depth 1 "$REPO_URL" "$INSTALL_DIR"; then ok=1; fi
+        if timeout "$git_timeout" git clone --progress --depth 1 "$REPO_URL" "$INSTALL_DIR"; then ok=1; fi
     fi
 
     if [ "$ok" = "1" ]; then
         return 0
     fi
 
-    echo "⚠️ git access was blocked, downloading the archive instead..."
+    echo "⚠️ git could not finish (blocked, throttled or slower than ${git_timeout}s); downloading the archive instead..."
     local tmp_tar tmp_dir
     tmp_tar=$(mktemp)
     tmp_dir=$(mktemp -d)
-    if ! curl -fsSL "https://codeload.github.com/${GITHUB_OWNER}/${GITHUB_REPO}/tar.gz/refs/heads/${GITHUB_BRANCH}" -o "$tmp_tar"; then
+    if ! curl -fL --progress-bar --retry 3 --retry-delay 2 --connect-timeout 20 \
+            --speed-limit 1024 --speed-time 60 \
+            "https://codeload.github.com/${GITHUB_OWNER}/${GITHUB_REPO}/tar.gz/refs/heads/${GITHUB_BRANCH}" -o "$tmp_tar"; then
         echo "❌ Could not download the project archive either. Check the server's internet connection."
         rm -f "$tmp_tar"; rm -rf "$tmp_dir"
         return 1
@@ -250,20 +257,24 @@ cd "$INSTALL_DIR"
 # ----------------------------------------------------------------------------
 # 3/7. Create the virtual environment and install the packages.
 # ----------------------------------------------------------------------------
-echo "🐍 Step 3/${TOTAL_STEPS} — preparing the Python environment..."
+echo "🐍 Step 3/${TOTAL_STEPS} — preparing the Python environment (a few minutes on a fresh server)..."
 if [ ! -d "venv" ]; then
+    echo "   creating venv..."
     python3 -m venv venv
 fi
 source venv/bin/activate
 # argostranslate -> stanza -> torch. pip installs the CUDA build on Linux by
 # default, which pulls ~5 GB of nvidia libraries. We pre-install the CPU-only
 # build from the official PyTorch index so pip never fetches the heavy one.
+echo "   installing CPU-only torch..."
 if ! pip -q --no-cache-dir --disable-pip-version-check install \
         --index-url https://download.pytorch.org/whl/cpu torch; then
     echo "⚠️ Could not install CPU-only torch; continuing (the heavy build may be used)."
 fi
+echo "   installing requirements.txt (downloads a few hundred MB; this is the slowest step)..."
 pip install -q --no-cache-dir -r requirements.txt
 deactivate
+echo "   python packages ready."
 
 # ----------------------------------------------------------------------------
 # 4/7. Configure the .env file (first run only; the file is never in git).

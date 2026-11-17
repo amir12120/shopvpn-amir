@@ -57,6 +57,19 @@ def test_prerequisite_step_cannot_fail_silently():
     assert "SHOPVPN_APT_TIMEOUT" in text, "a slow server must be able to raise the timeout"
 
 
+def test_fetch_step_shows_progress_and_cannot_hang_forever():
+    """`git clone --quiet` printed nothing while GitHub throttled the server.
+
+    Step 2 then looked like another dead install (the same symptom as the apt
+    step). The fetch must show progress and give up into the archive fallback.
+    """
+    text = _read("install.sh")
+    assert "git clone --quiet" not in text
+    assert "git clone --progress" in text
+    assert "SHOPVPN_GIT_TIMEOUT" in text
+    assert 'timeout "$git_timeout" git' in text
+
+
 def test_install_creates_shopvpn_launcher():
     """The launcher must exec the installed manage.sh and be installed 0755."""
     text = _read("install.sh")
