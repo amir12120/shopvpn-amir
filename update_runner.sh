@@ -116,7 +116,7 @@ do_rollback_after_failure() { # $1 reason
         write_result failed "$1 (و برگشت خودکار هم ناموفق بود؛ بکاپ: $SNAP)"
         exit 1
     fi
-    "$PY" -m pip install -r requirements.txt --quiet 2>&1 | tail -n 3 \
+    "$PY" -m pip install -r requirements.txt --quiet --timeout 60 2>&1 | tail -n 3 \
         || log "WARN: pip install during rollback failed"
     restart_all
     if healthy; then
@@ -134,7 +134,7 @@ if [ "$MODE" = "rollback" ]; then
     LAST_HEAD="$(cat "$LAST.head" 2>/dev/null || true)"
     restore_snapshot "$LAST" "$LAST_HEAD" \
         || { write_result failed "بازیابی بکاپ ناموفق بود"; exit 1; }
-    "$PY" -m pip install -r requirements.txt --quiet 2>&1 | tail -n 3 \
+    "$PY" -m pip install -r requirements.txt --quiet --timeout 60 2>&1 | tail -n 3 \
         || log "WARN: pip install during rollback failed"
     restart_all
     if healthy; then
@@ -205,7 +205,7 @@ NEW_VERSION="$(tr -d '[:space:]' < VERSION 2>/dev/null || echo '?')"
 log "new version $NEW_VERSION"
 
 log "pip install"
-"$PY" -m pip install -r requirements.txt --quiet \
+"$PY" -m pip install -r requirements.txt --quiet --timeout 60 \
     || do_rollback_after_failure "نصب پکیج‌های جدید ناموفق بود"
 
 log "syntax check"

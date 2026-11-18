@@ -119,6 +119,9 @@ unit_missing_binary() {
 # ---------------------------------------------------------------------------
 APT_LOG="${SHOPVPN_APT_LOG:-${TMPDIR:-/tmp}/shopvpn-apt.log}"
 APT_TIMEOUT="${SHOPVPN_APT_TIMEOUT:-900}"
+# How often a long network step re-prints a "still running" line, so an install
+# that is only slow never looks frozen to someone watching the console.
+HEARTBEAT="${SHOPVPN_HEARTBEAT:-45}"
 
 apt_run() {   # apt_run <label> <apt-get arguments...>
     local label="$1"; shift
@@ -223,6 +226,25 @@ export GIT_TERMINAL_PROMPT=0
 fetch_project_code() {
     local ok=0
     local git_timeout="${SHOPVPN_GIT_TIMEOUT:-300}"
+    # A stalled network step must never look frozen: git prints nothing between
+    # the initial lines when a connection just hangs, so a `kill -9` from the
+    # user used to be the only way out. run_with_heartbeat re-prints a short
+    # "still working" line every HEARTBEAT seconds while the command runs.
+    run_with_heartbeat() {
+        local limit="$1" label="$2"; shift 2
+        local waited=0 rc
+        timeout "$limit" "$@" &
+        local pid=$!
+        while kill -0 "$pid" 2>/dev/null; do
+            sleep "$HEARTBEAT"
+            waited=$((waited + HEARTBEAT))
+            if kill -0 "$pid" 2>/dev/null; then
+                echo "   ⏳ $label still running… (${waited}s of max ${limit}s)"
+            fi
+        done
+        wait "$pid"; rc=$?
+        return "$rc"
+    }
     # A stalled clone, a dropped SSH or `kill -9` can leave a half-written checkout
     # that git refuses to repair ("not a git repository" / unborn HEAD), and the
     # re-run then looks just as stuck. Such a leftover is removed only when it
@@ -238,15 +260,17 @@ fetch_project_code() {
     fi
     if [ -d "$INSTALL_DIR/.git" ]; then
         echo "🔄 Existing checkout found, fetching the latest changes..."
-        if timeout "$git_timeout" git -C "$INSTALL_DIR" pull --progress; then ok=1; fi
+        if run_with_heartbeat "$git_timeout" "git pull" \
+            git -C "$INSTALL_DIR" pull --progress; then ok=1; fi
     else
         # --quiet used to hide a clone that got throttled or blocked by GitHub:
         # the install looked frozen for minutes with no line after step 1. The
         # progress meter plus a timeout make a stalled fetch visible and let the
         # archive fallback below take over.
-        echo "📥 Downloading the project from GitHub (a few tens of MB, progress below)..."
+        echo "📥 Downloading the project from GitHub (a few tens of MB; on a slow\n   connection this can take a few minutes — progress is shown below)..."
         # Shallow clone: the full history is never stored on the server disk.
-        if timeout "$git_timeout" git clone --progress --depth 1 "$REPO_URL" "$INSTALL_DIR"; then ok=1; fi
+        if run_with_heartbeat "$git_timeout" "git clone" \
+            git clone --progress --depth 1 "$REPO_URL" "$INSTALL_DIR"; then ok=1; fi
     fi
 
     if [ "$ok" = "1" ]; then
@@ -297,13 +321,14 @@ source venv/bin/activate
 # pip has per-request timeouts but no overall one, so a stalled connection could
 # still leave the install silent forever. SHOPVPN_PIP_TIMEOUT bounds each step.
 PIP_TIMEOUT="${SHOPVPN_PIP_TIMEOUT:-1800}"
-echo "   installing CPU-only torch..."
-if ! timeout "$PIP_TIMEOUT" pip -q --no-cache-dir --disable-pip-version-check install \
-        --index-url https://download.pytorch.org/whl/cpu torch; then
+echo "   installing CPU-only torch (about 190 MB; shows its own progress)..."
+if ! timeout "$PIP_TIMEOUT" pip --no-cache-dir --disable-pip-version-check install \
+        --progress-bar off --index-url https://download.pytorch.org/whl/cpu torch; then
     echo "⚠️ Could not install CPU-only torch; continuing (the heavy build may be used)."
 fi
-echo "   installing requirements.txt (downloads a few hundred MB; this is the slowest step)..."
-if ! timeout "$PIP_TIMEOUT" pip install -q --no-cache-dir -r requirements.txt; then
+echo "   installing requirements.txt (a few hundred MB; the slowest step — lines below\n   show each package so the wait is visible)..."
+if ! timeout "$PIP_TIMEOUT" pip install --no-cache-dir --disable-pip-version-check \
+        --progress-bar off -r requirements.txt; then
     echo "❌ Installing the Python packages failed or took longer than ${PIP_TIMEOUT}s." >&2
     echo "   Fix the network/proxy and run the installer again; it resumes from here." >&2
     echo "   Raise the limit with SHOPVPN_PIP_TIMEOUT=<seconds> if the server is just slow." >&2

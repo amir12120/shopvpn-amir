@@ -40,9 +40,12 @@ export GIT_TERMINAL_PROMPT=0
 # default Linux wheel drags in ~5 GB of CUDA/nvidia libraries that a
 # translation-only server never uses.
 # پکیج‌های پایتون: بدون کش و با torch نسخهٔ CPU تا چند گیگابایت CUDA دانلود نشود.
+# --progress-bar off (به‌جای -q) یعنی هر بسته همان موقع دیده می‌شود؛ دانلود چندده‌مگابایتی
+# روی اینترنت کند دیگر «فریز‌شده» به نظر نمی‌رسد و timeout هم هیچ‌وقت بی‌پایان نمی‌شود.
 # ---------------------------------------------------------------------------
-PIP_CPU_TORCH="pip install -q --no-cache-dir --disable-pip-version-check --index-url https://download.pytorch.org/whl/cpu torch"
-PIP_REQS="pip install -q --no-cache-dir --disable-pip-version-check -r requirements.txt"
+SHOPVPN_PIP_TIMEOUT="${SHOPVPN_PIP_TIMEOUT:-1800}"
+PIP_CPU_TORCH="timeout ${SHOPVPN_PIP_TIMEOUT} pip install --no-cache-dir --disable-pip-version-check --progress-bar off --index-url https://download.pytorch.org/whl/cpu torch"
+PIP_REQS="timeout ${SHOPVPN_PIP_TIMEOUT} pip install --no-cache-dir --disable-pip-version-check --progress-bar off -r requirements.txt"
 
 # ---------------------------------------------------------------------------
 # How the services are started

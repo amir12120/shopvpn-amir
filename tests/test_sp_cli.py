@@ -51,7 +51,12 @@ def _install(tmp_path):
     _write(install / "VERSION", "9.9.9\n")
     _write(
         install / "venv" / "bin" / "activate",
-        'pip() { echo "pip $*" >> "$SP_TEST_LOG"; }\ndeactivate() { :; }\n',
+        # The update flow runs pip under `timeout`, so the stub must accept that
+        # prefix too ("timeout <secs> pip install ...") or the real pip of the
+        # outer environment would leak into the sandbox.
+        'pip() { echo "pip $*" >> "$SP_TEST_LOG"; }\n'
+        'timeout() { local s="$1"; shift; "$@"; }\n'
+        'deactivate() { :; }\n',
     )
     _write(
         install / "setup_local_translation.sh",

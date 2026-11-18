@@ -70,6 +70,13 @@ export PIP_NO_CACHE_DIR=1
 export PIP_DISABLE_PIP_VERSION_CHECK=1
 export PYTHONUNBUFFERED=1
 
+# Every network step gets a hard limit. A model download or a pip call without
+# one used to hang forever on a throttled connection, and from the console the
+# install looked frozen (the only "fix" was kill -9 and a re-run).
+PIP_TIMEOUT="${SHOPVPN_PIP_TIMEOUT:-1800}"
+ARGOS_TIMEOUT="${SHOPVPN_ARGOS_TIMEOUT:-900}"
+APT_TIMEOUT="${SHOPVPN_APT_TIMEOUT:-900}"
+
 as_root() {
   if [ "$(id -u)" -eq 0 ]; then
     "$@"
@@ -82,8 +89,9 @@ as_root() {
 }
 
 pip_q() {
-  # pip_q <python> <args...>  -> quiet, cache-less install
-  "$1" -m pip install -q --no-cache-dir --disable-pip-version-check "${@:2}"
+  # pip_q <python> <args...>  -> quiet, cache-less, hard-limited install
+  timeout "$PIP_TIMEOUT" "$1" -m pip install -q --no-cache-dir \
+      --disable-pip-version-check "${@:2}"
 }
 
 # ---------------------------------------------------------------------------
@@ -137,8 +145,8 @@ human() { if [ -e "$1" ]; then du -sh "$1" 2>/dev/null | cut -f1; else echo "-";
 install_system_prereqs() {
   if command -v apt-get >/dev/null 2>&1; then
     echo "[translation] Installing system prerequisites..."
-    as_root env DEBIAN_FRONTEND=noninteractive apt-get update -qq
-    as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    timeout "$APT_TIMEOUT" as_root env DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    timeout "$APT_TIMEOUT" as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
       python3 python3-pip python3-venv ca-certificates curl >/dev/null
   elif ! command -v python3 >/dev/null 2>&1; then
     echo "ERROR: python3 is required on this operating system." >&2
@@ -216,9 +224,9 @@ fi
 
 install_pair() {
     local pair="$1"
-    echo "[translation] Installing Argos model: $pair"
-    if ! as_service_user "$VENV_DIR/bin/argospm" install "translate-${pair}"; then
-        echo "[translation] Warning: model translate-${pair} is unavailable; continuing." >&2
+    echo "[translation] Installing Argos model: $pair (bounded at ${ARGOS_TIMEOUT}s)"
+    if ! timeout "$ARGOS_TIMEOUT" as_service_user "$VENV_DIR/bin/argospm" install "translate-${pair}"; then
+        echo "[translation] Warning: model translate-${pair} is unavailable or too slow; continuing." >&2
   fi
 }
 
@@ -231,7 +239,7 @@ else
   # Argos package metadata is public/open and does not require an API key.
   # A failed index refresh must not abort the whole update: installed models
   # are still usable and the next run retries.
-  if ! as_service_user "$VENV_DIR/bin/argospm" update; then
+  if ! timeout "$ARGOS_TIMEOUT" as_service_user "$VENV_DIR/bin/argospm" update; then
     echo "[translation] Warning: could not refresh the Argos model index; using installed models." >&2
   fi
 

@@ -24,7 +24,11 @@ echo "🐍 Updating Python packages..."
 # Never keep pip's download cache (saves disk space).
 export PIP_NO_CACHE_DIR=1
 source venv/bin/activate
-pip install -q --no-cache-dir -r requirements.txt
+# Visible progress (--progress-bar off, not -q) and a hard limit: a slow pip
+# run must never look frozen or wait forever on a throttled connection.
+timeout "${SHOPVPN_PIP_TIMEOUT:-1800}" pip install --no-cache-dir \
+    --disable-pip-version-check --progress-bar off -r requirements.txt \
+    || echo "  ⚠️ pip install failed or exceeded ${SHOPVPN_PIP_TIMEOUT:-1800}s; the current packages stay active."
 deactivate
 venv/bin/python3 -m pip cache purge >/dev/null 2>&1 || true
 rm -rf "$HOME/.cache/pip" 2>/dev/null || true

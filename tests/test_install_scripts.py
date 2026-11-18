@@ -67,12 +67,21 @@ def test_fetch_step_shows_progress_and_cannot_hang_forever():
     assert "git clone --quiet" not in text
     assert "git clone --progress" in text
     assert "SHOPVPN_GIT_TIMEOUT" in text
-    assert 'timeout "$git_timeout" git' in text
+    # Every long network step re-prints a heartbeat line, so a slow install
+    # never looks frozen to someone watching the console (the old symptom:
+    # "it stopped after the prerequisites" and the only way out was kill -9).
+    assert 'timeout "$git_timeout" git' in text or 'run_with_heartbeat "$git_timeout"' in text
+    assert "run_with_heartbeat()" in text
+    assert 'echo "   ⏳ $label still running' in text
     # `kill -9` / dropped SSH leftovers must not wedge the next run, and pip plus
     # the .env prompts need a bound and a way out instead of an endless wait.
     assert "interrupted checkout" in text
     assert "SHOPVPN_PIP_TIMEOUT" in text
     assert 'timeout "$PIP_TIMEOUT" pip' in text
+    # pip runs for many minutes on a slow pipe; silent `-q` made the install look
+    # hung. Progress must stay visible.
+    assert "pip install -q" not in text
+    assert "--progress-bar off" in text
     # Piped answers must keep working (CI installs that way) while a closed stdin
     # must fail loudly instead of exiting silently under `set -e`.
     assert "ask() {" in text
@@ -260,6 +269,47 @@ def test_translation_models_install_into_the_bots_own_home():
     assert 'as_service_user "$VENV_DIR/bin/argospm" install' in text
     assert 'as_service_user "$VENV_DIR/bin/argospm" update' in text
     assert "-u XDG_DATA_HOME" in text
+
+
+def test_translation_setup_cannot_hang_on_a_slow_connection():
+    """Every network call in the translation setup needs a hard limit.
+
+    argospm/pip/apt used to run unbounded, so a throttled connection made the
+    install look frozen right after the prerequisites step and the only way out
+    was kill -9 and a re-run from a new session.
+    """
+    text = _read("setup_local_translation.sh")
+    assert 'ARGOS_TIMEOUT="${SHOPVPN_ARGOS_TIMEOUT:-900}"' in text
+    assert 'PIP_TIMEOUT="${SHOPVPN_PIP_TIMEOUT:-1800}"' in text
+    assert 'APT_TIMEOUT="${SHOPVPN_APT_TIMEOUT:-900}"' in text
+    # The model download itself and the index refresh are bounded.
+    assert 'timeout "$ARGOS_TIMEOUT" as_service_user "$VENV_DIR/bin/argospm" install' in text
+    assert 'timeout "$ARGOS_TIMEOUT" as_service_user "$VENV_DIR/bin/argospm" update' in text
+    # pip calls are bounded, too.
+    assert 'timeout "$PIP_TIMEOUT" "$1" -m pip install' in text
+    # And the quiet apt calls inside the translation setup cannot hang either.
+    assert 'timeout "$APT_TIMEOUT" as_root' in text
+
+
+def test_manage_and_update_pip_runs_are_visible_and_bounded():
+    """manage.sh/update.sh pip installs must not be silent (-q) and unbounded.
+
+    On a slow connection a quiet pip run looks exactly like a frozen install,
+    which is what pushed users to kill -9 mid-install.
+    """
+    manage = _read("manage.sh")
+    assert "pip install -q" not in manage
+    assert "SHOPVPN_PIP_TIMEOUT" in manage
+    assert "timeout ${SHOPVPN_PIP_TIMEOUT} pip install" in manage
+    assert "--progress-bar off" in manage
+
+    update = _read("update.sh")
+    assert "pip install -q" not in update
+    assert 'timeout "${SHOPVPN_PIP_TIMEOUT:-1800}" pip install' in update
+    assert "--progress-bar off" in update
+
+    runner = _read("update_runner.sh")
+    assert runner.count("--timeout 60") >= 3, "every pip call in the update runner needs a per-request timeout"
 
 
 def test_installer_caps_the_system_journal():
