@@ -184,7 +184,11 @@ async def try_verify_and_finalize(db, invoice_row) -> str:
         db.update_noapay_invoice_status(invoice_token, remote_status or invoice_row["status"])
         return "not_paid_yet"
 
-    db.update_noapay_invoice_status(invoice_token, "completed")
+    # علامت‌گذاری یک‌بارمصرف: اگر وب‌هوک و بررسی دستی هم‌زمان همین فاکتور را
+    # تأیید کنند، claim دومی هیچ ردیفی را تغییر نمی‌دهد و تحویل دوباره رخ نمی‌دهد.
+    if not db.claim_noapay_invoice(invoice_token):
+        return "already_delivered"
+
     return "verified_now"
 
 
