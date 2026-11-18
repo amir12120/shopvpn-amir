@@ -145,8 +145,13 @@ human() { if [ -e "$1" ]; then du -sh "$1" 2>/dev/null | cut -f1; else echo "-";
 install_system_prereqs() {
   if command -v apt-get >/dev/null 2>&1; then
     echo "[translation] Installing system prerequisites..."
-    timeout "$APT_TIMEOUT" as_root env DEBIAN_FRONTEND=noninteractive apt-get update -qq
-    timeout "$APT_TIMEOUT" as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    # `timeout` is an external binary: it can only exec a real program, never a
+    # shell function. Wrapping the as_root helper in it therefore died with
+    # "failed to run command 'as_root': No such file or directory" and the whole
+    # translation step aborted before apt ever ran. The limit belongs *inside*
+    # the wrapper, around the real command.
+    as_root timeout "$APT_TIMEOUT" env DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    as_root timeout "$APT_TIMEOUT" env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
       python3 python3-pip python3-venv ca-certificates curl >/dev/null
   elif ! command -v python3 >/dev/null 2>&1; then
     echo "ERROR: python3 is required on this operating system." >&2
@@ -225,7 +230,8 @@ fi
 install_pair() {
     local pair="$1"
     echo "[translation] Installing Argos model: $pair (bounded at ${ARGOS_TIMEOUT}s)"
-    if ! timeout "$ARGOS_TIMEOUT" as_service_user "$VENV_DIR/bin/argospm" install "translate-${pair}"; then
+    # Bound the real binary, not the wrapper function (see install_system_prereqs).
+    if ! as_service_user timeout "$ARGOS_TIMEOUT" "$VENV_DIR/bin/argospm" install "translate-${pair}"; then
         echo "[translation] Warning: model translate-${pair} is unavailable or too slow; continuing." >&2
   fi
 }
@@ -239,7 +245,7 @@ else
   # Argos package metadata is public/open and does not require an API key.
   # A failed index refresh must not abort the whole update: installed models
   # are still usable and the next run retries.
-  if ! timeout "$ARGOS_TIMEOUT" as_service_user "$VENV_DIR/bin/argospm" update; then
+  if ! as_service_user timeout "$ARGOS_TIMEOUT" "$VENV_DIR/bin/argospm" update; then
     echo "[translation] Warning: could not refresh the Argos model index; using installed models." >&2
   fi
 

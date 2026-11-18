@@ -266,8 +266,8 @@ def test_translation_models_install_into_the_bots_own_home():
     """
     text = _read("setup_local_translation.sh")
     assert 'systemctl show -p User --value "$SERVICE_NAME"' in text
-    assert 'as_service_user "$VENV_DIR/bin/argospm" install' in text
-    assert 'as_service_user "$VENV_DIR/bin/argospm" update' in text
+    assert 'as_service_user timeout "$ARGOS_TIMEOUT" "$VENV_DIR/bin/argospm" install' in text
+    assert 'as_service_user timeout "$ARGOS_TIMEOUT" "$VENV_DIR/bin/argospm" update' in text
     assert "-u XDG_DATA_HOME" in text
 
 
@@ -283,12 +283,39 @@ def test_translation_setup_cannot_hang_on_a_slow_connection():
     assert 'PIP_TIMEOUT="${SHOPVPN_PIP_TIMEOUT:-1800}"' in text
     assert 'APT_TIMEOUT="${SHOPVPN_APT_TIMEOUT:-900}"' in text
     # The model download itself and the index refresh are bounded.
-    assert 'timeout "$ARGOS_TIMEOUT" as_service_user "$VENV_DIR/bin/argospm" install' in text
-    assert 'timeout "$ARGOS_TIMEOUT" as_service_user "$VENV_DIR/bin/argospm" update' in text
+    assert 'as_service_user timeout "$ARGOS_TIMEOUT" "$VENV_DIR/bin/argospm" install' in text
+    assert 'as_service_user timeout "$ARGOS_TIMEOUT" "$VENV_DIR/bin/argospm" update' in text
     # pip calls are bounded, too.
     assert 'timeout "$PIP_TIMEOUT" "$1" -m pip install' in text
     # And the quiet apt calls inside the translation setup cannot hang either.
-    assert 'timeout "$APT_TIMEOUT" as_root' in text
+    assert 'as_root timeout "$APT_TIMEOUT"' in text
+
+
+def test_no_timeout_wraps_a_shell_function():
+    """`timeout` is a binary: it cannot exec a shell function.
+
+    The 4.37.1 hardening wrote `timeout "$APT_TIMEOUT" as_root ...` and
+    `timeout "$ARGOS_TIMEOUT" as_service_user ...`. Both die immediately with
+    "timeout: failed to run command 'as_root': No such file or directory", so
+    the translation step aborted before apt or argospm ever ran. The limit has
+    to sit inside the wrapper, around the real command.
+    """
+    for name in ("setup_local_translation.sh", "install.sh", "update.sh",
+                 "manage.sh", "update_runner.sh", "cleanup.sh", "preflight.sh"):
+        if not os.path.exists(os.path.join(ROOT, name)):
+            continue
+        text = _read(name)
+        funcs = set(re.findall(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{", text, re.M))
+        # Comments explain the bug in prose; only real command lines matter.
+        code = "\n".join(
+            line for line in text.splitlines() if not line.lstrip().startswith("#")
+        )
+        for match in re.finditer(r"timeout\s+\S+\s+([A-Za-z_][A-Za-z0-9_]*)", code):
+            target = match.group(1)
+            assert target not in funcs, (
+                f"{name}: `timeout ... {target}` wraps a shell function; "
+                "timeout can only exec a real program"
+            )
 
 
 def test_manage_and_update_pip_runs_are_visible_and_bounded():
