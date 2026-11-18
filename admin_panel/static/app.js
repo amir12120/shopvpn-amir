@@ -9519,7 +9519,8 @@ async function paygTargetsHtml() {
   const modeAll = d.mode === 'all';
   const panelRows = d.panels.map(p => {
     const load = p.max_services ? `${fmt(p.active_services)}/${fmt(p.max_services)} ظرفیت` : `${fmt(p.active_services)} سرویس`;
-    const state = p.dsub_enabled === false ? '<span class="chip" style="color:#FB7185">ساب اختصاصی پنل خاموش است</span>'
+    const state = p.can_enforce === false ? '<span class="chip" style="color:#FB7185">قطعه/وصل خودکار پشتیبانی نمی‌شود</span>' + (p.selected ? ' <span class="chip">انتخاب‌شده</span>' : '')
+      : p.dsub_enabled === false ? '<span class="chip" style="color:#FB7185">ساب اختصاصی پنل خاموش است</span>'
       : !p.selected ? '<span class="chip">انتخاب نشده</span>'
       : p.has_target ? `<span class="chip">🎯 ${fmt(p.target_count)} اینباند/گروه</span>`
       : '<span class="chip">انتخاب‌شده (بدون اینباند مستقل)</span>';

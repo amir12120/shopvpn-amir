@@ -3269,6 +3269,8 @@ EXTRA_PHRASES.update([
     ('حداکثر {x} پیام مجاز است.', 'At most {x} messages are allowed.'),
     ('حجم فایل نباید بیشتر از {x} مگابایت باشد.', 'The file must not be larger than {x} megabytes.'),
     ('متن پیام حداکثر {x} نویسه باشد.', 'The message text must be at most {x} characters.'),
+    ('این پنل از قطع و وصل خودکار کاربر پشتیبانی نمی\u200cکند و برای Pay As You Go قابل انتخاب نیست؛ سرویس روی چنین پنلی با خالی\u200cشدن کیف پول متوقف نمی\u200cشد.',
+     'This panel cannot disconnect and reconnect users automatically, so it cannot be selected for Pay As You Go; services on such a panel would keep running after the wallet is emptied.'),
 ])
 
 EXTRA_DYNAMIC_PHRASES += [

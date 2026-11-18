@@ -23,7 +23,10 @@ from db.constants import _wallet_tag
 
 logger = logging.getLogger("payg")
 GIB = 1024 ** 3
-DEFAULT_RATES = [5000, 4500, 4000, 3500]
+# Single per-GB price (toman). The old 50/150/300 GB tiered tariff is retired:
+# one rate now feeds the wallet check, the pool ceiling and the invoice, so they
+# can never disagree about how many bytes a balance buys.
+DEFAULT_RATE = 5000
 
 
 def _now():
@@ -81,7 +84,7 @@ def ensure_schema(db):
         """)
         conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('payg_enabled','1')")
         conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('payg_rates',?)",
-                     (json.dumps(DEFAULT_RATES),))
+                     (str(DEFAULT_RATE),))
         conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('payg_cycle_seconds','600')")
         conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('payg_max_services_per_user','5')")
         conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('payg_panel_server_id','')")
@@ -115,9 +118,14 @@ def ensure_schema(db):
         ):
             if name not in service_columns:
                 conn.execute(f"ALTER TABLE payg_services ADD COLUMN {name} {definition}")
-        # Upgrade accounts created by the first PAYG preview without resetting usage.
-        conn.execute("UPDATE payg_accounts SET last_balance=initial_balance WHERE last_balance=0 AND initial_balance>0")
-        conn.execute("UPDATE payg_accounts SET month_rates=? WHERE month_rates=''", (json.dumps(DEFAULT_RATES),))
+        # One-time migrations, guarded by a marker: running the last_balance
+        # backfill on every ensure_schema used to resurrect an emptied wallet
+        # (last_balance=0 is a real settled state the zero-balance stat and the
+        # top-up detection depend on).
+        if not conn.execute("SELECT 1 FROM settings WHERE key='payg_balance_backfilled'").fetchone():
+            conn.execute("UPDATE payg_accounts SET last_balance=initial_balance WHERE last_balance=0 AND initial_balance>0")
+            conn.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('payg_balance_backfilled','1')")
+        conn.execute("UPDATE payg_accounts SET month_rates=? WHERE month_rates=''", (json.dumps(DEFAULT_RATE),))
     _cleanup_unmarked_legacy_services(db)
 
 
@@ -442,37 +450,77 @@ def cycle_text(db) -> str:
     return f"{digits} {unit}"
 
 
-def get_rates(db):
-    """تعرفه‌ی هر گیگ (پله‌ای). فرم ادمین بات یک عدد ساده ذخیره می‌کند و پنل وب
-    لیست JSON چهارپله‌ای؛ هر دو پشتیبانی می‌شوند."""
-    raw = db.get_setting("payg_rates", json.dumps(DEFAULT_RATES))
+def _coerce_rate(value) -> int:
+    """Normalise every stored tariff shape to one positive per-GB price.
+
+    Accepts a plain number, the bot-admin string (``8,500``) and the retired
+    four-tier JSON list; the list's first value is the price that account has
+    already been billed with.
+    """
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else 0
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("["):
+            try:
+                return _coerce_rate(json.loads(text))
+            except (TypeError, ValueError):
+                return 0
+        text = text.replace(",", "").replace("٬", "").replace(" ", "")
+        value = text
     try:
-        rates = json.loads(raw)
+        rate = int(float(value))
     except (TypeError, ValueError):
-        rates = raw
-    if isinstance(rates, (int, float)):
-        rates = [rates] * 4
-    if not isinstance(rates, list) or len(rates) != 4:
-        return list(DEFAULT_RATES)
-    try:
-        return [max(1, int(x)) for x in rates]
-    except (TypeError, ValueError):
-        return list(DEFAULT_RATES)
+        return 0
+    return rate if rate > 0 else 0
 
 
-def _progressive_cost(total_bytes: int, rates: list[int]) -> int:
-    """Marginal monthly slabs: first 50GB, next 150GB, next 300GB, then rest."""
-    remaining = max(0, int(total_bytes))
-    slabs = [50 * GIB, 150 * GIB, 300 * GIB, None]
-    cost = 0
-    for cap, rate in zip(slabs, rates):
-        amount = remaining if cap is None else min(remaining, cap)
-        if amount > 0:
-            cost += (amount * int(rate) + GIB - 1) // GIB
-        remaining -= amount
-        if remaining <= 0:
-            break
-    return int(cost)
+def get_rate(db) -> int:
+    """The single per-GB price (toman) used by every PayG billing path."""
+    return _coerce_rate(db.get_setting("payg_rates", str(DEFAULT_RATE))) or DEFAULT_RATE
+
+
+def is_legacy_tiered(db) -> bool:
+    """True while the stored setting is still the retired multi-tier list."""
+    try:
+        value = json.loads(str(db.get_setting("payg_rates", str(DEFAULT_RATE))))
+    except (TypeError, ValueError):
+        return False
+    return isinstance(value, list) and len({_coerce_rate(item) for item in value}) > 1
+
+
+def _account_rate(account, month: str, fallback: int = None) -> int:
+    """The rate frozen for this account's current billing month (0 = none yet)."""
+    account = account or {}
+    if str(account.get("month_key") or "") == str(month or ""):
+        rate = _coerce_rate(account.get("month_rates") or "")
+        if rate:
+            return rate
+    return max(0, int(fallback or 0))
+
+
+def _traffic_cost(total_bytes: int, rate: int) -> int:
+    """Cost of ``total_bytes`` at one per-GB price, rounded up once."""
+    rate, total = max(0, int(rate or 0)), max(0, int(total_bytes or 0))
+    return (total * rate + GIB - 1) // GIB if rate and total else 0
+
+
+def _traffic_cost_delta(previous_bytes: int, current_bytes: int, rate: int) -> int:
+    """Invoice only the new bytes; cumulative ceilings avoid rounding loss and the
+    old floor-division free slice (a delta below one GB/rate used to cost zero)."""
+    return max(0, _traffic_cost(current_bytes, rate) - _traffic_cost(previous_bytes, rate))
+
+
+def _apply_pool_limit(db, pool_id: int, limit_bytes: int, keep_status: bool = True) -> None:
+    """Write a PayG ceiling. set_quota_pool_limit always rewrites expires_at and
+    status, so an admin-set expiry, an expired pool and (while the wallet is empty)
+    an over-quota pool are restored instead of silently reactivated."""
+    pool = db.get_quota_pool(int(pool_id)) or {}
+    db.set_quota_pool_limit(int(pool_id), max(1, int(limit_bytes)) / GIB,
+                            expires_at=pool.get("expires_at"))
+    status = str(pool.get("status") or "")
+    if status == "expired" or (keep_status and status in {"exceeded", "stale"}):
+        db.set_quota_pool_status(int(pool_id), status)
 
 
 def _month_key():
@@ -644,27 +692,26 @@ def activate_payg(db, user_id: int, existing_pool_id: int = None):
         return {"ok": False, "reason": "disabled"}
     free = is_free_payg_user(db, user_id)
     balance = int(db.get_wallet_credit(user_id) or 0)
-    if balance <= 0 and not free:
-        return {"ok": False, "reason": "balance"}
+    if not free:
+        if balance <= 0:
+            return {"ok": False, "reason": "balance"}
+        minimum = get_min_balance(db)
+        if balance < minimum:
+            return {"ok": False, "reason": "min_balance", "balance": balance, "min_balance": minimum}
     with db._get_conn() as conn:
         existing = conn.execute("SELECT * FROM payg_accounts WHERE user_id=?", (int(user_id),)).fetchone()
     if existing and existing['status'] == 'suspended_admin':
         return {"ok": False, "reason": "suspended_admin"}
     if existing and existing['status'] == 'active':
         sync = _sync_services(db, user_id, int(existing['quota_pool_id']))
-        try:
-            active_rates = [int(x) for x in json.loads(existing['month_rates'] or '')]
-            if len(active_rates) != 4:
-                raise ValueError
-        except Exception:
-            active_rates = get_rates(db)
-        active_month_used = int(existing['month_used_bytes'] or 0) if existing['month_key'] == _month_key() else 0
-        limit_bytes = 0 if free else _affordable_payg_limit(db, user_id, balance, _billing_base_bytes(db, user_id), active_month_used, active_rates)
-        db.set_quota_pool_limit(int(existing['quota_pool_id']), limit_bytes / GIB)
+        rate = _account_rate(existing, _month_key(), get_rate(db))
+        limit_bytes = 0 if free else _affordable_payg_limit(
+            db, user_id, balance, _billing_base_bytes(db, user_id), rate)
+        _apply_pool_limit(db, int(existing['quota_pool_id']), limit_bytes, keep_status=False)
         return {"ok": True, "existing": True, **sync}
-    rates = get_rates(db)
+    rate = get_rate(db)
     # Temporarily create a generous pool ceiling; after attaching services,
-    # rebase it on settled usage and the wallet's exact tiered purchasing power.
+    # rebase it on settled usage and the wallet's exact purchasing power.
     pool_id = (int(existing_pool_id) if existing_pool_id else
                db.create_quota_pool(user_id, 1_000_000_000,
                                     label="Pay As You Go", metadata={"payg": True}))
@@ -673,7 +720,7 @@ def activate_payg(db, user_id: int, existing_pool_id: int = None):
             "INSERT INTO payg_accounts(user_id,status,quota_pool_id,initial_balance,last_balance,month_key,month_rates,month_used_bytes,month_cost,last_alert_level,created_at,updated_at) "
             "VALUES(?,'active',?,?,?,?,?,0,0,0,?,?) ON CONFLICT(user_id) DO UPDATE SET status='active',quota_pool_id=excluded.quota_pool_id,"
             "initial_balance=excluded.initial_balance,last_balance=excluded.last_balance,month_key=excluded.month_key,month_rates=excluded.month_rates,last_alert_level=0,updated_at=excluded.updated_at",
-            (int(user_id), int(pool_id), balance, balance, _month_key(), json.dumps(rates), _now(), _now()),
+            (int(user_id), int(pool_id), balance, balance, _month_key(), json.dumps(rate), _now(), _now()),
         )
     sync = _sync_services(db, user_id, pool_id)
     if sync["attached"] <= 0:
@@ -684,8 +731,8 @@ def activate_payg(db, user_id: int, existing_pool_id: int = None):
         db.delete_quota_pool(pool_id)
         return {"ok": False, "reason": "no_services", **sync}
     billed_base = _billing_base_bytes(db, user_id)
-    initial_limit = 0 if free else _affordable_payg_limit(db, user_id, balance, billed_base, 0, rates)
-    db.set_quota_pool_limit(pool_id, initial_limit / GIB)
+    initial_limit = 0 if free else _affordable_payg_limit(db, user_id, balance, billed_base, rate)
+    _apply_pool_limit(db, pool_id, initial_limit)
     return {"ok": True, "existing": False, "pool_id": pool_id, **sync}
 
 
@@ -697,16 +744,11 @@ def payg_status(db, user_id: int):
                           (int(user_id), _month_key())).fetchone()
     if not row:
         return {"active": False, "services": 0, "spent": 0}
-    try:
-        account_rates = [int(x) for x in json.loads(row['month_rates'] or '')]
-        if len(account_rates) != 4:
-            raise ValueError
-    except Exception:
-        account_rates = get_rates(db)
+    rate = _account_rate(row, _month_key(), get_rate(db))
     return {"active": row['status'] == 'active', "services": int(services), "spent": int(tx['total'] or 0),
             "balance": int(db.get_wallet_credit(user_id) or 0),
             "month_used_bytes": int(row['month_used_bytes'] or 0),
-            "rates": account_rates,
+            "rate": rate,
             "quota_pool_id": int(row['quota_pool_id'] or 0)}
 
 
@@ -732,8 +774,12 @@ def _billing_base_bytes(db, user_id: int) -> int:
     return max(0, total)
 
 
-def _panel_traffic_rates(db, user_id: int):
-    """Return (rates, has_panel_services); multi-target services use their highest target rate."""
+def _panel_rate(db, user_id: int):
+    """(highest per-GB rate of this account's panel services, has_panel).
+
+    A shared ceiling must use the HIGHEST tariff: the cheapest one would grant
+    bytes the wallet cannot pay for as soon as traffic lands on a pricier panel.
+    """
     with db._get_conn() as conn:
         rows = conn.execute("SELECT panel_server_id,target_key FROM payg_services WHERE user_id=? AND panel_server_id IS NOT NULL", (int(user_id),)).fetchall()
     values = []
@@ -747,11 +793,9 @@ def _panel_traffic_rates(db, user_id: int):
         values.append(max((int(x.get("gb_rate", 0) or 0) for x in selected), default=0))
     positive = [x for x in values if x > 0]
     if positive:
-        return [min(positive)] * 4, bool(rows)
-    # No panel tariff configured: fall back to the legacy progressive tariff.
-    # Returning zeros here used to mean "unlimited and free", which is exactly
-    # how a metered service could be handed out without ever charging the wallet.
-    return list(get_rates(db)), bool(rows)
+        return max(positive), bool(rows)
+    # No panel tariff: the account is billed on the global single rate.
+    return 0, bool(rows)
 
 
 def _pending_panel_fixed_cost(db, user_id: int) -> int:
@@ -769,47 +813,33 @@ def _pending_panel_fixed_cost(db, user_id: int) -> int:
         selected = [get_target_cost(db, int(row["panel_server_id"]), str(key)) for key in keys]
         rates = {field: max((int(x.get(field, 0) or 0) for x in selected), default=0)
                  for field in ("gb_rate", "day_rate", "user_rate")}
-        seats = max(0, int(row.get("user_capacity") or 1) - int(row.get("charged_users") or 0))
-        days = max(0, int((now - float(row.get("day_billed_until") or now)) // 86400)) if row.get("is_active") else 0
+        # A paused service cannot consume a seat, so it must not reserve money
+        # either; otherwise an unused paused config silently shrinks the ceiling
+        # (and can suspend a paying user at a 1-byte limit).
+        active = bool(row.get("is_active"))
+        seats = max(0, int(row.get("user_capacity") or 1) - int(row.get("charged_users") or 0)) if active else 0
+        days = max(0, int((now - float(row.get("day_billed_until") or now)) // 86400)) if active else 0
         reserve += seats * rates["user_rate"] + days * rates["day_rate"]
     return reserve
 
 
-def _affordable_payg_limit(db, user_id: int, balance: int, base_bytes: int, month_used_bytes: int, legacy_rates: list[int]):
-    panel_rates, has_panel = _panel_traffic_rates(db, user_id)
+def _affordable_payg_limit(db, user_id: int, balance: int, base_bytes: int, rate: int):
+    panel_rate, has_panel = _panel_rate(db, user_id)
     reserve = _pending_panel_fixed_cost(db, user_id) if has_panel else 0
     usable = max(0, int(balance) - reserve)
-    rates = panel_rates if has_panel else legacy_rates
-    if not any(int(x or 0) for x in rates):
-        # Without a usable tariff the only safe allowance is the settled volume:
-        # zero would mean "unlimited" in the quota API and hand out free traffic.
-        return max(1, int(base_bytes))
-    if has_panel and usable <= 0:
-        return max(1, int(base_bytes))
-    return _affordable_limit_bytes(usable, rates, base_bytes, month_used_bytes)
+    effective = panel_rate or max(0, int(rate or 0))
+    return _affordable_limit_bytes(usable, effective, base_bytes)
 
 
-def _affordable_limit_bytes(balance: int, rates: list[int], billed_base_bytes: int,
-                            month_used_bytes: int = 0) -> int:
+def _affordable_limit_bytes(balance: int, rate: int, billed_base_bytes: int) -> int:
+    """Absolute pool ceiling: settled bytes plus what the wallet still buys."""
     base = max(0, int(billed_base_bytes))
-    if balance <= 0:
+    rate = max(0, int(rate or 0))
+    if balance <= 0 or rate <= 0:
         # A positive limit equal to settled usage makes the quota reconciler
         # suspend members. Zero would mean unlimited in the existing quota API.
         return max(1, base)
-    month_used = max(0, int(month_used_bytes))
-    already_due = _progressive_cost(month_used, rates)
-    # Find the largest additional byte allowance whose marginal bill is covered
-    # by the wallet. This respects the lower marginal rates at higher tiers.
-    low = 0
-    high = max(1, ((int(balance) + 1) * GIB // max(1, min(rates))) + 1)
-    while low < high:
-        mid = (low + high + 1) // 2
-        due = _progressive_cost(month_used + mid, rates) - already_due
-        if due <= int(balance):
-            low = mid
-        else:
-            high = mid - 1
-    return max(base + 1, base + low)
+    return max(base + 1, base + (int(balance) * GIB) // rate)
 
 
 def _kick_quota_enforcement(db) -> None:
@@ -876,17 +906,14 @@ def refresh_payg_quota(db, user_id: int):
                                 (int(account["quota_pool_id"]),)).fetchone()
         previous_limit = int(pool_row["limit_bytes"] or 0) if pool_row else 0
     month = _month_key()
-    rates = (json.loads(account.get("month_rates") or "[]")
-             if account.get("month_key") == month else get_rates(db))
-    if len(rates) != 4:
-        rates = get_rates(db)
+    rate = _account_rate(account, month, get_rate(db))
     balance = int(db.get_wallet_credit(user_id) or 0)
-    month_used = int(account.get("month_used_bytes") or 0) if account.get("month_key") == month else 0
     if is_free_payg_user(db, user_id):
         db.set_quota_pool_limit(int(account["quota_pool_id"]), 0)
         return True
-    limit = _affordable_payg_limit(db, user_id, balance, _billing_base_bytes(db, user_id), month_used, [int(x) for x in rates])
-    db.set_quota_pool_limit(int(account["quota_pool_id"]), limit / GIB)
+    limit = _affordable_payg_limit(db, user_id, balance, _billing_base_bytes(db, user_id), rate)
+    # A top-up is meant to restore service, so the pool status is reset to active here.
+    _apply_pool_limit(db, int(account["quota_pool_id"]), limit, keep_status=False)
     with db._get_conn() as conn:
         if balance > int(account.get("last_balance") or 0):
             conn.execute("UPDATE payg_accounts SET last_balance=?,initial_balance=?,last_alert_level=0,updated_at=? WHERE user_id=?",
@@ -957,10 +984,11 @@ class PaygEngine:
         self.interval_seconds = max(60, min(86400, configured_interval))
 
     def _bill_once(self):
-        current_rates = get_rates(self.db)
+        current_rate = get_rate(self.db)
         with self.db._get_conn() as conn:
             accounts = [dict(r) for r in conn.execute("SELECT * FROM payg_accounts WHERE status='active'").fetchall()]
         alerts = []
+        needs_enforcement = False
         for account in accounts:
             uid, pool_id = int(account['user_id']), int(account['quota_pool_id'])
             try:
@@ -969,35 +997,24 @@ class PaygEngine:
                     continue
                 current_balance = int(self.db.get_wallet_credit(uid) or 0)
                 month = _month_key()
-                try:
-                    effective_rates = ([int(x) for x in json.loads(account.get('month_rates') or '')]
-                                       if account.get('month_key') == month else list(current_rates))
-                    if len(effective_rates) != 4 or any(x <= 0 for x in effective_rates):
-                        raise ValueError
-                except Exception:
-                    effective_rates = list(current_rates)
+                rate = _account_rate(account, month, current_rate)
                 _sync_services(self.db, uid, pool_id)
-                account_month_used = int(account.get('month_used_bytes') or 0) if account.get('month_key') == month else 0
                 pre_limit = _affordable_payg_limit(self.db, uid, current_balance,
-                                                   _billing_base_bytes(self.db, uid), account_month_used, effective_rates)
-                self.db.set_quota_pool_limit(pool_id, pre_limit / GIB)
+                                                   _billing_base_bytes(self.db, uid), rate)
+                _apply_pool_limit(self.db, pool_id, pre_limit, keep_status=current_balance <= 0)
 
                 with self.db._get_conn() as conn:
                     current = conn.execute("SELECT * FROM payg_accounts WHERE user_id=?", (uid,)).fetchone()
                     if not current:
                         continue
                     if current['month_key'] != month:
-                        month_rates = list(current_rates)
+                        # The tariff is frozen when the month is first billed.
+                        rate = current_rate
                         conn.execute("UPDATE payg_accounts SET month_key=?,month_rates=?,month_used_bytes=0,month_cost=0 WHERE user_id=?",
-                                     (month, json.dumps(month_rates), uid))
+                                     (month, json.dumps(rate), uid))
                     else:
-                        try:
-                            month_rates = [int(x) for x in json.loads(current['month_rates'] or '')]
-                            if len(month_rates) != 4 or any(x <= 0 for x in month_rates):
-                                raise ValueError
-                        except Exception:
-                            month_rates = list(current_rates)
-                            conn.execute("UPDATE payg_accounts SET month_rates=? WHERE user_id=?", (json.dumps(month_rates), uid))
+                        rate = _account_rate(dict(current), month, current_rate)
+                        conn.execute("UPDATE payg_accounts SET month_rates=? WHERE user_id=?", (json.dumps(rate), uid))
                     services = [dict(r) for r in conn.execute(
                         "SELECT ps.*,s.used_bytes,s.reported_at FROM payg_services ps LEFT JOIN usage_snapshots s "
                         "ON s.service_kind=ps.service_kind AND s.service_id=ps.service_id WHERE ps.user_id=? ORDER BY ps.id", (uid,)
@@ -1063,23 +1080,14 @@ class PaygEngine:
                             conn.execute("UPDATE payg_services SET last_billed_bytes=MAX(last_billed_bytes,?) WHERE id=?",
                                          (current_bytes, service['id']))
                             continue
-                        acc = conn.execute("SELECT month_used_bytes,month_key FROM payg_accounts WHERE user_id=?", (uid,)).fetchone()
-                        before_bytes = int(acc['month_used_bytes'] or 0) if acc and acc['month_key'] == month else 0
                         if service.get('panel_server_id'):
                             panel_rates = get_service_target_cost(self.db, int(service['panel_server_id']), {'value': _target_keys_from_config({'value': json.loads(service.get('target_key') or '["*"]')})})
-                            gb_rate = max(0, int(panel_rates.get('gb_rate', 0) or 0))
-                            if gb_rate:
-                                amount = ((current_bytes * gb_rate) // GIB - (previous * gb_rate) // GIB)
-                                rate_snapshot = {"type":"traffic","gb_rate":gb_rate,"panel_id":service['panel_server_id'],"target_key":service.get('target_key')}
-                            else:
-                                # The panel has no per-GB tariff: bill the delta on the legacy
-                                # progressive tariff instead of silently charging nothing.
-                                amount = max(0, _progressive_cost(before_bytes + delta, month_rates) - _progressive_cost(before_bytes, month_rates))
-                                rate_snapshot = {"type":"traffic","fallback":"legacy","rates":month_rates,
-                                                 "panel_id":service['panel_server_id'],"target_key":service.get('target_key')}
+                            gb_rate = max(0, int(panel_rates.get('gb_rate', 0) or 0)) or rate
+                            amount = _traffic_cost_delta(previous, current_bytes, gb_rate)
+                            rate_snapshot = {"type":"traffic","gb_rate":gb_rate,"panel_id":service['panel_server_id'],"target_key":service.get('target_key')}
                         else:
-                            amount = max(0, _progressive_cost(before_bytes + delta, month_rates) - _progressive_cost(before_bytes, month_rates))
-                            rate_snapshot = month_rates
+                            amount = _traffic_cost_delta(previous, current_bytes, rate)
+                            rate_snapshot = {"type":"traffic","gb_rate":rate}
                         wallet = conn.execute("SELECT COALESCE(referral_credit,0) b FROM users WHERE telegram_id=?", (uid,)).fetchone()
                         balance = int(wallet['b'] or 0) if wallet else 0
                         if amount > balance:
@@ -1116,25 +1124,31 @@ class PaygEngine:
                     # Positive limit equal to already-recorded usage makes the quota reconciler suspend all pool members.
                     self.db.set_quota_pool_limit(pool_id, max(1, _billing_base_bytes(self.db, uid)) / GIB)
                 with self.db._get_conn() as conn:
-                    latest = conn.execute("SELECT month_used_bytes FROM payg_accounts WHERE user_id=?", (uid,)).fetchone()
-                    latest_month_used = int(latest['month_used_bytes'] or 0) if latest else 0
                     conn.execute("UPDATE payg_accounts SET last_balance=?,updated_at=? WHERE user_id=?",
                                  (balance, _now(), uid))
                 if fixed_insufficient:
                     limit_bytes = max(1, _billing_base_bytes(self.db, uid))
                 else:
-                    # For mixed-panel pools use the cheapest configured per-GB rate as a conservative shared ceiling.
                     limit_bytes = _affordable_payg_limit(self.db, uid, balance,
-                                                        _billing_base_bytes(self.db, uid), latest_month_used, month_rates)
-                self.db.set_quota_pool_limit(pool_id, limit_bytes / GIB)
-                if billing_insufficient:
+                                                        _billing_base_bytes(self.db, uid), rate)
+                _apply_pool_limit(self.db, pool_id, limit_bytes, keep_status=False)
+                if billing_insufficient or balance <= 0:
+                    # An empty wallet must cut traffic even when nothing was billed this
+                    # cycle (zero usage); the quota reconciler only stops a pool that is
+                    # already flagged exceeded.
                     self.db.set_quota_pool_status(pool_id, "exceeded")
+                    needs_enforcement = True
                 alert = self._alert_payload(uid, account)
                 if alert:
                     alerts.append(alert)
             except Exception:
                 logger.exception("PAYG billing failed for user=%s", uid)
-        return alerts
+        if needs_enforcement:
+            try:
+                _kick_quota_enforcement(self.db)
+            except Exception:
+                logger.exception("PAYG quota enforcement kick failed")
+        return alerts, needs_enforcement
 
     def _alert_payload(self, uid, account):
         balance = int(self.db.get_wallet_credit(uid) or 0)
@@ -1154,7 +1168,7 @@ class PaygEngine:
         logger.info("Pay As You Go billing worker started (interval=%ss)", self.interval_seconds)
         while True:
             try:
-                alerts = await asyncio.to_thread(self._bill_once)
+                alerts, _ = await asyncio.to_thread(self._bill_once)
                 if self.bot:
                     for alert in alerts or []:
                         # Persist the threshold before delivery to avoid retrying every cycle
@@ -1194,6 +1208,37 @@ def _release_provision_lock(db, user_id: int) -> None:
         conn.execute("DELETE FROM payg_provision_locks WHERE user_id=?", (int(user_id),))
 
 
+def panel_can_enforce(server) -> bool:
+    """Whether this panel's provider can actually stop and resume a user."""
+    from panel_providers import get_provider
+    from panel_providers.base import BasePanelProvider
+
+    provider = get_provider(server)
+    if bool(getattr(provider, "supports_data_limit_sync", False)):
+        return True
+    method = getattr(type(provider), "set_enabled", None)
+    return method is not None and method is not BasePanelProvider.set_enabled
+
+
+def provisioning_block(db, user_id: int, panel_ids=None):
+    """Why Pay As You Go must not sell on these panels, or None when they can enforce.
+
+    A metered service is only safe where the provider can cut traffic: on a panel
+    that cannot be disabled (IBSng, MikroTik) an exhausted wallet left the config
+    running for free.
+    """
+    ids = [int(x) for x in (panel_ids if panel_ids is not None else get_usable_payg_panel_ids(db))]
+    for sid in ids:
+        server = db.get_panel_server(int(sid))
+        server = dict(server) if server else {}
+        if server and panel_can_enforce(server):
+            continue
+        name = server.get("name") or f"#{sid}"
+        return (f"پنل «{name}» امکان قطع خودکار سرویس را ندارد. Pay As You Go فقط روی پنل‌هایی "
+                "فعال می‌شود که بتوانند سرویس را متوقف کنند؛ مدیریت باید پنل PayG را تغییر دهد.")
+    return None
+
+
 async def _rollback_payg_vpn(db, server, provisioned: dict) -> None:
     """Best-effort rollback if a newly created PayG config cannot be enrolled."""
     username = str(provisioned.get("username") or "")
@@ -1230,6 +1275,9 @@ async def _provision_payg_multi(db, uid: int, panel_ids, node_ids, protocols) ->
     off_message = dedicated_sub.panels_dsub_off_message(db, panel_ids)
     if off_message:
         raise RuntimeError(off_message)
+    block = provisioning_block(db, int(uid), panel_ids)
+    if block:
+        raise RuntimeError(block)
     targets = get_payg_targets(db)
     for sid in panel_ids:
         server = db.get_panel_server(int(sid))
@@ -1359,6 +1407,9 @@ async def _provision_payg_multi(db, uid: int, panel_ids, node_ids, protocols) ->
                                   (int(uid), sid_key)).fetchone()
         if not enrolled.get("ok") or not member:
             raise RuntimeError("اتصال سرویس ساخته‌شده به حساب مصرفی ناموفق بود.")
+        # Enforce before the caller delivers the config, so the metered service is
+        # never handed over with no ceiling and no disabled state.
+        await _reconcile_user_pool(db, int(uid))
     except Exception:
         await rollback()
         raise
@@ -1437,7 +1488,6 @@ def create_payg_router(db, is_main_bot=True):
     async def show(message, user_id):
         status = payg_status(db, user_id)
         balance = int(db.get_wallet_credit(user_id) or 0)
-        rates = status.get('rates') or get_rates(db)
         rate_text = ("تعرفه هر سرویس بر اساس پنل و گروه/اینباند محل ساخت محاسبه می‌شود؛ "
                      "هزینه ترافیک مصرفی، روزهای فعال و ظرفیت کاربران از کیف پول مشترک کسر خواهد شد.\n")
         supported_text = "سرویس‌های قابل صورتحساب فعلی: VPN و SSH با شمارنده مصرف معتبر.\n"
@@ -1640,6 +1690,10 @@ def create_payg_router(db, is_main_bot=True):
             await call.message.answer("⛔️ هیچ‌یک از پنل‌های انتخاب‌شده فعال یا دارای ظرفیت کافی نیستند.")
             return
         server_id = int(server["id"])
+        block = await asyncio.to_thread(provisioning_block, db, uid, [server_id])
+        if block:
+            await call.message.answer(f"⛔️ {block}")
+            return
         if not await asyncio.to_thread(_acquire_provision_lock, db, uid):
             await call.message.answer("⏳ درخواست ساخت سرویس شما در حال پردازش است؛ لطفاً چند لحظه صبر کنید.")
             return
@@ -1687,13 +1741,10 @@ def create_payg_router(db, is_main_bot=True):
                                       (uid, sid)).fetchone()
             if not enrolled.get("ok") or not member:
                 raise RuntimeError("اتصال سرویس ساخته‌شده به حساب مصرفی ناموفق بود.")
-            enrolled_ok = True
             # Put the panel limit and enable/disable state in place before the user gets
             # the config, so the metered service is never handed over as "unlimited".
-            try:
-                await _reconcile_user_pool(db, uid)
-            except Exception:
-                logger.exception("PAYG pool reconcile failed for user=%s", uid)
+            await _reconcile_user_pool(db, uid)
+            enrolled_ok = True
             try:
                 await _deliver_payg_configs(call.bot, db, uid, [provisioned.get("subscription_url")],
                                             header_text="🍃 سرویس پرداخت به ازای مصرف شما")
@@ -1747,6 +1798,10 @@ def create_payg_router(db, is_main_bot=True):
                 reason = "این قابلیت در حال حاضر غیرفعال است."
             elif result['reason'] == 'suspended_admin':
                 reason = "حساب Pay As You Go شما توسط مدیریت تعلیق شده است."
+            elif result['reason'] == 'min_balance':
+                reason = (f"⛔️ برای فعال‌سازی Pay As You Go موجودی کیف پول باید حداقل "
+                          f"{int(result.get('min_balance') or 0):,} تومان باشد.\n"
+                          f"موجودی فعلی: {int(result.get('balance') or 0):,} تومان")
             elif result['reason'] == 'no_services':
                 reason = ("⛔️ سرویس فعالی با آمار مصرف معتبر برای این حساب پیدا نشد.\n\n"
                           "ابتدا یک سرویس VPN یا SSH قابل‌اندازه‌گیری تهیه کنید. سرویس‌هایی که از قبل به استخر حجم دیگری متصل‌اند، بدون انتقال امن به این حساب اضافه نمی‌شوند.")

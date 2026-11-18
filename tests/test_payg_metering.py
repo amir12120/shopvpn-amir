@@ -70,6 +70,12 @@ class FakeProvider:
         self.status = "active" if enabled else "disabled"
 
 
+class _NoEnforceProvider:
+    """پنلی مانند IBSng/MikroTik که نه سقف اعمال می‌کند و نه کاربر را غیرفعال می‌کند."""
+
+    supports_data_limit_sync = False
+
+
 class PaygMeteringTest(unittest.TestCase):
     def setUp(self):
         self.db = Database(os.path.join(_TMP, f"payg{time.time_ns()}.db"))
@@ -200,19 +206,114 @@ class PaygMeteringTest(unittest.TestCase):
     def test_missing_panel_tariff_falls_back_instead_of_unlimited(self):
         self.db.set_setting("payg_panel_costs", "{}")
         self._activate()
-        rates, has_panel = payg._panel_traffic_rates(self.db, USER_ID)
+        rate, has_panel = payg._panel_rate(self.db, USER_ID)
         self.assertTrue(has_panel)
-        self.assertTrue(any(rates), "fallback rates must not be all zero")
+        self.assertEqual(rate, 0, "بدون تعرفه‌ی پنل، نرخ عمومی تک‌نرخی اعمال می‌شود")
         limit = payg._affordable_payg_limit(self.db, USER_ID, 50_000,
-                                           payg._billing_base_bytes(self.db, USER_ID), 0, payg.get_rates(self.db))
+                                           payg._billing_base_bytes(self.db, USER_ID), payg.get_rate(self.db))
         self.assertGreater(limit, 0, "zero limit means unlimited in the quota API")
 
     def test_panel_tariff_is_used_for_the_allowance(self):
         self._activate()
-        limit = payg._affordable_payg_limit(self.db, USER_ID, 10_000,
-                                           payg._billing_base_bytes(self.db, USER_ID), 0, payg.get_rates(self.db))
+        base = payg._billing_base_bytes(self.db, USER_ID)
+        limit = payg._affordable_payg_limit(self.db, USER_ID, 10_000, base, payg.get_rate(self.db))
         # ۱۰٬۰۰۰ تومان با نرخ ۵٬۰۰۰ تومان/گیگ ≈ ۲ گیگ
-        self.assertGreaterEqual(limit, 2 * GIB)
+        self.assertGreaterEqual(limit, base + 2 * GIB - 1)
+        self.assertLessEqual(limit, base + 2 * GIB)
+
+    def test_shared_ceiling_uses_the_most_expensive_panel(self):
+        self._activate()
+        other_id = int(self.db.add_panel_server("PayG panel 2", "3xui", "http://127.0.0.1:2", "u", "p"))
+        self.db.set_setting("payg_panel_costs", json.dumps({
+            str(int(self.server_id)): {"*": {"gb_rate": 1000, "day_rate": 0, "user_rate": 0}},
+            str(other_id): {"*": {"gb_rate": 10_000, "day_rate": 0, "user_rate": 0}},
+        }))
+        with self.db._get_conn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO payg_services(user_id,service_kind,service_id,last_billed_bytes,created_at,"
+                "panel_server_id,target_key,user_capacity,is_active) VALUES(?,?,?,?,?,?,?,?,1)",
+                (USER_ID, "vpn", "panel_link:9001", 0,
+                 time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()), other_id, '["*"]', 1))
+        rate, has_panel = payg._panel_rate(self.db, USER_ID)
+        self.assertTrue(has_panel)
+        self.assertEqual(rate, 10_000, "سقف مشترک باید با گران‌ترین پنل حساب شود، نه ارزان‌ترین")
+        base = payg._billing_base_bytes(self.db, USER_ID)
+        limit = payg._affordable_payg_limit(self.db, USER_ID, 10_000, base, payg.get_rate(self.db))
+        self.assertLessEqual(limit, base + GIB, "۱۰٬۰۰۰ تومان با نرخ ۱۰٬۰۰۰ = یک گیگ")
+        self.assertGreater(limit, base)
+
+    def test_traffic_cost_has_no_free_slice(self):
+        self.assertEqual(payg._traffic_cost(0, 5000), 0)
+        self.assertEqual(payg._traffic_cost(GIB // 10, 5000), 500)
+        self.assertEqual(payg._traffic_cost_delta(GIB, GIB + GIB // 10, 5000), 500)
+        self.assertEqual(payg._traffic_cost_delta(GIB, GIB + 1, 5000), 1)
+        total = sum(payg._traffic_cost_delta(GIB + i * (GIB // 7), GIB + (i + 1) * (GIB // 7), 5000)
+                    for i in range(7))
+        self.assertEqual(total, payg._traffic_cost(GIB + 7 * (GIB // 7), 5000) - payg._traffic_cost(GIB, 5000))
+
+    def test_sub_gigabyte_delta_is_billed_instead_of_skipped(self):
+        self._activate()
+        self._baseline(1 * GIB)
+        self._baseline(1 * GIB + GIB // 4)  # ۲۵۰ مگابایت
+        self._bill()
+        tx = self._transactions()
+        self.assertEqual(len(tx), 1)
+        self.assertEqual(int(tx[0]["amount"]), 1250)
+        self.assertEqual(self._wallet(), 100_000 - 1250)
+
+    def test_zero_wallet_without_usage_is_still_cut(self):
+        self._activate()
+        with self.db._get_conn() as conn:
+            conn.execute("UPDATE users SET referral_credit=0 WHERE telegram_id=?", (USER_ID,))
+        alerts, needs_enforcement = self._bill()
+        self.assertTrue(needs_enforcement)
+        with self.db._get_conn() as conn:
+            account = dict(conn.execute("SELECT quota_pool_id FROM payg_accounts WHERE user_id=?",
+                                        (USER_ID,)).fetchone())
+        pool = self.db.get_quota_pool(int(account["quota_pool_id"]))
+        self.assertEqual(pool["status"], "exceeded", "کیف پول خالی حتی بدون مصرف باید استخر را ببندد")
+        provider = FakeProvider(used=1 * GIB)
+        asyncio_run(QuotaReconciler(self.db, vpn_provider_factory=lambda server: provider).reconcile_pool(pool))
+        self.assertIn(("payg_user", False), provider.enabled)
+
+    def test_payg_pool_is_cut_immediately_even_while_usage_is_stale(self):
+        self._activate()
+        with self.db._get_conn() as conn:
+            account = dict(conn.execute("SELECT quota_pool_id FROM payg_accounts WHERE user_id=?",
+                                        (USER_ID,)).fetchone())
+            stale = "2000-01-01T00:00:00+00:00"
+            conn.execute("UPDATE usage_snapshots SET reported_at=? WHERE service_kind='vpn' AND service_id=?",
+                         (stale, self.service_key))
+        pool_id = int(account["quota_pool_id"])
+        # سقف کوچک‌تر از مصرف ثبت‌شده: استخر از حد گذشته، ولی آمار مصرف کهنه است
+        self.db.set_quota_pool_limit(pool_id, 0.5)
+        self.db.set_quota_pool_status(pool_id, "exceeded")
+        provider = FakeProvider(used=5 * GIB)
+        asyncio_run(QuotaReconciler(self.db, vpn_provider_factory=lambda server: provider)
+                    .reconcile_pool(self.db.get_quota_pool(pool_id)))
+        self.assertIn(("payg_user", False), provider.enabled,
+                      "برای استخر PayG، exceeded باید بر مهلت داده‌ی کهنه اولویت داشته باشد")
+        self.assertEqual(self.db.get_quota_pool(pool_id)["status"], "exceeded")
+
+    def test_limits_do_not_revive_an_expired_pool_or_drop_its_expiry(self):
+        account = self._activate()
+        pool_id = int(account["quota_pool_id"])
+        expiry = "2030-01-01T00:00:00+00:00"
+        self.db.set_quota_pool_limit(pool_id, 2.0, expires_at=expiry)
+        self.db.set_quota_pool_status(pool_id, "expired")
+        payg._apply_pool_limit(self.db, pool_id, 3 * GIB)
+        pool = self.db.get_quota_pool(pool_id)
+        self.assertEqual(pool["status"], "expired")
+        self.assertEqual(pool["expires_at"], expiry)
+
+    def test_panels_that_cannot_be_disabled_cannot_sell_payg(self):
+        server = dict(self.db.get_panel_server(self.server_id))
+        with mock.patch("panel_providers.get_provider", return_value=_NoEnforceProvider()):
+            self.assertFalse(payg.panel_can_enforce(server))
+            self.assertIsNotNone(payg.provisioning_block(self.db, USER_ID, [self.server_id]))
+        with mock.patch("panel_providers.get_provider", return_value=FakeProvider()):
+            self.assertTrue(payg.panel_can_enforce(server))
+            self.assertIsNone(payg.provisioning_block(self.db, USER_ID, [self.server_id]))
 
     # ---------------------------------------------------------------- delivery
     def test_config_is_delivered_like_a_paid_order(self):

@@ -67,10 +67,10 @@ class PaygAdminSettingsTest(unittest.TestCase):
     def test_switch_and_price_are_saved_from_the_bot(self):
         xs.save_values(self.db, "bot", {"payg_enabled": "0", "payg_rates": "8,500"})
         self.assertEqual(self.db.get_setting("payg_enabled"), "0")
-        self.assertEqual(payg.get_rates(self.db), [8500, 8500, 8500, 8500])
+        self.assertEqual(payg.get_rate(self.db), 8500)
         xs.save_values(self.db, "bot", {"payg_enabled": "1"})
         self.assertEqual(self.db.get_setting("payg_enabled"), "1")
-        self.assertEqual(payg.get_rates(self.db)[0], 8500, "قیمت نباید با روشن‌کردن کلید از دست برود")
+        self.assertEqual(payg.get_rate(self.db), 8500, "قیمت نباید با روشن‌کردن کلید از دست برود")
 
     def test_price_rejects_non_numbers(self):
         with self.assertRaises(xs.SettingsValidationError):
@@ -78,17 +78,21 @@ class PaygAdminSettingsTest(unittest.TestCase):
         with self.assertRaises(xs.SettingsValidationError):
             xs.save_values(self.db, "bot", {"payg_rates": "0"})
 
-    def test_rates_accept_legacy_json_and_plain_numbers(self):
+    def test_rate_is_a_single_price_and_legacy_tiers_are_detected(self):
+        # ذخیره‌ی قدیمی چهارپله‌ای باید به یک نرخ تبدیل شود (اولین پله = نرخی که
+        # حساب‌های فعال با آن صورت‌حساب شده‌اند)
         self.db.set_setting("payg_rates", json.dumps([7000, 6000, 5000, 4000]))
-        self.assertEqual(payg.get_rates(self.db), [7000, 6000, 5000, 4000])
+        self.assertEqual(payg.get_rate(self.db), 7000)
+        self.assertTrue(payg.is_legacy_tiered(self.db))
         self.db.set_setting("payg_rates", "9000")
-        self.assertEqual(payg.get_rates(self.db), [9000] * 4)
+        self.assertEqual(payg.get_rate(self.db), 9000)
+        self.assertFalse(payg.is_legacy_tiered(self.db))
         self.db.set_setting("payg_rates", "not-a-rate")
-        self.assertEqual(payg.get_rates(self.db), list(payg.DEFAULT_RATES))
+        self.assertEqual(payg.get_rate(self.db), payg.DEFAULT_RATE)
 
-        # پنل وب هم همان مقدار را می‌خواند (rate اولین پله است)
-        self.db.set_setting("payg_rates", "12000")
-        self.assertEqual(payg.get_rates(self.db)[0], 12000)
+        # همان عددی که کاربر در بات وارد می‌کند (با جداکننده‌ی هزارگان)
+        self.db.set_setting("payg_rates", "12,000")
+        self.assertEqual(payg.get_rate(self.db), 12000)
 
     def test_admin_button_lives_in_the_products_hub(self):
         source = io.open(os.path.join(ROOT, "keyboards.py"), encoding="utf-8").read()

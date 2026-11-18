@@ -5094,6 +5094,7 @@ def _payg_panel_rows(payg) -> list:
             "dsub_enabled": sid not in dsub_off,
             "has_target": sid in targets,
             "target_count": payg._target_count(targets[sid]) if sid in targets else 0,
+            "can_enforce": payg.panel_can_enforce(dict(server)),
             "active_services": int(info.get("active_services") or 0),
             "max_services": info.get("max_services"),
         })
@@ -5138,8 +5139,8 @@ def api_payg_overview(admin=Depends(require_permission("catalog")), _mt=Depends(
             (month,)).fetchone()["n"]
     return {
         "enabled": db.get_setting("payg_enabled", "1") == "1",
-        "rate": payg.get_rates(db)[0],
-        "legacy_tiered": len(set(payg.get_rates(db))) > 1,
+        "rate": payg.get_rate(db),
+        "legacy_tiered": payg.is_legacy_tiered(db),
         "cycle_seconds": max(60, int(db.get_setting("payg_cycle_seconds", "600") or 600)),
         "max_services": int(db.get_setting("payg_max_services_per_user", "5") or 5),
         "min_balance": payg.get_min_balance(db),
@@ -5171,7 +5172,7 @@ def api_payg_settings(body: PaygSettingsBody, admin=Depends(require_permission("
         rate = int(body.rate)
         if not 1 <= rate <= 10**9:
             raise HTTPException(400, tr("قیمت هر گیگ باید عددی مثبت باشد."))
-        db.set_setting("payg_rates", json.dumps([rate] * 4))
+        db.set_setting("payg_rates", str(rate))
         changes.append(f"rate={rate}")
     if body.cycle_seconds is not None:
         if not 60 <= int(body.cycle_seconds) <= 86400:
@@ -5256,6 +5257,9 @@ async def api_payg_set_target(server_id: int, body: PaygTargetBody, admin=Depend
     server = db.get_panel_server(server_id)
     if not server or not server["is_active"]:
         raise HTTPException(404, tr("پنل فعال یافت نشد."))
+    if not payg.panel_can_enforce(dict(server)):
+        raise HTTPException(400, tr("این پنل از قطع و وصل خودکار کاربر پشتیبانی نمی‌کند و برای Pay As You Go قابل انتخاب نیست؛ "
+                                    "سرویس روی چنین پنلی با خالی‌شدن کیف پول متوقف نمی‌شد."))
     import dedicated_sub
     off_message = dedicated_sub.panels_dsub_off_message(db, [server_id])
     if off_message:
@@ -5604,7 +5608,11 @@ def api_payg_account_suspend(user_id: int, admin=Depends(require_permission("cat
     if row["quota_pool_id"]:
         usage = db.get_quota_usage(int(row["quota_pool_id"]))
         used = int((usage or {}).get("used_bytes") or 0)
-        db.set_quota_pool_limit(int(row["quota_pool_id"]), max(1, used) / _payg_gib())
+        # Limit equal to settled usage, then flag the pool so the reconciler
+        # actually disables the config instead of waiting for new traffic.
+        payg._apply_pool_limit(db, int(row["quota_pool_id"]), max(1, used))
+        db.set_quota_pool_status(int(row["quota_pool_id"]), "exceeded")
+        payg._kick_quota_enforcement(db)
     db.log_admin_action(admin["id"], "payg_account_suspend", f"user={user_id} (پنل وب - {admin['username']})", "user", str(user_id))
     return {"ok": True}
 
@@ -5622,9 +5630,10 @@ def api_payg_account_resume(user_id: int, admin=Depends(require_permission("cata
     with db._get_conn() as conn:
         conn.execute("UPDATE payg_accounts SET status='active',last_alert_level=0,updated_at=? WHERE user_id=?", (payg._now(), user_id))
     if row["quota_pool_id"]:
-        rates = [int(x) for x in json.loads(row["month_rates"] or json.dumps(payg.get_rates(db)))]
-        limit = payg._affordable_payg_limit(db, user_id, balance, payg._billing_base_bytes(db, user_id), int(row["month_used_bytes"] or 0), rates)
-        db.set_quota_pool_limit(int(row["quota_pool_id"]), limit / _payg_gib())
+        rate = payg._account_rate(dict(row), payg._month_key(), payg.get_rate(db))
+        limit = payg._affordable_payg_limit(db, user_id, balance, payg._billing_base_bytes(db, user_id), rate)
+        payg._apply_pool_limit(db, int(row["quota_pool_id"]), limit, keep_status=False)
+        payg._kick_quota_enforcement(db)
     db.log_admin_action(admin["id"], "payg_account_resume", f"user={user_id} (پنل وب - {admin['username']})", "user", str(user_id))
     return {"ok": True}
 

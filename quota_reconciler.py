@@ -8,6 +8,7 @@ this module never converts an unreported counter into zero usage.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -49,6 +50,15 @@ def _env_secret_resolver(reference: str):
     if not value:
         raise SSHProviderError(f"متغیر محیطی {name} تنظیم نشده است")
     return value
+
+
+def _is_payg_pool(pool) -> bool:
+    """True for pools created by Pay As You Go (metadata {"payg": true})."""
+    try:
+        meta = json.loads((pool or {}).get("metadata_json") or "{}")
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return isinstance(meta, dict) and bool(meta.get("payg"))
 
 
 class QuotaReconciler:
@@ -321,7 +331,10 @@ class QuotaReconciler:
 
         # Expiry is enforceable without usage data. For volume-limited pools, stale
         # accounting fails closed: suspend members until every counter is fresh again.
+        # A PayG pool is already over its ceiling, so it is cut immediately instead
+        # of waiting out the grace window (an empty wallet must stop traffic).
         expired = self._pool_is_expired(pool)
+        payg_pool = _is_payg_pool(pool)
         members = self.db.get_quota_members(pool_id)
         usage = self.db.get_quota_usage(pool_id)
         fresh = self._snapshots_fresh(members)
@@ -334,6 +347,11 @@ class QuotaReconciler:
                 actions.append(await self._set_member_enabled(pool_id, member, False, "expired"))
             self.db.set_quota_pool_status(pool_id, "expired")
             state = "expired"
+        elif exceeded and payg_pool:
+            for member in members:
+                actions.append(await self._set_member_enabled(pool_id, member, False, "quota_exceeded"))
+            self.db.set_quota_pool_status(pool_id, "exceeded")
+            state = "exceeded"
         elif limit and not fresh and self._oldest_snapshot_age(members) <= self.max_snapshot_age_seconds + self.stale_grace_seconds:
             state = "stale_grace"
         elif limit and not fresh:
