@@ -2,6 +2,11 @@
 """Generated English catalog for Persian strings passed to tr()."""
 
 EXTRA_PHRASES = {
+    # 4.36.0 sync: PayG delivery text/photo, per-panel dedicated-sub switch,
+    # backup-to-report-topic and Doctor DNS user count (device limit).
+    'عکسی ثبت نشده است.': 'No photo has been saved yet.',
+    'حداقل موجودی باید عددی بین ۰ و ۱۰ میلیارد تومان باشد.': 'The minimum balance must be a number between 0 and 10,000,000,000 Toman.',
+    'این نوع پنل بدون ساب اختصاصی کار نمی\u200cکند؛ خاموش\u200cکردن آن مجاز نیست.': 'This panel type does not work without the dedicated subscription; turning it off is not allowed.',
     'درخواست\u200cهای ترجمه بیش از حد مجاز است؛ کمی بعد دوباره تلاش کنید.': 'Too many translation requests; please try again shortly.',
     'پنل این نماینده قبلاً راه\u200cاندازی شده؛ از صفحه\u200cی ورود استفاده کن.': "This reseller's panel has already been set up; use the login page.",
     'یوزرنیم باید حداقل ۳ کاراکتر باشد.': 'Username must be at least 3 characters.',
@@ -1584,6 +1589,9 @@ EXTRA_PHRASES.update({
 })
 
 EXTRA_DYNAMIC_PHRASES = [
+    # 4.36.0 sync: backup-to-report-topic toggle and PayG delivery text limit.
+    ('🗄 ارسال بکاپ به چت خصوصی ربات: {x}', '🗄 Send backups to the bot private chat: {x}'),
+    ('متن پیام نمی\u200cتواند بیشتر از {x} نویسه باشد.', 'The message text cannot be longer than {x} characters.'),
     ('✅ زبان {x} فعال شد. منوی اصلی از همین الان ترجمه\u200cشده؛ بقیه\u200cی بخش\u200cها همین که کاربری بهشان برسد، خودکار ترجمه و ذخیره می\u200cشوند.', '✅ {x} language activated. The main menu is translated from now on; the rest of the sections are translated and saved automatically as users reach them.'),
     ('🔑 کلید OpenRouter: {x}', '🔑 OpenRouter key: {x}'),
 

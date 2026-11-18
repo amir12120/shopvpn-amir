@@ -178,9 +178,12 @@ jobs:
               # formulas, mini-app home tiles, web-panel assistant, web 2FA.
               "custom_menu_buttons", "accounting", "home_tiles", "web_assistant",
               "db.custom_menu",
+              # Upstream 9.8.0 batch: Doctor DNS SSH bootstrap (asyncssh) and the
+              # scoped-device (user count) provider path.
+              "doctor_dns_ssh_setup", "panel_providers.doctordns_provider",
               # New third-party dependencies from requirements.txt: prove the
               # lean install can actually import them on the target box.
-              "telethon", "arabic_reshaper", "bidi",
+              "telethon", "arabic_reshaper", "bidi", "asyncssh",
           ]
           for name in modules:
               importlib.import_module(name)

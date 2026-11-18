@@ -1538,3 +1538,83 @@ def test_doctor_dns_and_source_offer_stay_wired():
 
     # The license this fork ships with is the source-available 1.0 one.
     assert "SOURCE-AVAILABLE" in (ROOT / "LICENSE").read_text(encoding="utf-8").upper()
+
+
+def test_upstream_980_batch_is_wired_end_to_end():
+    """Upstream 9.8.0 (fork 4.36.0): per-panel dedicated-sub switch, PayG minimum
+    balance plus admin-defined delivery text/photo, accounting-priced service
+    add-ons, report-topic backups, the Doctor DNS device limit and its one-time SSH
+    bootstrap. Every edge is asserted so a later sync cannot leave it half-wired."""
+    for relative in ("doctor_dns_ssh_setup.py", "tests/test_doctordns_ssh_setup.py",
+                     "tests/test_accounting_service_addon.py"):
+        path = ROOT / relative
+        assert path.is_file(), f"{relative} is missing"
+        assert path.stat().st_size > 0, f"{relative} is empty"
+
+    admin_panel = (ROOT / "admin_panel/server.py").read_text(encoding="utf-8")
+    admin_js = (ROOT / "admin_panel/static/app.js").read_text(encoding="utf-8")
+    handlers_user = (ROOT / "handlers_user.py").read_text(encoding="utf-8")
+    handlers_admin = (ROOT / "handlers_admin.py").read_text(encoding="utf-8")
+
+    # Per-panel dedicated subscription: schema -> db -> gating -> panels UI.
+    assert '("panel_servers", "dsub_enabled", "INTEGER DEFAULT 1")' in (ROOT / "db/_base.py").read_text(encoding="utf-8")
+    assert '"dsub_enabled"' in (ROOT / "db/panels.py").read_text(encoding="utf-8")
+    dedicated = (ROOT / "dedicated_sub.py").read_text(encoding="utf-8")
+    for needle in ("def panel_enabled(", "def panels_dsub_off(",
+                   "def panels_dsub_off_message(", "PANEL_DSUB_REQUIRED_TYPES"):
+        assert needle in dedicated, f"dedicated_sub.py lost {needle}"
+    assert "panel_enabled(db, panel_id)" in dedicated
+    assert "panels_dsub_off_message" in (ROOT / "payg.py").read_text(encoding="utf-8")
+    assert "panels_dsub_off_message" in (ROOT / "direct_panel_provision.py").read_text(encoding="utf-8")
+    assert "panels_dsub_off_message" in (ROOT / "miniapp/server.py").read_text(encoding="utf-8")
+    assert "panels_dsub_off_message" in admin_panel
+    assert '"dsub_enabled"' in admin_panel
+    assert "dsub_enabled: $('#pa-dsub', body).checked" in admin_js
+
+    # PayG minimum balance and the admin-defined delivery message/photo.
+    payg = (ROOT / "payg.py").read_text(encoding="utf-8")
+    for needle in ("def get_min_balance(", "def get_usable_payg_panel_ids(",
+                   "def render_delivery_text(", "async def send_delivery_message(",
+                   "PAYG_MIN_BALANCE_KEY", "PAYG_DELIVERY_TEXT_KEY", "PAYG_DELIVERY_PHOTO_KEY"):
+        assert needle in payg, f"payg.py lost {needle}"
+    assert payg.count("send_delivery_message(call.message, db, default_text") >= 2
+    for route in ('@app.post("/api/payg/delivery-photo")',
+                  '@app.delete("/api/payg/delivery-photo")',
+                  '@app.get("/api/payg/delivery-photo")'):
+        assert route in admin_panel, f"admin panel lost {route}"
+    assert "payg.get_min_balance(db)" in admin_panel
+    assert 'id="payg-min-balance"' in admin_js and 'id="payg-delivery-text"' in admin_js
+    assert "apiMultipart('/payg/delivery-photo'" in admin_js
+
+    # Accounting-priced add-ons reach the bot's volume and user-count upgrade paths.
+    assert "def suggest_service_addon(" in (ROOT / "accounting.py").read_text(encoding="utf-8")
+    assert 'accounting.suggest_service_addon(db, item["custom"], amount, "gb")' in handlers_user
+    assert 'accounting.suggest_service_addon(db, item["custom"], users - info["current"], "user")' in handlers_user
+    assert "renew_accounting=accounting_enabled" in handlers_user
+
+    # Backups go to the report topic first; private-chat sending is a real toggle.
+    backup = (ROOT / "backup.py").read_text(encoding="utf-8")
+    assert "report_router.send_to_group(" in backup
+    assert "backup_skip_admin_dm" in backup
+    assert '"adm_backup_dm_toggle"' in (ROOT / "keyboards.py").read_text(encoding="utf-8")
+    assert 'F.data == "adm_backup_dm_toggle"' in handlers_admin
+    assert "backup_skip_admin_dm" in (ROOT / "extra_settings_schema.py").read_text(encoding="utf-8")
+
+    # Doctor DNS: device limit ("user count") and the one-time SSH bootstrap.
+    provider = (ROOT / "panel_providers/doctordns_provider.py").read_text(encoding="utf-8")
+    assert "supports_user_limit = True" in provider
+    assert "async def _apply_devices(" in provider
+    assert '@app.post("/api/panel-servers/doctordns/auto-setup")' in admin_panel
+    assert "doctor_dns_ssh_setup.setup_existing_panel" in admin_panel
+    assert "wireDoctorDNSAutoBox" in admin_js
+
+    # Public service URLs are editable at runtime instead of only from .env.
+    assert "def _runtime_api_base_url(" in admin_panel
+    assert "def _runtime_miniapp_url(" in (ROOT / "miniapp/server.py").read_text(encoding="utf-8")
+    assert "miniapp_public_url" in (ROOT / "keyboards.py").read_text(encoding="utf-8")
+    assert '@app.put("/api/links-ssl")' in admin_panel
+    assert "renderLinksSSL" in admin_js and "'links-ssl'" in admin_js
+
+    # CI proves the new module imports on a lean install.
+    workflow = (ROOT / ".github/workflows/deploy-smoke-test.yml").read_text(encoding="utf-8")
+    assert '"doctor_dns_ssh_setup", "panel_providers.doctordns_provider"' in workflow
