@@ -321,7 +321,9 @@ class PaymentsMixin:
     def expire_stale_blupal_invoices(self, hours: int = 1):
         """فاکتورهایی که هنوز 'new'/'pending' مانده‌اند ولی بیش از یک ساعت (اعتبار
         فاکتور بلوپال طبق مستندات) از ایجادشان گذشته را 'expired' علامت می‌زند."""
-        cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        # هم‌قالب با created_at (DEFAULT CURRENT_TIMESTAMP با فاصله) تا مقایسهٔ
+        # رشته‌ای درست باشد؛ isoformat() با 'T' فاکتورهای تازه را هم منقضی می‌کرد.
+        cutoff = (datetime.utcnow() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
         with self._get_conn() as conn:
             conn.execute(
                 "UPDATE blupal_invoices SET status='expired', updated_at=? "
@@ -384,6 +386,21 @@ class PaymentsMixin:
             )
 
 
+    def claim_noapay_invoice(self, invoice_token: str) -> bool:
+        """تلاش اتمیک برای علامت‌گذاری یک فاکتور NoapayBot به‌عنوان 'completed'،
+        فقط اگر قبلاً completed نشده باشد (همان الگوی claim_blupal_invoice).
+        بدون این claim، وب‌هوک و دکمه‌ی «بررسی وضعیت» که هم‌زمان همین فاکتور را
+        تأیید می‌کنند هر دو 'verified_now' می‌گرفتند و سفارش/شارژ دوبار تحویل
+        داده می‌شد."""
+        with self._get_conn() as conn:
+            cur = conn.execute(
+                "UPDATE noapay_invoices SET status='completed', updated_at=? "
+                "WHERE invoice_token=? AND status != 'completed'",
+                (datetime.utcnow().isoformat(), invoice_token),
+            )
+            return cur.rowcount > 0
+
+
     def get_pending_noapay_invoice_for_ref(self, kind: str, ref_id: int):
         """آخرین فاکتور فعال (new/pending/opened/paid/confirmed) ثبت‌شده برای یک سفارش
         یا شارژ کیف پول خاص را برمی‌گرداند."""
@@ -408,7 +425,8 @@ class PaymentsMixin:
     def expire_stale_noapay_invoices(self):
         """فاکتورهایی که هنوز در جریان مانده‌اند ولی بیش از ۶۰ دقیقه (اعتبار فاکتور NoapayBot)
         از ایجادشان گذشته را 'expired' علامت می‌زند."""
-        cutoff = (datetime.utcnow() - timedelta(minutes=65)).isoformat()
+        # همان دلیل بلوپال: created_at با CURRENT_TIMESTAMP (فاصله) ذخیره می‌شود.
+        cutoff = (datetime.utcnow() - timedelta(minutes=65)).strftime("%Y-%m-%d %H:%M:%S")
         with self._get_conn() as conn:
             conn.execute(
                 "UPDATE noapay_invoices SET status='expired', updated_at=? "

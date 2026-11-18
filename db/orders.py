@@ -509,7 +509,10 @@ class OrdersMixin:
         از کیف‌پول/کد) از قبل هنگام ثبت خودکار 'approved' شده‌اند، پس اصلاً
         pending نمی‌مانند و اینجا هم دیده نمی‌شوند. شناسه‌ی سفارش‌های
         expired‌شده را برمی‌گرداند (برای اطلاع‌رسانی به کاربر توسط صدازننده)."""
-        cutoff = (datetime.utcnow() - timedelta(minutes=max(timeout_minutes, 1))).isoformat()
+        # created_at با DEFAULT CURRENT_TIMESTAMP به شکل 'YYYY-MM-DD HH:MM:SS' (فاصله، بدون T)
+        # ذخیره می‌شود؛ cutoff باید همان قالب باشد وگرنه مقایسهٔ رشته‌ای همهٔ سفارش‌های
+        # تازه را هم قدیمی‌تر از cutoff می‌بیند (' ' < 'T') و همان لحظه منقضی می‌کند.
+        cutoff = (datetime.utcnow() - timedelta(minutes=max(timeout_minutes, 1))).strftime("%Y-%m-%d %H:%M:%S")
         with self._get_conn() as conn:
             rows = conn.execute(
                 "SELECT o.id FROM orders o "
