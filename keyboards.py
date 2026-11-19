@@ -286,7 +286,7 @@ def main_menu_inline_kb(db, is_admin: bool, is_reseller: bool = False, is_main_b
     روی کلیک هر دکمه، callback_data به‌صورت 'mm:<key>' ارسال می‌شود که در
     handlers_user.py / handlers_admin.py به همان هندلر متنی متناظرش وصل شده."""
     customs = {}
-    if is_main_bot:
+    if db.is_full_access_bot(is_main_bot):
         try:
             customs = {f"custom_menu:{b['id']}": b for b in db.cm_list(only_active=True)}
         except Exception:
@@ -325,7 +325,7 @@ def custom_menu_button(btn: dict):
 
 def _show_commission_reseller_request(db, user_tg_id: int, is_main_bot: bool) -> bool:
     return (
-        is_main_bot
+        db.is_full_access_bot(is_main_bot)
         and not db.is_inline_reseller(user_tg_id)
         and not db.get_pending_commission_reseller_request_for_user(user_tg_id)
     )
@@ -338,7 +338,7 @@ def menu_for_user(db, user_tg_id: int, is_main_bot: bool = True):
     except Exception:
         db._current_menu_language = ""
     show_reseller_request = (
-        is_main_bot
+        db.is_full_access_bot(is_main_bot)
         and not db.is_reseller(user_tg_id)
         and not db.get_open_reseller_request(user_tg_id)
     )
@@ -353,7 +353,7 @@ def inline_menu_for_user(db, user_tg_id: int, is_main_bot: bool = True) -> Inlin
     if db.get_setting("main_menu_inline_enabled", "0") != "1":
         return None
     show_reseller_request = (
-        is_main_bot
+        db.is_full_access_bot(is_main_bot)
         and not db.is_reseller(user_tg_id)
         and not db.get_open_reseller_request(user_tg_id)
     )
@@ -2104,7 +2104,7 @@ def _is_volume_credit_owner(db) -> bool:
     result = False
     try:
         from config import DB_PATH as _MAIN_DB_PATH
-        if key != _MAIN_DB_PATH:
+        if key != _MAIN_DB_PATH and not db.is_unrestricted_full():
             from database import Database as _Database
             owner_id = db.get_owner_telegram_id()
             if owner_id:
@@ -2124,12 +2124,14 @@ def _unmapped_xs_groups() -> list:
 
 
 def _is_item_visible(db, key: str, is_main_bot: bool) -> bool:
+    # is_main_bot = بات اصلی واقعی؛ full = بات اصلی یا نمایندگی کامل (کپی ۹۹٪ بات اصلی)
+    full = bool(db.is_full_access_bot(is_main_bot))
     if key == "adm_extra_settings":
         return bool(_unmapped_xs_groups())
     if key == "adm_my_volume":
         # فقط داخل بات اختصاصی نمایندگی VIP (اعتبار حجمی)؛ نه بات اصلی، نه طلایی
         return (not is_main_bot) and _is_volume_credit_owner(db)
-    if key.startswith(("adm_set_xgw_", "adm_xgw_pay_")) and not is_main_bot:
+    if key.startswith(("adm_set_xgw_", "adm_xgw_pay_")) and not full:
         return False
     if key == "adm_payg_settings":
         # پرداخت به‌ازای مصرف فقط در بات اصلی وجود دارد (مثل دکمه‌ی کاربر)
@@ -2138,17 +2140,17 @@ def _is_item_visible(db, key: str, is_main_bot: bool) -> bool:
         # حذف کانفیگ‌های بدون پنل روی دیتابیس و پنل‌های بات اصلی اجرا می‌شود
         return is_main_bot
     if key == "adm_cfg_search":
-        # جستجوی کانفیگ فعلاً فقط روی بات اصلی
-        return is_main_bot
+        return full
     if key == "adm_update":
         # آپدیت پروژه فقط از بات اصلی (یک نصب = یک پروژه)، نه بات‌های نمایندگی
         return is_main_bot and db.is_full_access_bot(is_main_bot)
-    if key in ("adm_userbot", "adm_leak") and not is_main_bot:
+    if key in ("adm_userbot", "adm_leak") and not full:
         # یوزربات و اکانت تشخیص نشت فقط به اکانت تلگرام مالک بات اصلی وصل می‌شوند
         return False
-    if key in ("adm_resellers_menu", "adm_credit_resellers_menu", "adm_reseller_requests_menu", "adm_commission_resellers_menu") and not is_main_bot:
-        # بات‌های نمایندگی خودشان اجازه‌ی ساخت زیرنماینده، فروش اعتبار یا مدیریت
-        # درخواست‌های نمایندگی سطح ۲ (که فقط از بات اصلی قابل درخواست است) را ندارند
+    if key in ("adm_resellers_menu", "adm_credit_resellers_menu") and not is_main_bot:
+        # نماینده‌ی کامل اجازه‌ی ساخت/مدیریت نماینده‌ی کامل (بات اختصاصی) یا فروش اعتبار حجمی ندارد
+        return False
+    if key in ("adm_reseller_requests_menu", "adm_commission_resellers_menu", "adm_reseller_membership") and not full:
         return False
     if key in ("adm_custom_config_settings", "adm_panel_servers", "adm_ssh_menu") and not db.is_full_access_bot(is_main_bot):
         # ساخت کانفیگ شخصی به اتصال مستقیم پنل VPN نیاز دارد که فقط از بات اصلی یا نمایندگی کامل قابل مدیریت است
@@ -3501,7 +3503,7 @@ def admin_products_list_kb(db, products, category_id=None) -> InlineKeyboardMark
                 edit_row.insert(0, InlineKeyboardButton(text=tr("🔌 تغییر پنل/اینباند"), callback_data=f"adm_prod_srv:{p['id']}"))
             rows.append(edit_row)
             rows.append([InlineKeyboardButton(text=tr("🔄 قوانین تمدید کامل"), callback_data=f"adm_prodrr:{p['id']}")])
-            if p["provision_server_id"]:
+            if p["provision_server_id"] or p["provision_ssh_node_id"]:
                 _first = p["start_on_first_use"] if "start_on_first_use" in p.keys() else None
                 _first_label = "⏱ شروع زمان: از اولین اتصال" if _first == 1 else ("⏱ شروع زمان: از لحظه خرید" if _first == 0 else "⏱ شروع زمان: طبق تنظیم پنل")
                 rows.append([InlineKeyboardButton(text=tr(_first_label), callback_data=f"adm_prod_start:{p['id']}")])
@@ -5696,6 +5698,9 @@ def resellers_kb(resellers) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text=tr("🗑حذف"), callback_data=f"adm_resbot_del:{r['id']}"),
             ]
         )
+        rows.append(
+            [InlineKeyboardButton(text=tr("⬆️ تبدیل به نماینده کامل"), callback_data=f"adm_resbot_makefull:{r['id']}")]
+        )
         # پنل وب برای هر دو سطح قابل فعال‌سازی است؛ سطح ۲ هم ممکن است
         # پنل وب اختصاصی بخواهد (دسترسی‌ها در خود پنل با tenant/level محدود می‌شوند).
         web_panel_enabled = bool(r["web_panel_enabled"]) if "web_panel_enabled" in r.keys() else False
@@ -5711,10 +5716,18 @@ def resellers_kb(resellers) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def resbot_makefull_confirm_kb(bot_id) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=tr("✅ بله، تبدیل کن"), callback_data=f"adm_resbot_makefull_ok:{bot_id}")],
+        [InlineKeyboardButton(text=tr("⬅️ انصراف"), callback_data="adm_resellers_menu")],
+    ])
+
+
 def resbot_webpanel_kb(bot_id) -> InlineKeyboardMarkup:
     """منوی مدیریت پنل وب یک نماینده‌ی کامل: بعد از فعال‌سازی نشان داده می‌شود."""
     rows = [
         [InlineKeyboardButton(text=tr("🔗 لینک ورود پنل وب"), callback_data=f"adm_resbot_webpanel_loginlink:{bot_id}")],
+        [InlineKeyboardButton(text=tr("👤 تعیین یوزرنیم و رمز (توسط من)"), callback_data=f"adm_resbot_webpanel_creds:{bot_id}")],
         [InlineKeyboardButton(text=tr("🔁 ساخت لینک راه‌اندازی جدید"), callback_data=f"adm_resbot_webpanel_regen:{bot_id}")],
         [InlineKeyboardButton(text=tr("⛔️ غیرفعال‌سازی پنل وب"), callback_data=f"adm_resbot_webpanel_off:{bot_id}")],
         [InlineKeyboardButton(text=tr("⬅️ بازگشت"), callback_data="adm_resellers_menu")],

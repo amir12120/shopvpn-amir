@@ -244,6 +244,7 @@ class _TenantDBProxy:
         return getattr(_current_tenant.get().db, name)
 
 
+
 db = _TenantDBProxy()
 
 def _runtime_api_base_url() -> str:
@@ -256,6 +257,7 @@ def _runtime_api_base_url() -> str:
     except Exception:
         pass
     return (API_BASE_URL or "").strip().rstrip("/")
+
 
 
 def _bot_token() -> str:
@@ -778,6 +780,7 @@ class StealthNodeAutoInstallBody(BaseModel):
     name: str
     host: str
     ssh_port: int = 22
+    username: str = "root"
     password: Optional[str] = None
     private_key: Optional[str] = None
     domain: str
@@ -799,6 +802,7 @@ class StealthNodeSettingsBody(BaseModel):
 
 
 class SSHNodeAddProtocolsBody(BaseModel):
+    username: str = "root"
     password: str
     protocols: List[str]
     ovpn_port: int = 1194
@@ -1031,7 +1035,7 @@ async def get_current_admin(request: Request, response: Response):
     catalog = await asyncio.to_thread(tenant.db.translation_catalog, admin_language) if admin_language not in {"fa", "en"} else None
     set_language(admin_language, catalog)
     reseller_profile = None
-    if tenant.slug and tenant.bot_id:
+    if tenant.slug and tenant.bot_id and not await asyncio.to_thread(tenant.db.is_unrestricted_full):
         rb = await asyncio.to_thread(main_db.get_reseller_bot, tenant.bot_id)
         if rb:
             owner_tg_id = int(rb["owner_telegram_id"])
@@ -1131,6 +1135,20 @@ def require_full_access_tenant(admin=Depends(get_current_admin)):
     # Dedicated reseller tenants are full-access tenants; the separate
     # ``resellers`` permission remains main-tenant-only via require_permission.
     return admin
+
+
+def _tenant_is_unrestricted() -> bool:
+    """نماینده‌ی کامل واقعی (تبدیل‌شده با «تبدیل به نماینده کامل») = دقیقاً مثل بات اصلی."""
+    try:
+        return bool(_current_tenant.get().db.is_unrestricted_full())
+    except Exception:
+        return False
+
+
+def _tenant_restricted(admin) -> bool:
+    """tenant هست و «کامل واقعی» نیست؛ فقط این نمایندگی‌ها از اتصال مستقیم پنل/نود،
+    بانک کانفیگ دستی و فروش پنل منع می‌شوند."""
+    return bool(admin.get("tenant")) and not _tenant_is_unrestricted()
 
 
 def _tenant_is_vip_credit() -> bool:
@@ -4462,6 +4480,147 @@ async def api_admin_custom_config_dsub_regen(custom_config_id: int, admin=Depend
     return {"ok": True, "dsub_link": dedicated_sub.link_for_token(db, token)}
 
 
+# ------------------------------------------------------------- bulk operations --
+# عملیات گروهی: مدیر یک محصول «اتصال مستقیم» و تعداد را انتخاب می‌کند؛ همان تعداد
+# سرویس واقعی روی پنل/نود ساخته می‌شود و لینک‌های ساب برای کپی یکجا برمی‌گردد.
+# ساخت در پس‌زمینه و دسته‌ای (هر دسته همه‌یا‌هیچ) انجام می‌شود تا درخواست HTTP
+# تایم‌اوت نشود و پیشرفت زنده قابل نمایش باشد.
+BULK_MAX_QUANTITY = 500
+BULK_BATCH_SIZE = 10
+BULK_JOBS_KEEP = 30
+_bulk_jobs: dict = {}
+
+
+class BulkProvisionBody(BaseModel):
+    product_id: int
+    quantity: int
+    user_id: Optional[int] = None
+
+
+def _bulk_direct_product_or_400(tdb, product_id: int):
+    product = tdb.get_product(product_id)
+    if not product:
+        raise HTTPException(404, tr("محصول یافت نشد."))
+    if not product["is_auto_provision"] or not (product["provision_server_id"] or product["provision_ssh_node_id"]):
+        raise HTTPException(400, tr("فقط محصولات «اتصال مستقیم به پنل/نود» قابل ساخت گروهی هستند (محصول بانک کانفیگ ساخته نمی‌شود)."))
+    return product
+
+
+def _bulk_public_job(job: dict, with_links: bool = True) -> dict:
+    out = {k: v for k, v in job.items() if k not in ("links", "items")}
+    out["links"] = list(job["links"]) if with_links else None
+    out["link_count"] = len(job["links"])
+    return out
+
+
+async def _bulk_run_job(tdb, job: dict, product, owner_id: int, admin: dict):
+    import dedicated_sub
+    from direct_panel_provision import provision_direct, ProvisionError as _ProvErr
+    job["status"] = "running"
+    remaining = job["total"]
+    try:
+        while remaining > 0:
+            batch = min(BULK_BATCH_SIZE, remaining)
+            try:
+                items = await provision_direct(tdb, product, batch, user_id=owner_id, order_id=None)
+            except (_ProvErr, DirectProvisionError) as e:
+                job["error"] = str(e)
+                break
+            except Exception as e:  # هرگز اجازه نده job برای همیشه در حالت running بماند
+                logger.exception("bulk provision batch failed (product=%s)", product["id"])
+                job["error"] = f"خطای غیرمنتظره: {e}"
+                break
+            for item in items:
+                link = None
+                cc_id = item.get("custom_config_id")
+                try:
+                    if cc_id:
+                        link = dedicated_sub.display_link(tdb, cc_id, item["subscription_url"])
+                    else:
+                        link = dedicated_sub.dedicated_link_for_upstream(tdb, item["subscription_url"])
+                except Exception:
+                    link = item.get("subscription_url")
+                job["links"].append(link or item.get("subscription_url") or "")
+                job["usernames"].append(item.get("username") or "")
+            job["done"] += len(items)
+            remaining -= batch
+    finally:
+        job["status"] = "done" if job["done"] >= job["total"] and not job.get("error") else (
+            "partial" if job["done"] else "failed")
+        job["finished_at"] = int(time.time())
+        try:
+            await asyncio.to_thread(
+                tdb.log_admin_action, admin["id"], "bulk_provision",
+                f"ساخت گروهی «{product['name']}»: {job['done']}/{job['total']} سرویس برای کاربر {owner_id} "
+                f"(پنل وب - {admin['username']})", "product", product["id"])
+        except Exception:
+            logger.exception("bulk provision: log_admin_action failed")
+
+
+@app.get("/api/bulk/products")
+async def api_bulk_products(admin=Depends(require_permission("catalog"))):
+    """محصولات قابل ساخت گروهی (فقط اتصال مستقیم به پنل/نود)."""
+    import dedicated_sub
+    out = []
+    for p in await asyncio.to_thread(db.get_all_products):
+        if not p["is_auto_provision"] or not (p["provision_server_id"] or p["provision_ssh_node_id"]):
+            continue
+        panel_name = None
+        if p["provision_server_id"]:
+            srv = db.get_panel_server(p["provision_server_id"])
+            panel_name = srv["name"] if srv else None
+        out.append({
+            "id": p["id"], "name": p["name"], "category_name": p["category_name"],
+            "volume_gb": p["auto_provision_volume_gb"], "duration_days": p["duration_days"],
+            "is_active": bool(p["is_active"]), "panel_name": panel_name,
+            "is_ssh": bool(p["provision_ssh_node_id"] and not p["provision_server_id"]),
+        })
+    return {
+        "products": out, "max_quantity": BULK_MAX_QUANTITY,
+        "default_user_id": _tenant_owner_chat_id(),
+        "dsub_enabled": bool(dedicated_sub.is_enabled(db)),
+    }
+
+
+@app.post("/api/bulk/provision")
+async def api_bulk_provision(body: BulkProvisionBody, admin=Depends(require_permission("catalog"))):
+    tenant = _current_tenant.get()
+    tdb = tenant.db
+    if not 1 <= body.quantity <= BULK_MAX_QUANTITY:
+        raise HTTPException(400, tr(f"تعداد باید بین ۱ تا {BULK_MAX_QUANTITY} باشد."))
+    product = await asyncio.to_thread(_bulk_direct_product_or_400, tdb, body.product_id)
+    if any(j["status"] in ("queued", "running") and j["tenant"] == tenant.slug for j in _bulk_jobs.values()):
+        raise HTTPException(409, tr("یک عملیات گروهی هنوز در حال اجراست؛ تا پایانش صبر کن."))
+    owner_id = int(body.user_id) if body.user_id else _tenant_owner_chat_id()
+    job = {
+        "id": secrets.token_hex(8), "tenant": tenant.slug, "product_id": product["id"],
+        "product_name": product["name"], "owner_id": owner_id, "total": body.quantity, "done": 0,
+        "status": "queued", "error": None, "links": [], "usernames": [],
+        "created_at": int(time.time()), "finished_at": None, "admin": admin["username"],
+    }
+    _bulk_jobs[job["id"]] = job
+    for old in sorted(_bulk_jobs.values(), key=lambda j: j["created_at"])[:-BULK_JOBS_KEEP]:
+        if old["status"] not in ("queued", "running"):
+            _bulk_jobs.pop(old["id"], None)
+    asyncio.create_task(_bulk_run_job(tdb, job, product, owner_id, admin))
+    return _bulk_public_job(job)
+
+
+@app.get("/api/bulk/jobs")
+async def api_bulk_jobs(admin=Depends(require_permission("catalog"))):
+    slug = _current_tenant.get().slug
+    jobs = sorted((j for j in _bulk_jobs.values() if j["tenant"] == slug), key=lambda j: -j["created_at"])
+    return [_bulk_public_job(j, with_links=False) for j in jobs]
+
+
+@app.get("/api/bulk/jobs/{job_id}")
+async def api_bulk_job(job_id: str, admin=Depends(require_permission("catalog"))):
+    job = _bulk_jobs.get(job_id)
+    if not job or job["tenant"] != _current_tenant.get().slug:
+        raise HTTPException(404, tr("عملیات یافت نشد (بعد از ری‌استارت سرور پاک می‌شود)."))
+    return _bulk_public_job(job)
+
+
 # ------------------------------------------------------- reseller self-service --
 # پنل وب نماینده «مدیریت کاتالوگ» نیست؛ یک فضای عملیاتی شخصی است.
 # نماینده فقط موجودی‌ای را که مدیر به او داده مصرف می‌کند و هرگز به محصولات/پنل‌های
@@ -4945,16 +5104,18 @@ class ProductBody(BaseModel):
     start_on_first_use: Optional[bool] = None  # True=زمان از اولین اتصال، False=از لحظه خرید، None=طبق تنظیم پنل
 
 
-def _checked_product_first_use(value, server_id, ssh_node_id=None, multi=False):
-    """None برای محصول بدون پنل VPN مستقیم یا چندمقصدی (اثری ندارد)؛ وگرنه bool معتبر."""
+def _checked_product_first_use(value, server_id, ssh_node_id=None, multi=False, extra_panel_ids=None):
+    """None برای محصول بدون مقصد مستقیم (اثری ندارد)؛ وگرنه bool معتبر.
+    برای محصول چندپنلی/نودی همه‌ی پنل‌های VPN باید On-hold را پشتیبانی کنند (نودها محدودیتی ندارند)."""
     if value is None:
         return None
-    if not server_id or ssh_node_id or multi:
+    if not server_id and not ssh_node_id:
         return None
     if value:
-        server = db.get_panel_server(int(server_id))
-        if server and server["panel_type"] not in PANEL_ONHOLD_TYPES:
-            raise HTTPException(400, tr("این نوع پنل شروع زمان از اولین اتصال را پشتیبانی نمی‌کند."))
+        for sid in ([server_id] if server_id else []) + [int(x) for x in (extra_panel_ids or [])]:
+            server = db.get_panel_server(int(sid))
+            if server and server["panel_type"] not in PANEL_ONHOLD_TYPES:
+                raise HTTPException(400, tr("این نوع پنل شروع زمان از اولین اتصال را پشتیبانی نمی‌کند."))
     return bool(value)
 
 
@@ -5119,7 +5280,7 @@ def _payg_ssh_rows(payg) -> list:
 
 
 @app.get("/api/payg/overview")
-def api_payg_overview(admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+def api_payg_overview(admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     payg = _payg_prepare()
     import dedicated_sub
     from ssh_service import SUPPORTED_PROTOCOLS
@@ -5165,7 +5326,7 @@ def api_payg_overview(admin=Depends(require_permission("catalog")), _mt=Depends(
 
 
 @app.post("/api/payg/settings")
-def api_payg_settings(body: PaygSettingsBody, admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+def api_payg_settings(body: PaygSettingsBody, admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     payg = _payg_prepare()
     changes = []
     if body.rate is not None:
@@ -5204,7 +5365,7 @@ def api_payg_settings(body: PaygSettingsBody, admin=Depends(require_permission("
 
 
 @app.post("/api/payg/delivery-photo")
-async def api_payg_delivery_photo_set(photo: UploadFile = File(...), admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+async def api_payg_delivery_photo_set(photo: UploadFile = File(...), admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     payg = _payg_prepare()
     ctype = (photo.content_type or "").lower()
     if ctype not in ("image/jpeg", "image/png", "image/webp"):
@@ -5224,7 +5385,7 @@ async def api_payg_delivery_photo_set(photo: UploadFile = File(...), admin=Depen
 
 
 @app.delete("/api/payg/delivery-photo")
-async def api_payg_delivery_photo_delete(admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+async def api_payg_delivery_photo_delete(admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     payg = _payg_prepare()
     await asyncio.to_thread(db.set_setting, payg.PAYG_DELIVERY_PHOTO_KEY, "")
     await asyncio.to_thread(db.log_admin_action, admin["id"], "payg_delivery_photo_delete", f"(پنل وب - {admin['username']})", "setting", "payg")
@@ -5232,7 +5393,7 @@ async def api_payg_delivery_photo_delete(admin=Depends(require_permission("catal
 
 
 @app.get("/api/payg/delivery-photo")
-async def api_payg_delivery_photo_get(admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+async def api_payg_delivery_photo_get(admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     payg = _payg_prepare()
     file_id = await asyncio.to_thread(db.get_setting, payg.PAYG_DELIVERY_PHOTO_KEY, "")
     if not file_id:
@@ -5252,7 +5413,7 @@ def _payg_save_panels(payg, ids: set, targets: dict):
 
 
 @app.put("/api/payg/targets/{server_id}")
-async def api_payg_set_target(server_id: int, body: PaygTargetBody, admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+async def api_payg_set_target(server_id: int, body: PaygTargetBody, admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     payg = _payg_prepare()
     server = db.get_panel_server(server_id)
     if not server or not server["is_active"]:
@@ -5289,7 +5450,7 @@ async def api_payg_set_target(server_id: int, body: PaygTargetBody, admin=Depend
 
 
 @app.delete("/api/payg/targets/{server_id}")
-def api_payg_remove_target(server_id: int, admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+def api_payg_remove_target(server_id: int, admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     payg = _payg_prepare()
     ids = set(payg.get_payg_panel_ids(db))
     ids.discard(server_id)
@@ -5301,7 +5462,7 @@ def api_payg_remove_target(server_id: int, admin=Depends(require_permission("cat
 
 
 @app.get("/api/payg/targets/{server_id}")
-async def api_payg_get_target(server_id: int, admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+async def api_payg_get_target(server_id: int, admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     payg = _payg_prepare()
     server = db.get_panel_server(server_id)
     if not server or not server["is_active"]:
@@ -5370,20 +5531,20 @@ async def _panel_cost_payload(configured: dict) -> dict:
 
 
 @app.get("/api/payg/costs")
-async def api_payg_costs(admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+async def api_payg_costs(admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     """Read live group/inbound choices and their independent sales tariffs."""
     payg = _payg_prepare()
     return await _panel_cost_payload(payg.get_panel_costs(db))
 
 
 @app.get("/api/accounting/panel-costs")
-async def api_accounting_panel_costs(admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+async def api_accounting_panel_costs(admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     import accounting
     return await _panel_cost_payload(accounting.panel_costs(db))
 
 
 @app.put("/api/accounting/panel-costs/{server_id}")
-async def api_accounting_save_panel_costs(server_id: int, body: PaygPanelCostsBody, admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+async def api_accounting_save_panel_costs(server_id: int, body: PaygPanelCostsBody, admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     import accounting
     server = db.get_panel_server(server_id)
     if not server:
@@ -5402,13 +5563,13 @@ async def api_accounting_save_panel_costs(server_id: int, body: PaygPanelCostsBo
 
 
 @app.get("/api/accounting/suggest-tariff/{server_id}")
-def api_accounting_suggest_tariff(server_id: int, admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+def api_accounting_suggest_tariff(server_id: int, admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     import accounting
     return {"rates": accounting.suggest_tariff(db, server_id)}
 
 
 @app.put("/api/payg/costs/{server_id}")
-async def api_payg_save_costs(server_id: int, body: PaygPanelCostsBody, admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+async def api_payg_save_costs(server_id: int, body: PaygPanelCostsBody, admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     payg = _payg_prepare()
     server = db.get_panel_server(server_id)
     if not server:
@@ -5429,13 +5590,13 @@ async def api_payg_save_costs(server_id: int, body: PaygPanelCostsBody, admin=De
 
 
 @app.get("/api/accounting/config")
-def api_accounting_config(admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+def api_accounting_config(admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     import accounting
     return accounting.get_config(db)
 
 
 @app.put("/api/accounting/config")
-def api_accounting_save_config(body: AccountingConfigBody, admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+def api_accounting_save_config(body: AccountingConfigBody, admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     import accounting
     try:
         cfg = accounting.save_config(db, body.dict())
@@ -5446,7 +5607,7 @@ def api_accounting_save_config(body: AccountingConfigBody, admin=Depends(require
 
 
 @app.get("/api/accounting/node-costs")
-def api_accounting_node_costs(admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+def api_accounting_node_costs(admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     import accounting
     costs = accounting.get_node_costs(db)
     nodes = []
@@ -5460,7 +5621,7 @@ def api_accounting_node_costs(admin=Depends(require_permission("catalog")), _mt=
 
 
 @app.put("/api/accounting/node-costs")
-def api_accounting_save_node_costs(body: AccountingNodeCostsBody, admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+def api_accounting_save_node_costs(body: AccountingNodeCostsBody, admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     import accounting
     try:
         saved = accounting.save_node_costs(db, body.entries)
@@ -5471,7 +5632,7 @@ def api_accounting_save_node_costs(body: AccountingNodeCostsBody, admin=Depends(
 
 
 @app.post("/api/accounting/suggest")
-def api_accounting_suggest(body: AccountingSuggestBody, admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+def api_accounting_suggest(body: AccountingSuggestBody, admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     import accounting
     try:
         return accounting.suggest(db, body.kind, body.panels, body.node_ids, body.gb, body.days, body.users)
@@ -5480,7 +5641,7 @@ def api_accounting_suggest(body: AccountingSuggestBody, admin=Depends(require_pe
 
 
 @app.get("/api/accounting/suggest-payg")
-def api_accounting_suggest_payg(admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+def api_accounting_suggest_payg(admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     import accounting
     try:
         return accounting.suggest_payg_rate(db)
@@ -5489,7 +5650,7 @@ def api_accounting_suggest_payg(admin=Depends(require_permission("catalog")), _m
 
 
 @app.post("/api/payg/mode")
-def api_payg_mode(body: PaygModeBody, admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+def api_payg_mode(body: PaygModeBody, admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     _payg_prepare()
     if body.mode not in ("balance", "all"):
         raise HTTPException(400, tr("حالت نامعتبر است."))
@@ -5503,7 +5664,7 @@ def api_payg_mode(body: PaygModeBody, admin=Depends(require_permission("catalog"
 
 
 @app.put("/api/payg/ssh")
-def api_payg_ssh(body: PaygSshBody, admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+def api_payg_ssh(body: PaygSshBody, admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     _payg_prepare()
     from ssh_service import SUPPORTED_PROTOCOLS
     valid_nodes = {int(n["id"]) for n in db.list_ssh_nodes(True) if n.get("node_type") == "linux"}
@@ -5518,7 +5679,7 @@ def api_payg_ssh(body: PaygSshBody, admin=Depends(require_permission("catalog"))
 
 
 @app.post("/api/payg/clear")
-def api_payg_clear(admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+def api_payg_clear(admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     payg = _payg_prepare()
     _payg_save_panels(payg, set(), {})
     db.set_setting("payg_ssh_node_ids", "[]")
@@ -5527,7 +5688,7 @@ def api_payg_clear(admin=Depends(require_permission("catalog")), _mt=Depends(req
 
 
 @app.get("/api/payg/accounts")
-def api_payg_accounts(offset: int = 0, limit: int = 25, q: str = "", admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+def api_payg_accounts(offset: int = 0, limit: int = 25, q: str = "", admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     _payg_prepare()
     limit = max(1, min(int(limit), 100))
     offset = max(0, int(offset))
@@ -5557,7 +5718,7 @@ def api_payg_accounts(offset: int = 0, limit: int = 25, q: str = "", admin=Depen
 
 
 @app.get("/api/payg/accounts/{user_id}")
-def api_payg_account_detail(user_id: int, admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+def api_payg_account_detail(user_id: int, admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     _payg_prepare()
     with db._get_conn() as conn:
         row = conn.execute("SELECT * FROM payg_accounts WHERE user_id=?", (user_id,)).fetchone()
@@ -5598,7 +5759,7 @@ def api_payg_account_detail(user_id: int, admin=Depends(require_permission("cata
 
 
 @app.post("/api/payg/accounts/{user_id}/suspend")
-def api_payg_account_suspend(user_id: int, admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+def api_payg_account_suspend(user_id: int, admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     payg = _payg_prepare()
     with db._get_conn() as conn:
         row = conn.execute("SELECT quota_pool_id FROM payg_accounts WHERE user_id=?", (user_id,)).fetchone()
@@ -5618,7 +5779,7 @@ def api_payg_account_suspend(user_id: int, admin=Depends(require_permission("cat
 
 
 @app.post("/api/payg/accounts/{user_id}/resume")
-def api_payg_account_resume(user_id: int, admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+def api_payg_account_resume(user_id: int, admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     payg = _payg_prepare()
     with db._get_conn() as conn:
         row = conn.execute("SELECT * FROM payg_accounts WHERE user_id=?", (user_id,)).fetchone()
@@ -5639,7 +5800,7 @@ def api_payg_account_resume(user_id: int, admin=Depends(require_permission("cata
 
 
 @app.get("/api/payg/report")
-def api_payg_report(admin=Depends(require_permission("catalog")), _mt=Depends(require_main_tenant)):
+def api_payg_report(admin=Depends(require_permission("catalog")), _mt=Depends(require_full_access_tenant)):
     _payg_prepare()
     month = _payg_month_key()
     with db._get_conn() as conn:
@@ -5783,7 +5944,7 @@ async def api_add_product(body: ProductBody, admin=Depends(require_permission("c
     if direct_target:
         if body.auto_provision_volume_gb is None or body.auto_provision_volume_gb < 0:
             raise HTTPException(400, tr("برای محصول مستقیم باید حجم (گیگابایت) را مشخص کنید."))
-    if admin["tenant"]:
+    if _tenant_restricted(admin):
         # نمایندگی (بند ۳.۲ اسپک): نه پنل شخصی دارد، نه بانک کانفیگ دستی؛ فقط
         # محصول خودکار از اعتبار حجمی/موجودی خودش مجاز است (مطابق منطق طرف بات).
         if direct_target:
@@ -5794,7 +5955,7 @@ async def api_add_product(body: ProductBody, admin=Depends(require_permission("c
         raise HTTPException(403, tr("نمایندگی VIP بانک کانفیگ ندارد؛ محصول باید از اعتبار حجمی ساخته شود."))
     is_panel_kind = body.product_kind == "panel_account"
     if is_panel_kind:
-        if admin["tenant"] or _tenant_is_vip_credit():
+        if _tenant_restricted(admin) or _tenant_is_vip_credit():
             raise HTTPException(403, tr("فروش پنل فقط برای بات اصلی مجاز است."))
         if body.is_auto_provision or direct_target:
             raise HTTPException(400, tr("محصول فروش پنل نمی‌تواند خودکار یا مستقیم باشد."))
@@ -5813,7 +5974,7 @@ async def api_add_product(body: ProductBody, admin=Depends(require_permission("c
         product_kind="panel_account" if is_panel_kind else "config",
         start_on_first_use=_checked_product_first_use(
             body.start_on_first_use, body.provision_server_id, body.provision_ssh_node_id,
-            multi=bool(extra_panels or extra_nodes)),
+            multi=bool(extra_panels or extra_nodes), extra_panel_ids=extra_panels),
     )
     if int(body.compare_price or 0) > 0 and (body.discount_days is not None or body.discount_max_uses is not None):
         db.edit_product(pid, compare_price=int(body.compare_price),
@@ -5845,7 +6006,7 @@ def _checked_extra_targets(server_id, node_id, extra_panels, extra_nodes, protoc
     total = (1 if server_id else 0) + (1 if node_id else 0) + len(panels) + len(nodes)
     if total <= 1 or not changed:
         return panels, nodes
-    if admin["tenant"]:
+    if _tenant_restricted(admin):
         raise HTTPException(403, tr("اتصال مستقیم به پنل یا نود فقط برای بات اصلی مجاز است."))
     if not dedicated_sub.is_enabled(db):
         raise HTTPException(400, tr("اتصال چند پنل/نود یا ترکیب پنل و نود به یک محصول فقط وقتی ساب اختصاصی فعال است ممکن است؛ ابتدا ساب اختصاصی را فعال کنید."))
@@ -5962,7 +6123,7 @@ async def api_edit_product(product_id: int, body: ProductEditBody, admin=Depends
     auto_provision_volume_gb = ...
 
     if body.source == "direct":
-        if admin["tenant"]:
+        if _tenant_restricted(admin):
             raise HTTPException(status_code=403, detail=tr("اتصال مستقیم به پنل فقط برای بات اصلی مجاز است."))
         if body.provision_server_id and body.provision_ssh_node_id:
             # محصول ترکیبی VPN+SSH (سهمیه مشترک)
@@ -5986,7 +6147,7 @@ async def api_edit_product(product_id: int, body: ProductEditBody, admin=Depends
             raise HTTPException(status_code=404, detail=tr("پنل VPN یا نود SSH یافت نشد."))
         if body.auto_provision_volume_gb is None or body.auto_provision_volume_gb < 0:
             raise HTTPException(status_code=400, detail=tr("برای محصول مستقیم باید حجم (گیگابایت) را مشخص کنید."))
-        if admin["tenant"]:
+        if _tenant_restricted(admin):
             raise HTTPException(status_code=403, detail=tr("محصول مستقیم فقط برای بات اصلی مجاز است."))
         is_auto_provision = True
         auto_provision_volume_gb = body.auto_provision_volume_gb
@@ -6003,13 +6164,13 @@ async def api_edit_product(product_id: int, body: ProductEditBody, admin=Depends
         if not old_product["is_auto_provision"]:
             raise HTTPException(status_code=400, detail=tr("این محصول به‌صورت خودکار ساخته نمی‌شود."))
         if body.provision_server_id is not None:
-            if admin["tenant"]:
+            if _tenant_restricted(admin):
                 raise HTTPException(status_code=403, detail=tr("اتصال مستقیم فقط برای بات اصلی مجاز است."))
             _require_edit_panel(body.provision_server_id, old_product, 404, "سرور پنل یافت نشد.")
             provision_server_id = body.provision_server_id
             provision_ssh_node_id = None
         if body.provision_ssh_node_id is not None:
-            if admin["tenant"]:
+            if _tenant_restricted(admin):
                 raise HTTPException(status_code=403, detail="اتصال مستقیم SSH فقط برای بات اصلی مجاز است.")
             node = next((n for n in db.list_ssh_nodes(active_only=True) if int(n["id"]) == int(body.provision_ssh_node_id)), None)
             if not node or node.get("node_type") != "linux":
@@ -6182,7 +6343,7 @@ async def api_edit_product(product_id: int, body: ProductEditBody, admin=Depends
         start_on_first_use=(
             _checked_product_first_use(
                 body.start_on_first_use, effective_server_id, effective_ssh_node_id,
-                multi=bool(final_extra_panels or final_extra_nodes))
+                multi=bool(final_extra_panels or final_extra_nodes), extra_panel_ids=final_extra_panels)
             if body.start_on_first_use is not None else ...),
     )
     if extras_changed or body.extra_panel_target_values is not None or body.source is not None or provision_server_id is not ... or provision_ssh_node_id is not ...:
@@ -8605,7 +8766,7 @@ async def api_ssh_node_add_protocols(node_id: int, body: SSHNodeAddProtocolsBody
     """نصب پروتکل‌های جدید (مثلاً OpenVPN یا WireGuard) روی نود موجود؛ رمز root فقط برای همین نصب استفاده می‌شود."""
     import ssh_service
     try:
-        job_id = ssh_service.start_node_upgrade(db, node_id=node_id, password=body.password, protocols=body.protocols,
+        job_id = ssh_service.start_node_upgrade(db, node_id=node_id, username=body.username, password=body.password, protocols=body.protocols,
                                                 ovpn_port=body.ovpn_port, ovpn_proto=body.ovpn_proto, wg_port=body.wg_port)
     except ssh_service.SSHServiceError as exc:
         raise HTTPException(exc.status, str(exc))
@@ -8623,14 +8784,14 @@ def api_ssh_install_job(job_id: str, admin=Depends(require_permission("panels"))
 
 
 @app.delete("/api/ssh/nodes/{node_id}")
-def api_ssh_delete_node(node_id: int, force: bool = False, admin=Depends(require_permission("panels")), _fa=Depends(require_full_access_tenant)):
+async def api_ssh_delete_node(node_id: int, force: bool = False, admin=Depends(require_permission("panels")), _fa=Depends(require_full_access_tenant)):
     import ssh_service
     try:
-        ssh_service.delete_node(db, node_id, force=force)
+        result = await ssh_service.delete_node(db, node_id, force=force)
     except ssh_service.SSHServiceError as exc:
         raise HTTPException(exc.status, str(exc))
-    db.log_admin_action(admin["id"], "ssh_node_delete", f"SSH node #{node_id}" + (" (force)" if force else ""), "ssh")
-    return {"ok": True}
+    db.log_admin_action(admin["id"], "ssh_node_delete", f"SSH node #{node_id}" + (" (force/local-only)" if force else " (remote cleanup)"), "ssh")
+    return {"ok": True, "cleanup": result}
 
 
 @app.post("/api/ssh/nodes/{node_id}/rename")
@@ -8731,6 +8892,9 @@ async def api_ssh_create_account(body: SSHAccountCreateBody, admin=Depends(requi
     except ssh_service.SSHServiceError as exc:
         raise HTTPException(exc.status, str(exc))
     db.log_admin_action(admin["id"], "ssh_account_create", f"SSH account #{r['id']} for user {body.user_id}", "ssh")
+    if str(body.protocol or "ssh").lower() == "ssh":
+        r["udpgw_port"] = 7300
+        r["client_setup_note"] = "در اپ، UDPGW port را روی 7300 تنظیم کنید."
     return r
 
 
@@ -9283,7 +9447,7 @@ def _pmig_plan_public(plan: dict) -> dict:
 
 
 @app.get("/api/panel-servers/{server_id}/migration")
-async def api_panel_migration_info(server_id: int, admin=Depends(require_owner), _t=Depends(require_main_tenant)):
+async def api_panel_migration_info(server_id: int, admin=Depends(require_owner), _t=Depends(require_full_access_tenant)):
     import panel_migration as pm
     src = await asyncio.to_thread(_panel_server_or_404, server_id)
     primaries = await asyncio.to_thread(db.pm_list_primary, server_id)
@@ -9301,14 +9465,14 @@ async def api_panel_migration_info(server_id: int, admin=Depends(require_owner),
 
 
 @app.post("/api/panel-servers/{server_id}/migration/plan")
-async def api_panel_migration_plan(server_id: int, body: PanelMigrationBody, admin=Depends(require_owner), _t=Depends(require_main_tenant)):
+async def api_panel_migration_plan(server_id: int, body: PanelMigrationBody, admin=Depends(require_owner), _t=Depends(require_full_access_tenant)):
     import panel_migration as pm
     plan = await pm.build_plan(db, server_id, body.dest_id)
     return _pmig_plan_public(plan)
 
 
 @app.post("/api/panel-servers/{server_id}/migration/run")
-async def api_panel_migration_run(server_id: int, body: PanelMigrationBody, admin=Depends(require_owner), _t=Depends(require_main_tenant)):
+async def api_panel_migration_run(server_id: int, body: PanelMigrationBody, admin=Depends(require_owner), _t=Depends(require_full_access_tenant)):
     import panel_migration as pm
     if pm.is_running(server_id):
         raise HTTPException(409, tr("مهاجرت این پنل همین الان در حال اجراست."))
@@ -9358,7 +9522,7 @@ _PMIG_TASKS: set = set()
 
 
 @app.get("/api/panel-servers/{server_id}/migration/status")
-async def api_panel_migration_status(server_id: int, admin=Depends(require_owner), _t=Depends(require_main_tenant)):
+async def api_panel_migration_status(server_id: int, admin=Depends(require_owner), _t=Depends(require_full_access_tenant)):
     import panel_migration as pm
     return {"running": pm.is_running(server_id), "job": _PMIG_JOBS.get(server_id)}
 
@@ -9409,6 +9573,8 @@ async def api_exchange_rate_refresh(admin=Depends(require_permission("panels")))
         f"نرخ دلار به {status['rate']:,} تومان (منبع: {status['source']}) رفرش شد (پنل وب - {admin['username']})",
     ))
     return _rate_response(True, status)
+
+
 
 
 # ---------------------------------------------------- link & SSL manager --
@@ -10521,7 +10687,7 @@ async def _test_plan_provision_spec(body: TestPlanBody, admin) -> dict:
             raise HTTPException(400, tr("پنل انتخاب‌شده یافت نشد یا غیرفعال است."))
     ssh_node = None
     if node_id:
-        if admin["tenant"]:
+        if _tenant_restricted(admin):
             raise HTTPException(403, tr("اتصال مستقیم به پنل یا نود SSH فقط برای بات اصلی مجاز است."))
         ssh_node = next((n for n in db.list_ssh_nodes(active_only=True) if int(n["id"]) == int(node_id)), None)
         if not ssh_node or ssh_node.get("node_type") != "linux":
@@ -10947,7 +11113,7 @@ def _apply_menu_button_toggles(buttons: Optional[list[MenuButtonToggle]]):
                         url = "https://t.me/" + url[1:]
                     if url and not re.match(r"^(https?://|tg://)", url, re.I):
                         url = "https://" + url
-                    if not url or len(url) > 512 or re.search(r"\\s", url) or not re.match(r"^(https?://|tg://)", url, re.I):
+                    if not url or len(url) > 512 or re.search(r"\s", url) or not re.match(r"^(https?://|tg://)", url, re.I):
                         raise HTTPException(400, tr("آدرس لینک نامعتبر است."))
                     fields["url"] = url
                 if btn.custom_content is not None:
@@ -11161,7 +11327,7 @@ def _cm_log(admin: dict, action: str, detail: str) -> None:
 
 
 @app.get("/api/custom-menu")
-def api_cm_list(admin=Depends(require_permission("settings")), _mt=Depends(require_main_tenant)):
+def api_cm_list(admin=Depends(require_permission("settings")), _mt=Depends(require_full_access_tenant)):
     by_key = {f"custom_menu:{b['id']}": b for b in db.cm_list()}
     return {
         "items": [_cm_public(by_key[k]) for k in db.get_menu_order() if k in by_key],
@@ -11172,7 +11338,7 @@ def api_cm_list(admin=Depends(require_permission("settings")), _mt=Depends(requi
 
 
 @app.get("/api/custom-menu/{button_id}")
-def api_cm_get(button_id: int, admin=Depends(require_permission("settings")), _mt=Depends(require_main_tenant)):
+def api_cm_get(button_id: int, admin=Depends(require_permission("settings")), _mt=Depends(require_full_access_tenant)):
     return _cm_public(_cm_get_or_404(button_id), detail=True)
 
 
@@ -11185,7 +11351,7 @@ class CmCreateBody(BaseModel):
 
 
 @app.post("/api/custom-menu")
-def api_cm_create(body: CmCreateBody, admin=Depends(require_permission("settings")), _mt=Depends(require_main_tenant)):
+def api_cm_create(body: CmCreateBody, admin=Depends(require_permission("settings")), _mt=Depends(require_full_access_tenant)):
     title = (body.title or "").strip()
     if not title or len(title) > CM_MAX_TITLE:
         raise HTTPException(400, tr(f"متن دکمه باید بین ۱ تا {CM_MAX_TITLE} نویسه باشد."))
@@ -11221,7 +11387,7 @@ class CmUpdateBody(BaseModel):
 
 @app.put("/api/custom-menu/{button_id}")
 def api_cm_update(button_id: int, body: CmUpdateBody, admin=Depends(require_permission("settings")),
-                  _mt=Depends(require_main_tenant)):
+                  _mt=Depends(require_full_access_tenant)):
     btn = _cm_get_or_404(button_id)
     fields: dict = {}
     if body.title is not None:
@@ -11257,7 +11423,7 @@ def api_cm_update(button_id: int, body: CmUpdateBody, admin=Depends(require_perm
 
 
 @app.delete("/api/custom-menu/{button_id}")
-def api_cm_delete(button_id: int, admin=Depends(require_permission("settings")), _mt=Depends(require_main_tenant)):
+def api_cm_delete(button_id: int, admin=Depends(require_permission("settings")), _mt=Depends(require_full_access_tenant)):
     return api_custom_menu_button_delete(button_id, admin)
 
 
@@ -11267,7 +11433,7 @@ class CmMoveBody(BaseModel):
 
 @app.post("/api/custom-menu/{button_id}/move")
 def api_cm_move(button_id: int, body: CmMoveBody, admin=Depends(require_permission("settings")),
-                _mt=Depends(require_main_tenant)):
+                _mt=Depends(require_full_access_tenant)):
     if body.direction not in ("up", "down"):
         raise HTTPException(400, tr("جهت نامعتبر است."))
     _cm_get_or_404(button_id)
@@ -11304,7 +11470,7 @@ def _cm_check_text(text: str, kind: str) -> str:
 
 @app.post("/api/custom-menu/{button_id}/parts/text")
 def api_cm_part_add_text(button_id: int, body: CmTextBody, admin=Depends(require_permission("settings")),
-                         _mt=Depends(require_main_tenant)):
+                         _mt=Depends(require_full_access_tenant)):
     btn = _cm_content_or_400(button_id)
     parts = list(btn["parts"])
     if len(parts) >= CM_MAX_PARTS:
@@ -11330,7 +11496,7 @@ def _cm_check_media(kind: str, content_type: str, filename: str) -> None:
 @app.post("/api/custom-menu/{button_id}/parts/media")
 async def api_cm_part_add_media(
     button_id: int, file: UploadFile = File(...), kind: str = Form(...), caption: str = Form(""),
-    admin=Depends(require_permission("settings")), _mt=Depends(require_main_tenant),
+    admin=Depends(require_permission("settings")), _mt=Depends(require_full_access_tenant),
 ):
     btn = await asyncio.to_thread(_cm_content_or_400, button_id)
     if len(btn["parts"]) >= CM_MAX_PARTS:
@@ -11363,7 +11529,7 @@ async def api_cm_part_add_media(
 
 @app.put("/api/custom-menu/{button_id}/parts/{index}")
 def api_cm_part_edit(button_id: int, index: int, body: CmTextBody, admin=Depends(require_permission("settings")),
-                     _mt=Depends(require_main_tenant)):
+                     _mt=Depends(require_full_access_tenant)):
     parts = list(_cm_content_or_400(button_id)["parts"])
     part = _cm_part_or_404(parts, index)
     text = _cm_check_text(body.text, part.get("type"))
@@ -11376,7 +11542,7 @@ def api_cm_part_edit(button_id: int, index: int, body: CmTextBody, admin=Depends
 
 @app.delete("/api/custom-menu/{button_id}/parts/{index}")
 def api_cm_part_delete(button_id: int, index: int, admin=Depends(require_permission("settings")),
-                       _mt=Depends(require_main_tenant)):
+                       _mt=Depends(require_full_access_tenant)):
     btn = _cm_content_or_400(button_id)
     parts = list(btn["parts"])
     _cm_part_or_404(parts, index)
@@ -11391,7 +11557,7 @@ def api_cm_part_delete(button_id: int, index: int, admin=Depends(require_permiss
 
 @app.post("/api/custom-menu/{button_id}/parts/{index}/move")
 def api_cm_part_move(button_id: int, index: int, body: CmMoveBody, admin=Depends(require_permission("settings")),
-                     _mt=Depends(require_main_tenant)):
+                     _mt=Depends(require_full_access_tenant)):
     if body.direction not in ("up", "down"):
         raise HTTPException(400, tr("جهت نامعتبر است."))
     parts = list(_cm_content_or_400(button_id)["parts"])
@@ -11406,7 +11572,7 @@ def api_cm_part_move(button_id: int, index: int, body: CmMoveBody, admin=Depends
 
 @app.get("/api/custom-menu/{button_id}/parts/{index}/file")
 async def api_cm_part_file(button_id: int, index: int, admin=Depends(require_permission("settings")),
-                           _mt=Depends(require_main_tenant)):
+                           _mt=Depends(require_full_access_tenant)):
     btn = await asyncio.to_thread(_cm_get_or_404, button_id)
     part = _cm_part_or_404(btn["parts"], index)
     if not part.get("file_id"):
@@ -11420,7 +11586,7 @@ async def api_cm_part_file(button_id: int, index: int, admin=Depends(require_per
 
 
 @app.post("/api/custom-menu/{button_id}/preview")
-async def api_cm_preview(button_id: int, admin=Depends(require_owner), _mt=Depends(require_main_tenant)):
+async def api_cm_preview(button_id: int, admin=Depends(require_owner), _mt=Depends(require_full_access_tenant)):
     btn = await asyncio.to_thread(_cm_content_or_400, button_id)
     parts = btn["parts"]
     if not parts:
@@ -12907,7 +13073,7 @@ async def db_admin_import_api(table_name: str, request: Request,
 @app.get("/api/accounting/ledger/summary")
 def api_accounting_ledger_summary(from_date: str = None, to_date: str = None,
                                   admin=Depends(require_permission("catalog")),
-                                  _mt=Depends(require_main_tenant)):
+                                  _mt=Depends(require_full_access_tenant)):
     import accounting
     try:
         return accounting.ledger_summary(db, from_date, to_date)
@@ -12920,7 +13086,7 @@ def api_accounting_ledger_entries(from_date: str = None, to_date: str = None,
                                   entry_type: str = None, category: str = None,
                                   q: str = None, offset: int = 0, limit: int = 50,
                                   admin=Depends(require_permission("catalog")),
-                                  _mt=Depends(require_main_tenant)):
+                                  _mt=Depends(require_full_access_tenant)):
     import accounting
     try:
         return accounting.list_ledger_entries(db, from_date, to_date, entry_type,
@@ -12932,7 +13098,7 @@ def api_accounting_ledger_entries(from_date: str = None, to_date: str = None,
 @app.post("/api/accounting/ledger/entries")
 async def api_accounting_ledger_create(request: Request,
                                        admin=Depends(require_permission("catalog")),
-                                       _mt=Depends(require_main_tenant)):
+                                       _mt=Depends(require_full_access_tenant)):
     import accounting
     try:
         body = await request.json()
@@ -12948,7 +13114,7 @@ async def api_accounting_ledger_create(request: Request,
 @app.put("/api/accounting/ledger/entries/{entry_id}")
 async def api_accounting_ledger_update(entry_id: int, request: Request,
                                        admin=Depends(require_permission("catalog")),
-                                       _mt=Depends(require_main_tenant)):
+                                       _mt=Depends(require_full_access_tenant)):
     import accounting
     try:
         body = await request.json()
@@ -12966,7 +13132,7 @@ async def api_accounting_ledger_update(entry_id: int, request: Request,
 @app.delete("/api/accounting/ledger/entries/{entry_id}")
 def api_accounting_ledger_delete(entry_id: int,
                                  admin=Depends(require_permission("catalog")),
-                                 _mt=Depends(require_main_tenant)):
+                                 _mt=Depends(require_full_access_tenant)):
     import accounting
     if not accounting.delete_ledger_entry(db, entry_id):
         raise HTTPException(404, tr("سند مالی موردنظر پیدا نشد."))
@@ -12980,7 +13146,7 @@ def api_accounting_ledger_delete(entry_id: int,
 def api_accounting_ledger_export(from_date: str = None, to_date: str = None,
                                  entry_type: str = None,
                                  admin=Depends(require_permission("catalog")),
-                                 _mt=Depends(require_main_tenant)):
+                                 _mt=Depends(require_full_access_tenant)):
     import accounting
     try:
         content = accounting.export_ledger_csv(db, from_date, to_date, entry_type)

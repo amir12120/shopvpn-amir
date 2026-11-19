@@ -160,6 +160,7 @@ MAX_HEADER_IMAGE_BYTES = 2 * 1024 * 1024  # 2 مگابایت
 
 # دیتابیس بات اصلی - هم برای سرویس‌دهی مستقیم به بات اصلی، هم برای پیدا کردن
 # دیتابیس/توکن بات‌های نمایندگی از روی جدول reseller_bots استفاده می‌شود.
+
 main_db = Database(DB_PATH)
 
 def _runtime_miniapp_url() -> str:
@@ -176,6 +177,7 @@ def _runtime_api_base_url() -> str:
         if parsed.scheme and parsed.netloc:
             return f"{parsed.scheme}://{parsed.netloc}"
     return (API_BASE_URL or "").strip().rstrip("/")
+
 try:
     # اگر این پروسه (uvicorn مینی‌اپ) قبل از بات اصلی اجرا شده و فایل دیتابیس
     # هنوز جدول ندارد، این‌جا هم می‌سازیمش تا هیچ درخواستی با خطای ۵۰۰ مواجه نشود.
@@ -701,7 +703,7 @@ def api_me(auth=Depends(get_verified_user)):
     orders = db.get_user_orders(tg_id)
     reseller_owner = False
     reseller = None
-    if tenant.tenant_id:
+    if tenant.tenant_id and not db.is_unrestricted_full():
         try:
             rb = main_db.get_reseller_bot_by_slug(tenant.tenant_id)
             if not rb and str(tenant.tenant_id).isdigit():
@@ -3655,6 +3657,7 @@ class SshNodeInstallIn(BaseModel):
     name: str
     host: str
     ssh_port: int = 22
+    username: str = "root"
     password: str
 
 
@@ -3734,7 +3737,7 @@ def api_admin_ssh_auto_install(body: SshNodeInstallIn, auth=Depends(require_full
     import ssh_service
     admin_id, db, _ = auth
     job_id = _ssh_call(ssh_service.start_auto_install, db, name=body.name, host=body.host,
-                       ssh_port=body.ssh_port, password=body.password)
+                       ssh_port=body.ssh_port, username=(body.username or "root").strip(), password=body.password)
     db.log_admin_action(admin_id, "ssh_node_auto_install", f"SSH node auto-install started: {body.name.strip()} ({body.host.strip()})", "ssh")
     return {"ok": True, "job_id": job_id}
 
@@ -3833,6 +3836,8 @@ async def api_admin_ssh_create_account(body: SshAccountIn, auth=Depends(require_
                                      f"{r.get('node_name') or 'SSH'} {r['username']}")
     except ValueError:
         r["ssh_uri"] = ""
+    r["udpgw_port"] = 7300
+    r["client_setup_note"] = "در اپ، UDPGW port را روی 7300 تنظیم کنید."
     return r
 
 
@@ -5429,14 +5434,16 @@ class ProductUpdate(BaseModel):
 _ONHOLD_PANEL_TYPES = {"marzban", "pasarguard", "rebecca", "marzneshin", "3xui", "threexui"}
 
 
-def _checked_product_first_use(db, value, server_id, multi=False):
-    """None برای محصول بدون پنل مستقیم یا چندپنلی (اثری ندارد)؛ وگرنه bool معتبر."""
-    if value is None or not server_id or multi:
+def _checked_product_first_use(db, value, server_id, multi=False, extra_panel_ids=None, ssh_node_id=None):
+    """None برای محصول بدون مقصد مستقیم (اثری ندارد)؛ وگرنه bool معتبر.
+    برای محصول چندپنلی/نودی همه‌ی پنل‌های VPN باید On-hold را پشتیبانی کنند (نودها محدودیتی ندارند)."""
+    if value is None or (not server_id and not ssh_node_id):
         return None
     if value:
-        server = db.get_panel_server(int(server_id))
-        if server and server["panel_type"] not in _ONHOLD_PANEL_TYPES:
-            raise HTTPException(status_code=400, detail=tr("این نوع پنل شروع زمان از اولین اتصال را پشتیبانی نمی‌کند."))
+        for sid in ([server_id] if server_id else []) + [int(x) for x in (extra_panel_ids or [])]:
+            server = db.get_panel_server(int(sid))
+            if server and server["panel_type"] not in _ONHOLD_PANEL_TYPES:
+                raise HTTPException(status_code=400, detail=tr("این نوع پنل شروع زمان از اولین اتصال را پشتیبانی نمی‌کند."))
     return bool(value)
 
 
@@ -6033,7 +6040,7 @@ async def api_admin_create_product(body: ProductCreate, auth=Depends(require_sen
     is_auto_provision = bool(body.is_auto_provision or provision_server_id)
     is_panel_kind = body.product_kind == "panel_account"
     if is_panel_kind:
-        if not is_full_access or tenant.tenant_id or is_volume_credit_bot(db, True) or is_auto_provision:
+        if not is_full_access or (tenant.tenant_id and not db.is_unrestricted_full()) or is_volume_credit_bot(db, True) or is_auto_provision:
             raise HTTPException(status_code=403, detail=tr("فروش پنل فقط برای بات اصلی و به‌صورت بانک موجودی مجاز است."))
         body.duration_days = 0
     if not is_auto_provision and not is_panel_kind and is_volume_credit_bot(db, not bool(tenant.tenant_id)):
@@ -6132,7 +6139,8 @@ async def api_admin_create_product(body: ProductCreate, auth=Depends(require_sen
         renew_rules=body.renew_rules, ai_description=body.ai_description,
         product_kind="panel_account" if is_panel_kind else "config",
         start_on_first_use=_checked_product_first_use(
-            db, body.start_on_first_use, provision_server_id, multi=bool(extra_panel_ids)),
+            db, body.start_on_first_use, provision_server_id, multi=bool(extra_panel_ids),
+            extra_panel_ids=extra_panel_ids, ssh_node_id=getattr(body, "provision_ssh_node_id", None)),
     )
     if int(body.compare_price or 0) > 0 and (body.discount_days is not None or body.discount_max_uses is not None):
         db.edit_product(product_id, compare_price=int(body.compare_price),
@@ -6279,7 +6287,9 @@ async def api_admin_edit_product(product_id: int, body: ProductUpdate, auth=Depe
         old_extra = db.get_product_extra_targets(product_id)
         edit_kwargs["start_on_first_use"] = _checked_product_first_use(
             db, body.start_on_first_use, effective_server_id,
-            multi=bool(old_extra.get("panels") or old_extra.get("ssh")))
+            multi=bool(old_extra.get("panels") or old_extra.get("ssh")),
+            extra_panel_ids=old_extra.get("panels"),
+            ssh_node_id=getattr(body, "provision_ssh_node_id", None) or old_product["provision_ssh_node_id"])
     effective_product_server = provision_server_id if provision_server_id is not None else old_product["provision_server_id"]
     desired_base = body.base_users if body.base_users is not None else old_product["base_users"]
     desired_extra = body.extra_user_price if body.extra_user_price is not None else old_product["extra_user_price"]

@@ -11,6 +11,7 @@ import hashlib
 import ipaddress
 import json
 import re
+import shlex
 import secrets
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
@@ -34,12 +35,106 @@ def _validate_host(host: str) -> str:
     return candidate
 
 
+# ── Doctor DNS API patch ────────────────────────────────────────────────────
+# Stock Doctor DNS has set_devices() internally but does not publish it on the
+# Bot API.  ShopVPN needs POST /api/v1/admin/users/{id}/devices to apply the
+# purchased "user count", so the bootstrap registers that route (idempotent).
+_PANEL_ROUTE_ANCHOR = '        ("POST", re.compile(r"/api/v1/admin/users/(\\d{1,12})/plan$"), "admin_plan"),\n'
+_PANEL_ROUTE_NEW = '        ("POST", re.compile(r"/api/v1/admin/users/(\\d{1,12})/devices$"), "admin_devices"),\n'
+_PANEL_HANDLER_ANCHOR = "    def api_admin_wallet(self, body, uid):\n"
+_PANEL_HANDLER_NEW = (
+    "    def api_admin_devices(self, body, uid):\n"
+    "        # Added by ShopVPN: set the number of devices (max_ips) of an account.\n"
+    "        user, err = self.admin_target(uid)\n"
+    "        if err:\n"
+    "            return err\n"
+    "        try:\n"
+    "            total = int(body.get(\"devices\"))\n"
+    "        except (TypeError, ValueError):\n"
+    "            total = 0\n"
+    "        if not 1 <= total <= MAX_DEVICES:\n"
+    "            return 400, refused(\"bad_devices\", \"تعداد دستگاه باید بین ۱ تا %d باشد\" % MAX_DEVICES)\n"
+    "        with self.store.lock:\n"
+    "            set_devices(self.store.db, user[\"id\"], total)\n"
+    "            self.store.db.commit()\n"
+    "        self.admin_log(\"user #%d devices -> %d\" % (user[\"id\"], total))\n"
+    "        user = self.store.one(\"SELECT * FROM users WHERE id = ?\", (user[\"id\"],))\n"
+    "        return 200, {\"ok\": True, \"message\": \"تعداد دستگاه تنظیم شد\",\n"
+    "                     \"user\": admin_user_view(self.store, user, self.relays)}\n\n"
+)
+
+
+def _patch_panel_source(text: str) -> str:
+    """Return the panel source with the admin devices route added.
+
+    Unchanged if already patched; ValueError when the installed panel is too
+    different (too old) to be patched safely.
+    """
+    if "api_admin_devices" in text:
+        return text
+    needed = ("def set_devices(", "def admin_target(", "def admin_user_view(",
+              _PANEL_ROUTE_ANCHOR, _PANEL_HANDLER_ANCHOR)
+    for item in needed:
+        if item not in text:
+            raise ValueError("unsupported panel version: missing " + item.strip()[:60])
+    text = text.replace(_PANEL_ROUTE_ANCHOR, _PANEL_ROUTE_ANCHOR + _PANEL_ROUTE_NEW, 1)
+    text = text.replace(_PANEL_HANDLER_ANCHOR, _PANEL_HANDLER_NEW + _PANEL_HANDLER_ANCHOR, 1)
+    compile(text, "smartdns-panel", "exec")
+    return text
+
+
+_PATCH_APPLY = r'''
+PANEL_BIN = "/usr/local/bin/smartdns-panel"
+if os.path.isfile(PANEL_BIN):
+    with open(PANEL_BIN, "r", encoding="utf-8") as fh:
+        src = fh.read()
+    try:
+        new = _patch_panel_source(src)
+    except ValueError as exc:
+        raise SystemExit("PANEL_TOO_OLD: " + str(exc))
+    if new != src:
+        bak = PANEL_BIN + ".shopvpn.bak"
+        if not os.path.exists(bak):
+            with open(bak, "w", encoding="utf-8") as fh:
+                fh.write(src)
+            os.chmod(bak, 0o600)
+        mode = os.stat(PANEL_BIN).st_mode & 0o7777
+        fd, tmp = tempfile.mkstemp(prefix=".smartdns-panel.", dir=os.path.dirname(PANEL_BIN))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(new)
+            os.chmod(tmp, mode)
+            os.replace(tmp, PANEL_BIN)
+        finally:
+            if os.path.exists(tmp): os.unlink(tmp)
+        subprocess.run(["systemctl", "restart", "smartdns-panel.service"], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        time.sleep(3)
+        ok = subprocess.run(["systemctl", "is-active", "--quiet", "smartdns-panel.service"]).returncode == 0
+        if not ok:
+            with open(PANEL_BIN, "w", encoding="utf-8") as fh:
+                fh.write(src)
+            os.chmod(PANEL_BIN, mode)
+            subprocess.run(["systemctl", "restart", "smartdns-panel.service"], check=False, timeout=60)
+            raise SystemExit("PANEL_PATCH_FAILED: restored original panel")
+'''
+
+
 def _remote_script(token: str, token_hash: str, allow_ip: str, name: str) -> str:
+    import inspect
     # Values are JSON literals, not shell-interpolated SQL.
     values = json.dumps({"token_hash": token_hash, "allow_ip": allow_ip,
                          "name": name, "created_at": datetime.now(timezone.utc).isoformat()},
                         ensure_ascii=True)
+    patch_src = "\n".join([
+        "_PANEL_ROUTE_ANCHOR = " + repr(_PANEL_ROUTE_ANCHOR),
+        "_PANEL_ROUTE_NEW = " + repr(_PANEL_ROUTE_NEW),
+        "_PANEL_HANDLER_ANCHOR = " + repr(_PANEL_HANDLER_ANCHOR),
+        "_PANEL_HANDLER_NEW = " + repr(_PANEL_HANDLER_NEW),
+        inspect.getsource(_patch_panel_source),
+    ])
     return r'''import json, os, sqlite3, sys, subprocess, tempfile, time
+''' + patch_src + "\n" + _PATCH_APPLY + r'''
 # The Bot API defaults to 8445. If an explicit override disabled or moved it,
 # normalize it to the documented port and restart only the Doctor DNS panel service.
 config = "/etc/smart-dns/panel.env"
@@ -101,8 +196,8 @@ async def setup_existing_panel(*, host: str, ssh_port: int = 22, username: str =
     host = _validate_host(host)
     if not 1 <= int(ssh_port) <= 65535:
         raise DoctorDNSSetupError("پورت SSH نامعتبر است.")
-    if username != "root":
-        raise DoctorDNSSetupError("برای راه‌اندازی خودکار، نام کاربری SSH باید root باشد.")
+    if not username or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,31}", str(username)):
+        raise DoctorDNSSetupError("نام کاربری SSH نامعتبر است.")
     if not (password or private_key):
         raise DoctorDNSSetupError("رمز عبور یا کلید خصوصی SSH الزامی است.")
 
@@ -129,13 +224,33 @@ async def setup_existing_panel(*, host: str, ssh_port: int = 22, username: str =
     api_key_name = ("ShopVPN-" + re.sub(r"[^A-Za-z0-9_.-]", "", panel_name)[:40])[:60]
     key_created = False
     async with conn:
-        async def run(cmd: str, timeout=25, check=True):
+        is_root = (await conn.run("id -u", check=False)).stdout.strip() == "0"
+        sudo_ok = False
+        if not is_root:
+            probe = await conn.run("sudo -n true", check=False)
+            if probe.exit_status == 0:
+                sudo_ok = True
+            elif password:
+                probe = await conn.run("sudo -S -p '' -v", input=password + "\n", check=False)
+                if probe.exit_status != 0:
+                    raise DoctorDNSSetupError("ورود موفق بود اما sudo در دسترس نیست یا رمز sudo اشتباه است.")
+                sudo_ok = True
+            else:
+                raise DoctorDNSSetupError("کاربر SSH روت نیست؛ sudo بدون رمز لازم است یا رمز sudo را وارد کنید.")
+
+        async def run(cmd: str, timeout=25, check=True, privileged=True):
+            wrapped = cmd if is_root or not privileged else ("sudo -n bash -c " + shlex.quote(cmd) if not password else "sudo -S -p \"\" bash -c " + shlex.quote(cmd))
             try:
-                result = await asyncio.wait_for(conn.run(cmd, check=False), timeout=timeout)
+                result = await asyncio.wait_for(conn.run(wrapped, check=False,
+                    input=(password + "\n") if (privileged and not is_root and sudo_ok and password) else None), timeout=timeout)
             except asyncio.TimeoutError as exc:
                 raise DoctorDNSSetupError("زمان اجرای دستور روی سرور تمام شد.") from exc
             if check and result.exit_status != 0:
                 detail = ((result.stderr or result.stdout or "").strip())[-240:]
+                if "PANEL_TOO_OLD" in detail:
+                    raise DoctorDNSSetupError("نسخه Doctor DNS برای افزودن خودکار مسیر تنظیم دستگاه‌ها خیلی قدیمی است؛ یک‌بار doctor-dns.sh را اجرا و به آخرین نسخه آپدیت کنید، سپس دوباره متصل شوید.")
+                if "PANEL_PATCH_FAILED" in detail:
+                    raise DoctorDNSSetupError("افزودن مسیر تنظیم دستگاه‌ها باعث بالا نیامدن پنل شد؛ فایل اصلی پنل خودکار برگردانده شد.")
                 raise DoctorDNSSetupError("بررسی سرور ناموفق بود: " + (detail or "خطای نامشخص"))
             return (result.stdout or "").strip()
 
@@ -151,7 +266,7 @@ async def setup_existing_panel(*, host: str, ssh_port: int = 22, username: str =
 
         # SSH_CLIENT's first field is the source address seen by the Doctor DNS host;
         # restricting the key to it avoids leaving a globally usable admin credential.
-        source = await run("printf '%s' \"${SSH_CLIENT%% *}\"", check=False)
+        source = await run("printf '%s' \"${SSH_CLIENT%% *}\"", check=False, privileged=False)
         try:
             source_ip = str(ipaddress.ip_address(source.strip()))
         except ValueError:
@@ -176,7 +291,10 @@ async def setup_existing_panel(*, host: str, ssh_port: int = 22, username: str =
                     "c.execute(\"UPDATE api_tokens SET revoked_at=? WHERE token_hash=? AND revoked_at IS NULL\", "
                     "(datetime.datetime.now(datetime.timezone.utc).isoformat(), \"" + token_hash + "\")); c.commit()'"
                 )
-                await asyncio.wait_for(cleanup_conn.run(cleanup, check=False), timeout=15)
+                cleanup_cmd = ("sudo -n bash -c " + shlex.quote(cleanup) if not password
+                               else "sudo -S -p '' bash -c " + shlex.quote(cleanup))
+                await asyncio.wait_for(cleanup_conn.run(cleanup_cmd, check=False,
+                    input=(password + "\n") if password else None), timeout=15)
         except Exception:
             pass
 
@@ -202,7 +320,7 @@ async def setup_existing_panel(*, host: str, ssh_port: int = 22, username: str =
                 if resp.status == 404 and isinstance(body, dict) and body.get("error") == "user_not_found":
                     pass  # route exists and auth is admin; target 0 intentionally does not exist
                 elif resp.status == 404 and isinstance(body, dict) and body.get("error") == "not_found":
-                    raise DoctorDNSSetupError("نسخه نصب‌شده Doctor DNS مسیر تنظیم دستگاه‌ها را ندارد؛ باید Doctor DNS به‌روزرسانی شود.")
+                    raise DoctorDNSSetupError("مسیر تنظیم دستگاه‌ها با وجود پچ خودکار روی پنل فعال نشد؛ سرویس smartdns-panel را ری‌استارت کنید (systemctl restart smartdns-panel) و دوباره متصل شوید.")
                 elif resp.status == 400 and isinstance(body, dict) and body.get("error") == "bad_devices":
                     raise DoctorDNSSetupError("مسیر API وجود دارد اما نسخه/اعتبارسنجی آن با ShopVPN سازگار نیست.")
                 else:

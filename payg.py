@@ -1756,9 +1756,10 @@ def create_payg_router(db, is_main_bot=True):
                 "✅ <b>سرویس Pay As You Go ساخته شد.</b>\n\n"
                 f"👤 نام کاربری: <code>{provisioned['username']}</code>\n"
                 "📦 حجم: پرداخت به‌ازای مصرف؛ سقف متناسب با موجودی کیف پول تنظیم می‌شود.\n"
-                + ("🎁 برای مدیریت رایگان است؛ هزینه‌ای کسر نمی‌شود.\n" if is_free_payg_user(db, uid) else
-                   "💳 هزینه مصرف از کیف پول تومانی کسر می‌شود و با خالی‌شدن کیف پول سرویس تا شارژ بعدی متوقف می‌شود.\n")
-                + "📊 وضعیت و تاریخچه: /payg")
+                + ("🎁 رایگان برای مدیریت؛ هزینه‌ای کسر نمی‌شود.\n\n" if is_free_payg_user(db, uid) else
+                   "💳 هزینه از کیف پول تومانی شما کسر می‌شود.\n\n") +
+                f"🔗 <a href=\"{safe_url}\">دریافت لینک اشتراک</a>\n\n"
+                f"مصرف هر {cycle_text(db)} محاسبه و تسویه می‌شود.")
             await send_delivery_message(call.message, db, default_text, provisioned["username"], safe_url)
             await show(call.message, uid)
         except Exception as exc:

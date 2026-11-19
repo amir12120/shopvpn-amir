@@ -3,6 +3,7 @@
 import asyncio
 import html
 import logging
+import re
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -234,8 +235,20 @@ def register(router: Router, db, *, full_access_bot, senior_admin_only, deny_mid
         if not text.isdigit() or not 1 <= int(text) <= 65535:
             return await message.answer(tr("پورت نامعتبر است؛ عددی بین ۱ تا ۶۵۵۳۵ بفرست."))
         await state.update_data(port=int(text))
+        await state.set_state(AdminSSH.node_user)
+        await message.answer("نام کاربری SSH را بفرست (root، ubuntu، debian و ...):",
+                             reply_markup=_cancel_kb("adm_ssh_nodes"))
+
+    @router.message(AdminSSH.node_user, ~F.text.startswith("/"))
+    async def msg_ssh_node_user(message: Message, state: FSMContext):
+        if not _msg_ok(message):
+            return
+        username = (message.text or "").strip()
+        if not username or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,31}", username):
+            return await message.answer("نام کاربری نامعتبر است؛ دوباره ارسال کن.")
+        await state.update_data(username=username)
         await state.set_state(AdminSSH.node_pass)
-        await message.answer(tr("رمز root سرور را بفرست. فقط برای همین نصب استفاده می‌شود، ذخیره نمی‌شود و پیامت بلافاصله پاک می‌شود."),
+        await message.answer("رمز SSH (و در صورت نیاز رمز sudo) را بفرست. فقط برای همین نصب استفاده می‌شود و ذخیره نمی‌شود؛ پیامت بلافاصله پاک می‌شود.",
                              reply_markup=_cancel_kb("adm_ssh_nodes"))
 
     @router.message(AdminSSH.node_pass, ~F.text.startswith("/"))
@@ -251,7 +264,7 @@ def register(router: Router, db, *, full_access_bot, senior_admin_only, deny_mid
         await state.clear()
         try:
             job_id = ssh_service.start_auto_install(db, name=data["name"], host=data["host"],
-                                                    ssh_port=data["port"], password=password)
+                                                    ssh_port=data["port"], username=data.get("username", "root"), password=password)
         except SSHServiceError as exc:
             return await message.answer(tr("❌ ") + html.escape(str(exc)), reply_markup=_nodes_kb())
         _log(message.from_user.id, "ssh_node_auto_install", f"SSH node auto-install started: {data['name']} ({data['host']})")
@@ -486,6 +499,7 @@ def register(router: Router, db, *, full_access_bot, senior_admin_only, deny_mid
                 f"نام کاربری: <code>{html.escape(r['username'])}</code>\n"
                 f"رمز: <code>{html.escape(str(r['password']))}</code>\n"
                 f"سرور: <code>{html.escape(str(r['host']))}:{int(r['port'])}</code>\n")
+        text += "\nتنظیمات اپ: UDPGW port = <code>7300</code>\n"
         if link:
             text += f"\nلینک:\n<code>{html.escape(link)}</code>\n"
         text += "\n⚠️ رمز فقط همین یک بار نمایش داده می‌شود."

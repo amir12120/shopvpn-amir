@@ -312,7 +312,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
         finally:
             reset_language(token)
 
-    extra_gateway_user.register_early(router, db, is_main_bot)
+    extra_gateway_user.register_early(router, db, full_access_bot)
 
     async def _safe_edit(message: Message, text: str, reply_markup=None, parse_mode=None) -> None:
         """ویرایش امن یک پیام (برای منوهای «بازگشت»/«لغو» و مشابه).
@@ -597,7 +597,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
             await call.answer(db.get_text('handlers_user.auto_c1e947e8', 'این نظرسنجی معتبر نیست.'), show_alert=True)
 
     async def _send_welcome_gift_offer(message: Message, user_id: int):
-        if not is_main_bot or await asyncio.to_thread(db.get_setting, "welcome_gift_enabled", "0") != "1":
+        if not full_access_bot or await asyncio.to_thread(db.get_setting, "welcome_gift_enabled", "0") != "1":
             return
         if not await asyncio.to_thread(db.get_setting, "welcome_gift_product_id", "0"):
             return
@@ -613,7 +613,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
 
     @router.callback_query(F.data == "welcome_gift_claim")
     async def cb_welcome_gift_claim(call: CallbackQuery):
-        if not is_main_bot or await asyncio.to_thread(db.get_setting, "welcome_gift_enabled", "0") != "1":
+        if not full_access_bot or await asyncio.to_thread(db.get_setting, "welcome_gift_enabled", "0") != "1":
             await call.answer(tr("هدیه‌ی عضویت در حال حاضر غیرفعال است."), show_alert=True)
             return
         terms = await asyncio.to_thread(db.get_terms_settings)
@@ -830,6 +830,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
                 f"<b>{escape_html(row.get('node_name') or 'SSH')} — {escape_html(row.get('username') or '')}</b>",
                 f"وضعیت: {escape_html(status_label)}",
                 f"سرور: <code>{escape_html(row.get('host') or '')}:{int(row.get('port') or 22)}</code>",
+                "UDPGW port در اپ: <code>7300</code>",
                 f"پروکسی SOCKS5 محلی: <code>127.0.0.1:1080</code>",
                 f"دستور تونل: <code>ssh -p {int(row.get('port') or 22)} -N -D 127.0.0.1:1080 {escape_html(row.get('username') or '')}@{escape_html(row.get('host') or '')}</code>",
             ]
@@ -1232,13 +1233,13 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
                 post_start_actions.append(f"__open_svcitem__:{token[4:]}")
             elif token.startswith("gift_") and len(token) > 5:
                 post_start_actions.append(f"__redeem_gift__:{token[5:]}")
-            elif token == "season" and is_main_bot:
+            elif token == "season" and full_access_bot:
                 post_start_actions.append("__open_season__")
-            elif token == "lootbox" and is_main_bot:
+            elif token == "lootbox" and full_access_bot:
                 post_start_actions.append("__open_lootbox__")
-            elif token == "progress" and is_main_bot:
+            elif token == "progress" and full_access_bot:
                 post_start_actions.append("__open_progress__")
-            elif is_main_bot and re.fullmatch(r"quiz_\d{1,9}_\d{1,2}", token):
+            elif full_access_bot and re.fullmatch(r"quiz_\d{1,9}_\d{1,2}", token):
                 post_start_actions.append("__quiz_answer__:" + token[5:].replace("_", ":"))
             elif token == "nofj":
                 pass  # دیگر نیازی نیست؛ ورود با هر دیپ‌لینکی خودش معافیت می‌دهد (بالاتر انجام شد)
@@ -1500,13 +1501,13 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
             (await asyncio.to_thread(db.get_setting, "custom_config_enabled", "0")) == "1"
             or (await asyncio.to_thread(db.count_active_custom_config_products)) > 0
         )
-        payg_on = is_main_bot and (await asyncio.to_thread(db.get_setting, "payg_enabled", "1")) == "1"
+        payg_on = full_access_bot and (await asyncio.to_thread(db.get_setting, "payg_enabled", "1")) == "1"
         if not categories and not custom_enabled and not payg_on:
             await message.answer(db.get_text("handlers_user.category.none_active", "در حال حاضر دسته‌بندی فعالی وجود ندارد."))
             return
         await message.answer(
             db.get_text("handlers_user.category.choose_option", "یک گزینه را انتخاب کنید:"),
-            reply_markup=kb.categories_kb(db, categories, full_access_bot, show_payg=is_main_bot),
+            reply_markup=kb.categories_kb(db, categories, full_access_bot, show_payg=full_access_bot),
         )
 
     @router.callback_query(F.data == "gift_open_store")
@@ -1567,7 +1568,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
         await _safe_edit(
             call.message,
             db.get_text("handlers_user.category.choose_category", "یک دسته‌بندی را انتخاب کنید:"),
-            reply_markup=kb.categories_kb(db, categories, is_main_bot, show_payg=is_main_bot),
+            reply_markup=kb.categories_kb(db, categories, full_access_bot, show_payg=full_access_bot),
         )
         await call.answer()
 
@@ -2280,7 +2281,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
         await report_router.report(bot, db, "service", text)
 
     extra_gateway_user.register(
-        router, db, is_main_bot, _order_payment_method_error, _wallet_topup_method_error, _notify_admins_of_order,
+        router, db, full_access_bot, _order_payment_method_error, _wallet_topup_method_error, _notify_admins_of_order,
     )
 
     @router.callback_query(F.data.startswith("check_aban:"))
@@ -2642,7 +2643,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
                     allowed_methods=allowed_methods,
                     noapay_enabled=noapay_payment.noapay_payment_available(db),
                     blupal_enabled=blupal_payment.blupal_payment_available(db),
-                    extra_gateways=extra_gateway_payment.available_keys(db, is_main_bot),
+                    extra_gateways=extra_gateway_payment.available_keys(db, full_access_bot),
                     user_id=order["user_id"],
                     free_callback="adm_free_order" if can_free else None,
                 ),
@@ -3499,7 +3500,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
                     allowed_methods=allowed_methods,
                     noapay_enabled=noapay_payment.noapay_payment_available(db),
                     blupal_enabled=blupal_payment.blupal_payment_available(db),
-                    extra_gateways=extra_gateway_payment.available_keys(db, is_main_bot),
+                    extra_gateways=extra_gateway_payment.available_keys(db, full_access_bot),
                     user_id=order["user_id"],
                     free_callback="adm_free_order" if can_free else None,
                 ),
@@ -5949,7 +5950,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
                     db=db,
                     noapay_enabled=noapay_payment.noapay_payment_available(db),
                     blupal_enabled=blupal_payment.blupal_payment_available(db),
-                    extra_gateways=extra_gateway_payment.available_keys(db, is_main_bot),
+                    extra_gateways=extra_gateway_payment.available_keys(db, full_access_bot),
                     user_id=order["user_id"],
                 ),
             )
@@ -6694,7 +6695,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
         lines.append(f"👛 موجودی کیف پول شما: {stats['credit']:,} تومان")
 
         markup = kb.referral_share_kb(link)
-        if is_main_bot and season_logic.enabled(db):
+        if full_access_bot and season_logic.enabled(db):
             markup.inline_keyboard.append([InlineKeyboardButton(text=tr("🏆 فصل رقابتی"), callback_data="season_view")])
         await message.answer(
             "\n".join(lines),
@@ -6729,7 +6730,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
     # -----------------------------------------------------------------------
 
     async def commission_reseller_request_start(message: Message, state: FSMContext):
-        if not is_main_bot:
+        if not full_access_bot:
             return
         if (await asyncio.to_thread(db.is_inline_reseller, message.from_user.id)):
             await message.answer(
@@ -7103,7 +7104,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
                 allowed_methods=wallet_allowed_methods,
                 noapay_enabled=noapay_payment.noapay_payment_available(db),
                 blupal_enabled=blupal_payment.blupal_payment_available(db),
-                extra_gateways=extra_gateway_payment.available_keys(db, is_main_bot),
+                extra_gateways=extra_gateway_payment.available_keys(db, full_access_bot),
                 user_id=user_id,
             ),
         )
@@ -7466,6 +7467,8 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
 
     async def _show_tiers_menu(message: Message, edit: bool = False):
         tiers = await asyncio.to_thread(db.list_reseller_tiers, True)
+        if not is_main_bot:
+            tiers = [t for t in tiers if not t["has_dedicated_bot"]]
         if not tiers:
             await message.answer(db.get_text('handlers_user.auto_605e9816', 'در حال حاضر سطحی برای نمایندگی فعال نیست.'))
             return
@@ -7528,7 +7531,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
 
     @router.message(F.text.func(lambda t: t in (db.get_setting("btn_reseller_tiers", "🤝 نمایندگی"), tr(db.get_setting("btn_reseller_tiers", "🤝 نمایندگی")))))
     async def reseller_tiers_menu(message: Message):
-        if not is_main_bot:
+        if not full_access_bot:
             return
         if not kb.reseller_section_enabled(db):
             await message.answer(tr("بخش نمایندگی در حال حاضر خاموش است."))
@@ -7541,7 +7544,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
     @router.callback_query(F.data.startswith("rt:"))
     async def cb_reseller_tiers(call: CallbackQuery, state: FSMContext):
         await call.answer()
-        if not is_main_bot:
+        if not full_access_bot:
             return
         if not kb.reseller_section_enabled(db):
             return
@@ -7561,7 +7564,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
         if action not in ("pick", "go", "goc") or len(parts) < 3:
             return
         tier = await asyncio.to_thread(db.get_reseller_tier, parts[2])
-        if not tier or not tier["is_enabled"]:
+        if not tier or not tier["is_enabled"] or (not is_main_bot and tier["has_dedicated_bot"]):
             await call.message.answer(db.get_text('handlers_user.auto_ac0165cd', 'این سطح در حال حاضر فعال نیست.'))
             return
         if action == "pick":
@@ -7623,7 +7626,10 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
         )
 
     async def reseller_request_start(message: Message, state: FSMContext, tier=None):
-        if not is_main_bot:
+        if not full_access_bot:
+            return
+        # نماینده‌ی کامل اجازه‌ی ساخت نماینده‌ی کامل/بات اختصاصی ندارد.
+        if not is_main_bot and (tier is None or tier["has_dedicated_bot"]):
             return
         if not kb.reseller_section_enabled(db):
             await message.answer(tr("بخش نمایندگی در حال حاضر خاموش است."))
@@ -8405,6 +8411,8 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
         دکمه‌ی تایید را زده). عمداً همه‌چیز (توکن/یوزرنیم/آیدی مالک) را از خودِ ردیف
         دیتابیسِ درخواست می‌خواند، نه از FSM state، چون در مسیر بیرونی این تابع از
         چتِ مالک صدا زده می‌شود که اصلاً به state چتِ درخواست‌دهنده دسترسی ندارد."""
+        if not is_main_bot:
+            return
         if not (await asyncio.to_thread(db.claim_reseller_request_finalization, req["id"])):
             return
         req = await asyncio.to_thread(db.get_reseller_request, req["id"])

@@ -105,6 +105,7 @@ from states import (
     AdminConfigSearch,
     AdminPanelSearch,
     AdminCreateWalletGift,
+    AdminResbotWebCreds,
     AdminAddCategory,
     AdminCategoryDescription,
     AdminEmojiEdit,
@@ -3154,9 +3155,9 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
             return await deny_mid(call)
         product_id = int(call.data.split(":")[1])
         product = await asyncio.to_thread(db.get_product, product_id)
-        if not product or not product["provision_server_id"]:
+        if not product or not (product["provision_server_id"] or product["provision_ssh_node_id"]):
             return await call.answer(db.get_text('handlers_admin.auto_d6cec4a7', '⚠️ این محصول اتصال مستقیم به پنل ندارد.'), show_alert=True)
-        server = await asyncio.to_thread(db.get_panel_server, product["provision_server_id"])
+        server = await asyncio.to_thread(db.get_panel_server, product["provision_server_id"]) if product["provision_server_id"] else None
         current = product["start_on_first_use"] if "start_on_first_use" in product.keys() else None
         if current is None and server:
             current = int(server["start_on_first_use"] or 0)
@@ -3171,13 +3172,18 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
         _, mode, product_id_s = call.data.split(":")
         product_id = int(product_id_s)
         product = await asyncio.to_thread(db.get_product, product_id)
-        if not product or not product["provision_server_id"]:
+        if not product or not (product["provision_server_id"] or product["provision_ssh_node_id"]):
             return await call.answer(db.get_text('handlers_admin.auto_d6cec4a7', '⚠️ این محصول اتصال مستقیم به پنل ندارد.'), show_alert=True)
-        server = await asyncio.to_thread(db.get_panel_server, product["provision_server_id"])
         from direct_panel_provision import ONHOLD_PANEL_TYPES
         first = mode == "first"
-        if first and server and server["panel_type"] not in ONHOLD_PANEL_TYPES:
-            return await call.answer(tr("این نوع پنل شروع زمان از اولین اتصال را پشتیبانی نمی‌کند."), show_alert=True)
+        if first:
+            # محصول چندپنلی/نودی: همه‌ی پنل‌های VPN (اصلی + اضافه) باید On-hold را پشتیبانی کنند.
+            extra_targets = await asyncio.to_thread(db.get_product_extra_targets, product_id)
+            check_ids = ([int(product["provision_server_id"])] if product["provision_server_id"] else []) + [int(x) for x in (extra_targets.get("panels") or [])]
+            for sid in check_ids:
+                srv = await asyncio.to_thread(db.get_panel_server, sid)
+                if srv and srv["panel_type"] not in ONHOLD_PANEL_TYPES:
+                    return await call.answer(tr("این نوع پنل شروع زمان از اولین اتصال را پشتیبانی نمی‌کند."), show_alert=True)
         await asyncio.to_thread(db.edit_product, product_id, start_on_first_use=first)
         await asyncio.to_thread(db.log_admin_action, call.from_user.id, "product_start_mode",
                                 f"محصول «{product['name']}» (#{product_id}) | شروع زمان: {'از اولین اتصال' if first else 'از لحظه خرید'}")
@@ -4138,7 +4144,7 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
 
     @router.callback_query(F.data == "adm_terms_menu")
     async def cb_admin_terms_menu(call: CallbackQuery):
-        if not is_main_bot or not full_admin_only(call.from_user.id):
+        if not full_access_bot or not full_admin_only(call.from_user.id):
             return await deny_support(call)
         settings = await asyncio.to_thread(db.get_terms_settings)
         preview = settings["text"][:3000]
@@ -4154,7 +4160,7 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
 
     @router.callback_query(F.data == "adm_terms_toggle")
     async def cb_admin_terms_toggle(call: CallbackQuery):
-        if not is_main_bot or not full_admin_only(call.from_user.id):
+        if not full_access_bot or not full_admin_only(call.from_user.id):
             return await deny_support(call)
         current = await asyncio.to_thread(db.get_setting, "terms_enabled", "0")
         if current != "1" and not (await asyncio.to_thread(db.get_setting, "terms_text", "")).strip():
@@ -4166,7 +4172,7 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
 
     @router.callback_query(F.data == "adm_terms_set_text")
     async def cb_admin_terms_set_text(call: CallbackQuery, state: FSMContext):
-        if not is_main_bot or not full_admin_only(call.from_user.id):
+        if not full_access_bot or not full_admin_only(call.from_user.id):
             return await deny_support(call)
         await state.set_state(AdminTerms.waiting_text)
         await safe_edit(
@@ -4179,7 +4185,7 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
 
     @router.message(AdminTerms.waiting_text)
     async def process_terms_text(message: Message, state: FSMContext):
-        if not is_main_bot or not full_admin_only(message.from_user.id):
+        if not full_access_bot or not full_admin_only(message.from_user.id):
             await state.clear()
             return
         text = (message.text or "").strip()
@@ -10034,7 +10040,7 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
     # -------------------------------------------------------------------
     # هزینه و انقضای عضویت نمایندگی (F13)
     # -------------------------------------------------------------------
-    if is_main_bot:
+    if full_access_bot:
 
         @router.callback_query(F.data == "adm_reseller_membership")
         async def cb_admin_reseller_membership(call: CallbackQuery):
@@ -10113,11 +10119,12 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
     # برایش راه‌اندازی می‌کند.
     # -------------------------------------------------------------------
 
-    if is_main_bot:
+    if full_access_bot:
 
         @router.callback_query(F.data == "adm_resellers_menu")
         async def cb_admin_resellers_menu(call: CallbackQuery):
-            if not senior_admin_only(call.from_user.id):
+            # مدیریت نماینده‌های کامل فقط در بات اصلی (نماینده‌ی کامل نمی‌تواند نماینده‌ی کامل بدهد)
+            if not is_main_bot or not senior_admin_only(call.from_user.id):
                 return await deny_mid(call)
             bots = (await asyncio.to_thread(db.list_reseller_bots))
             await replace_admin_view(call, tr("🏪 مدیریت بات‌های نمایندگی:"), reply_markup=kb.resellers_kb(bots))
@@ -10216,6 +10223,158 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
                 reply_markup=kb.resbot_webpanel_kb(bot_id),
             )
             await call.answer()
+
+        @router.callback_query(F.data.startswith("adm_resbot_makefull:"))
+        async def cb_admin_resbot_makefull(call: CallbackQuery):
+            """تبدیل نماینده‌ی دارای سطح (VIP و ...) به نماینده‌ی کامل؛ اول تأیید می‌گیرد."""
+            if not is_main_bot or not senior_admin_only(call.from_user.id):
+                return await deny_mid(call)
+            bot_id = callback_id(call.data, "adm_resbot_makefull")
+            reseller_bot = (await asyncio.to_thread(db.get_reseller_bot, bot_id)) if bot_id is not None else None
+            if not reseller_bot:
+                return await call.answer(db.get_text('handlers_admin.auto_edca6d43', 'یافت نشد.'), show_alert=True)
+            info = await asyncio.to_thread(db.get_reseller_membership_info, reseller_bot["owner_telegram_id"])
+            tier_code = (info["reseller_tier"] if info else None) or ""
+            tier = await asyncio.to_thread(db.get_reseller_tier, tier_code) if tier_code else None
+            if info and (info["reseller_supply_model"] or "volume_credit") == "fixed_product":
+                return await call.answer(tr("این نماینده مدل «محصول آماده» (طلایی) دارد؛ فقط تبدیل نماینده‌های اعتبار حجمی (VIP) پشتیبانی می‌شود."), show_alert=True)
+            if not tier_code:
+                current = tr("بدون سطح (از قبل کامل است)")
+            else:
+                current = f"{tier['icon']} {tier['title']}" if tier else tier_code
+                if info and info["reseller_expires_at"]:
+                    current += f" — {tr('انقضا')}: {str(info['reseller_expires_at'])[:10]}"
+            await replace_admin_view(
+                call,
+                tr("⬆️ تبدیل به نماینده کامل") + f"\n\n@{reseller_bot['bot_username'] or '-'}\n"
+                + tr("سطح فعلی") + f": {current}\n\n"
+                + tr("با تبدیل، سطح و انقضای عضویت پاک می‌شود (دیگر منقضی یا تنزل نمی‌شود) و بات و پنل وبش دقیقاً مثل بات اصلی می‌شود: اتصال پنل VPN، نصب نود، محصول مستقیم و فروش پنل. فقط مدیریت نماینده‌ها و آپدیت پروژه فقط برای بات اصلی می‌ماند. کاربران و دیتابیس بات دست‌نخورده می‌مانند و دیگر از اعتبار حجمی مصرف نمی‌شود."),
+                reply_markup=kb.resbot_makefull_confirm_kb(bot_id),
+            )
+            await call.answer()
+
+        @router.callback_query(F.data.startswith("adm_resbot_makefull_ok:"))
+        async def cb_admin_resbot_makefull_ok(call: CallbackQuery):
+            if not is_main_bot or not senior_admin_only(call.from_user.id):
+                return await deny_mid(call)
+            bot_id = callback_id(call.data, "adm_resbot_makefull_ok")
+            reseller_bot = (await asyncio.to_thread(db.get_reseller_bot, bot_id)) if bot_id is not None else None
+            if not reseller_bot:
+                return await call.answer(db.get_text('handlers_admin.auto_edca6d43', 'یافت نشد.'), show_alert=True)
+            owner_id = reseller_bot["owner_telegram_id"]
+            info = await asyncio.to_thread(db.get_reseller_membership_info, owner_id)
+            if info and (info["reseller_supply_model"] or "volume_credit") == "fixed_product":
+                return await call.answer(tr("این نماینده مدل «محصول آماده» دارد؛ تبدیل انجام نشد."), show_alert=True)
+            await asyncio.to_thread(db.convert_reseller_to_full, owner_id)
+            tenant_db = Database(resolve_db_path(reseller_bot["db_path"]))
+            await asyncio.to_thread(tenant_db.set_setting, "bot_role", "full_reseller")
+            # نماینده‌ی کامل = دقیقاً مثل بات اصلی (پنل VPN، نود، محصول مستقیم، فروش پنل، پنل وب کامل)
+            await asyncio.to_thread(tenant_db.set_setting, "full_reseller_unrestricted", "1")
+            if not await asyncio.to_thread(tenant_db.get_setting, "miniapp_tenant_id", ""):
+                await asyncio.to_thread(tenant_db.set_setting, "miniapp_tenant_id", str(bot_id))
+            await asyncio.to_thread(
+                db.log_admin_action, call.from_user.id, "reseller_make_full",
+                f"نماینده #{bot_id} (@{reseller_bot['bot_username'] or ''}) به نماینده کامل تبدیل شد",
+            )
+            bots = await asyncio.to_thread(db.list_reseller_bots)
+            await safe_edit(
+                call,
+                tr("✅ نماینده به «نماینده کامل» تبدیل شد؛ بات و پنل وبش بدون ری‌استارت همین‌طور ادامه می‌دهند.") + "\n\n"
+                + db.get_text('handlers_admin.auto_b842641a_title', '🏪 مدیریت بات‌های نمایندگی:'),
+                reply_markup=kb.resellers_kb(bots),
+            )
+            await call.answer(tr("تبدیل شد."))
+
+        @router.callback_query(F.data.startswith("adm_resbot_webpanel_creds:"))
+        async def cb_admin_resbot_webpanel_creds(call: CallbackQuery, state: FSMContext):
+            """مدیر اصلی خودش یوزرنیم/رمز پنل وب نماینده را تعیین می‌کند (بدون لینک یک‌بارمصرف)."""
+            if not is_main_bot or not senior_admin_only(call.from_user.id):
+                return await deny_mid(call)
+            bot_id = callback_id(call.data, "adm_resbot_webpanel_creds")
+            reseller_bot = (await asyncio.to_thread(db.get_reseller_bot, bot_id)) if bot_id is not None else None
+            if not reseller_bot:
+                return await call.answer(db.get_text('handlers_admin.auto_edca6d43', 'یافت نشد.'), show_alert=True)
+            if not _get_admin_panel_url(db):
+                return await call.answer(db.get_text('handlers_admin.auto_0137f0c0', 'هنوز آدرس پنل مدیریت وب تنظیم نشده.'), show_alert=True)
+            if not ("web_panel_enabled" in reseller_bot.keys() and reseller_bot["web_panel_enabled"]):
+                await asyncio.to_thread(db.enable_reseller_web_panel, bot_id)
+            await state.clear()
+            await state.set_state(AdminResbotWebCreds.waiting_username)
+            await state.update_data(webcreds_bot_id=bot_id)
+            await call.answer()
+            await call.message.answer(
+                tr("👤 یوزرنیم پنل وب این نماینده را بفرستید (حداقل ۳ کاراکتر؛ حروف انگلیسی، عدد، نقطه، خط‌تیره و زیرخط):")
+            )
+
+        @router.message(AdminResbotWebCreds.waiting_username)
+        async def process_resbot_webcreds_username(message: Message, state: FSMContext):
+            if not is_main_bot or not senior_admin_only(message.from_user.id):
+                return
+            username = (message.text or "").strip().lower()
+            if not re.fullmatch(r"[a-z0-9_.\-]{3,40}", username):
+                return await message.answer(tr("یوزرنیم معتبر نیست (۳ تا ۴۰ کاراکتر؛ فقط حروف انگلیسی، عدد، . - _). دوباره بفرستید:"))
+            data = await state.get_data()
+            reseller_bot = await asyncio.to_thread(db.get_reseller_bot, data.get("webcreds_bot_id"))
+            if not reseller_bot:
+                await state.clear()
+                return await message.answer(db.get_text('handlers_admin.auto_edca6d43', 'یافت نشد.'))
+            tenant_db = Database(resolve_db_path(reseller_bot["db_path"]))
+            existing = await asyncio.to_thread(tenant_db.get_web_admin_by_username, username)
+            owners = [a for a in await asyncio.to_thread(tenant_db.list_web_admins) if a["role"] == "owner"]
+            if existing and (not owners or existing["id"] != owners[0]["id"]):
+                return await message.answer(tr("این یوزرنیم قبلاً در پنل این نماینده استفاده شده. یوزرنیم دیگری بفرستید:"))
+            await state.update_data(webcreds_username=username)
+            await state.set_state(AdminResbotWebCreds.waiting_password)
+            await message.answer(tr("🔑 رمز عبور را بفرستید (حداقل ۸ کاراکتر). پیام شما بعد از خواندن پاک می‌شود:"))
+
+        @router.message(AdminResbotWebCreds.waiting_password)
+        async def process_resbot_webcreds_password(message: Message, state: FSMContext):
+            if not is_main_bot or not senior_admin_only(message.from_user.id):
+                return
+            password = message.text or ""
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            if len(password) < 8:
+                return await message.answer(tr("رمز باید حداقل ۸ کاراکتر باشد. دوباره بفرستید:"))
+            data = await state.get_data()
+            bot_id = data.get("webcreds_bot_id")
+            username = data.get("webcreds_username")
+            reseller_bot = await asyncio.to_thread(db.get_reseller_bot, bot_id)
+            if not reseller_bot or not username:
+                await state.clear()
+                return await message.answer(db.get_text('handlers_admin.auto_edca6d43', 'یافت نشد.'))
+            from admin_panel.security import hash_password
+            tenant_db = Database(resolve_db_path(reseller_bot["db_path"]))
+            owners = [a for a in await asyncio.to_thread(tenant_db.list_web_admins) if a["role"] == "owner"]
+            pw_hash = hash_password(password)
+            if owners:
+                owner = owners[0]
+                if owner["username"] != username:
+                    await asyncio.to_thread(tenant_db.set_web_admin_username, owner["id"], username)
+                await asyncio.to_thread(tenant_db.set_web_admin_password, owner["id"], pw_hash)
+                action_text = tr("به‌روزرسانی شد")
+            else:
+                await asyncio.to_thread(tenant_db.create_web_admin, username, pw_hash, "owner")
+                action_text = tr("ساخته شد")
+            # لینک راه‌اندازی یک‌بارمصرف دیگر لازم نیست
+            await asyncio.to_thread(db.consume_reseller_web_panel_setup_token, bot_id)
+            await asyncio.to_thread(
+                db.log_admin_action, message.from_user.id, "reseller_webpanel_creds_set",
+                f"نماینده #{bot_id} (@{reseller_bot['bot_username'] or ''}) یوزرنیم={username}",
+            )
+            await state.clear()
+            b_value = reseller_bot["link_slug"] or str(bot_id)
+            login_link = f"{_get_admin_panel_url(db)}/?b={b_value}"
+            await message.answer(
+                tr("✅ دسترسی پنل وب این نماینده") + f" {action_text}:\n\n"
+                f"🔗 {login_link}\n"
+                f"👤 {tr('یوزرنیم')}: <code>{html.escape(username)}</code>\n"
+                f"🔑 {tr('رمز')}: <code>{html.escape(password)}</code>\n\n"
+                + tr("این اطلاعات را برای نماینده بفرستید. بهتر است نماینده بعد از اولین ورود رمز را عوض کند."),
+                reply_markup=kb.resbot_webpanel_kb(bot_id),
+            )
 
         @router.callback_query(F.data.startswith("adm_resbot_webpanel_regen:"))
         async def cb_admin_resbot_webpanel_regen(call: CallbackQuery, state: FSMContext):
@@ -11156,7 +11315,7 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
 
         @router.callback_query(F.data == "adm_credit_resellers_menu")
         async def cb_admin_credit_resellers_menu(call: CallbackQuery):
-            if not senior_admin_only(call.from_user.id):
+            if not is_main_bot or not senior_admin_only(call.from_user.id):
                 return await deny_mid(call)
             resellers = (await asyncio.to_thread(db.get_resellers))
             await replace_admin_view(
@@ -16140,7 +16299,7 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
             f"انقضا: {to_jalali_str(cc['expires_at']) if cc['expires_at'] else '—'}",
         ]
         has_dsub = False
-        if is_main_bot:
+        if full_access_bot:
             owner = await asyncio.to_thread(db.get_user, tg_id)
             owner_txt = str(tg_id)
             if owner:
@@ -16171,7 +16330,7 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
         await message.answer(
             text, reply_markup=kb.admin_config_detail_kb(
                 tg_id, cc_id, enabled, auto_renew, can_auto_renew,
-                extended=is_main_bot, is_test=is_test, has_dsub=has_dsub,
+                extended=full_access_bot, is_test=is_test, has_dsub=has_dsub,
             ),
         )
 
@@ -16419,7 +16578,7 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
     # -------------------------------------------------------------------
 
     async def _cfg_ext_guard(call: CallbackQuery) -> bool:
-        if not is_main_bot:
+        if not full_access_bot:
             await call.answer(tr("این قابلیت فعلاً فقط روی بات اصلی فعال است."), show_alert=True)
             return False
         if not senior_admin_only(call.from_user.id):
@@ -16466,7 +16625,7 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
 
     @router.message(AdminConfigSearch.waiting_query)
     async def process_admin_cfg_search(message: Message, state: FSMContext):
-        if not is_main_bot or not senior_admin_only(message.from_user.id):
+        if not full_access_bot or not senior_admin_only(message.from_user.id):
             await state.clear()
             return
         query = (message.text or "").strip()
@@ -16693,7 +16852,7 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
         await _cfg_add_ask(call, state, "day")
 
     async def _cfg_add_apply(message: Message, state: FSMContext, kind: str):
-        if not is_main_bot or not senior_admin_only(message.from_user.id):
+        if not full_access_bot or not senior_admin_only(message.from_user.id):
             await state.clear()
             return
         raw = (message.text or "").strip().replace(",", ".")
@@ -16778,7 +16937,7 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
         await _cfg_sub_ask(call, state, "day")
 
     async def _cfg_sub_apply(message: Message, state: FSMContext, kind: str):
-        if not is_main_bot or not senior_admin_only(message.from_user.id):
+        if not full_access_bot or not senior_admin_only(message.from_user.id):
             await state.clear()
             return
         raw = (message.text or "").strip().replace(",", ".")
@@ -18215,7 +18374,7 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
         if not admin_only(message.from_user.id):
             return
         await state.clear()
-        text = bot_commands.build_commands_text(is_main_bot, senior_admin_only(message.from_user.id))
+        text = bot_commands.build_commands_text(full_access_bot, senior_admin_only(message.from_user.id), is_main_bot)
         await message.answer(text, parse_mode=ParseMode.HTML)
         _cmd_menu_synced.discard(message.from_user.id)
         await _ensure_admin_command_menu(bot, message.from_user.id)
@@ -18349,12 +18508,12 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
     admin_channel_plan.register(router, db, senior_admin_only, deny_mid)
 
     extra_gateway_admin.register(
-        router, db, is_main_bot, admin_only, full_admin_only, deny_support, replace_admin_view,
+        router, db, full_access_bot, admin_only, full_admin_only, deny_support, replace_admin_view,
         safe_edit, callback_id,
     )
 
     custom_menu_buttons.register(
-        router, db, is_main_bot, full_admin_only, deny_support, replace_admin_view, safe_edit,
+        router, db, full_access_bot, full_admin_only, deny_support, replace_admin_view, safe_edit,
     )
 
     import ssh_admin_bot

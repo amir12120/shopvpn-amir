@@ -6,6 +6,21 @@ import unittest
 import doctor_dns_ssh_setup as setup
 
 
+def _point_script_at(script, db_path):
+    """Point the remote bootstrap at a local database.
+
+    The script hardcodes ``p = "/var/lib/smart-dns/panel.db"``.  Substituting a
+    bare path breaks on Windows, where the temp path contains backslashes that
+    form invalid escapes inside the string literal, so substitute the escaped
+    form instead.  The script also leaves its sqlite handle open (fine on a real
+    server, where the process exits), so close it here: on Windows an open
+    handle blocks the temporary directory from being removed.
+    """
+    escaped = db_path.replace("\\", "\\\\")
+    script = script.replace("/var/lib/smart-dns/panel.db", escaped)
+    return script + "\ncon.close()\n"
+
+
 class DoctorDNSSSHSetupTests(unittest.TestCase):
     def test_host_validation(self):
         self.assertEqual(setup._validate_host("203.0.113.10"), "203.0.113.10")
@@ -22,11 +37,8 @@ class DoctorDNSSSHSetupTests(unittest.TestCase):
             con.execute("CREATE TABLE api_tokens (id INTEGER PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT UNIQUE NOT NULL, allow_ips TEXT, created_at TEXT NOT NULL, last_used_at TEXT, revoked_at TEXT, scope TEXT NOT NULL DEFAULT 'customer', admin_id INTEGER)")
             con.commit(); con.close()
             script = setup._remote_script("dd_secret", "a" * 64, "203.0.113.9", "ShopVPN-Test")
-            # Windows paths need a real Python literal, not a raw path spliced into source.
-            script = script.replace('p = "/var/lib/smart-dns/panel.db"', f"p = {db_path!r}")
-            ns = {}
-            exec(compile(script, "remote-bootstrap-test.py", "exec"), ns)
-            ns["con"].close()
+            script = _point_script_at(script, db_path)
+            exec(compile(script, "remote-bootstrap-test.py", "exec"), {})
             con = sqlite3.connect(db_path)
             row = con.execute("SELECT name, token_hash, allow_ips, scope, admin_id FROM api_tokens").fetchone()
             con.close()
@@ -41,10 +53,8 @@ class DoctorDNSSSHSetupTests(unittest.TestCase):
             con.execute("INSERT INTO api_tokens (name, token_hash, created_at, scope) VALUES ('Other-Key', 'other', '2025-01-01', 'admin')")
             con.commit(); con.close()
             script = setup._remote_script("dd_secret", "new", "203.0.113.9", "ShopVPN-Test")
-            script = script.replace('p = "/var/lib/smart-dns/panel.db"', f"p = {db_path!r}")
-            ns = {}
-            exec(compile(script, "remote-bootstrap-test.py", "exec"), ns)
-            ns["con"].close()
+            script = _point_script_at(script, db_path)
+            exec(compile(script, "remote-bootstrap-test.py", "exec"), {})
             con = sqlite3.connect(db_path)
             rows = con.execute("SELECT name, token_hash, revoked_at FROM api_tokens ORDER BY id").fetchall()
             con.close()
@@ -52,6 +62,26 @@ class DoctorDNSSSHSetupTests(unittest.TestCase):
             self.assertTrue(rows[0][2])
             self.assertEqual(rows[1], ("Other-Key", "other", None))
             self.assertEqual(rows[2][0:2], ("ShopVPN-Test", "new"))
+
+    def test_panel_patch_adds_devices_route_idempotently(self):
+        src = (
+            "def set_devices(db, uid, total, extra=None):\n    pass\n"
+            "def admin_target(self, uid):\n    pass\n"
+            "def admin_user_view(store, user, relays):\n    pass\n"
+            + setup._PANEL_HANDLER_ANCHOR + "        pass\n"
+            + "ROUTES = [\n" + setup._PANEL_ROUTE_ANCHOR + "]\n"
+        )
+        patched = setup._patch_panel_source(src)
+        self.assertIn("api_admin_devices", patched)
+        self.assertIn('"admin_devices"', patched)
+        self.assertEqual(setup._patch_panel_source(patched), patched)
+        with self.assertRaises(ValueError):
+            setup._patch_panel_source("def nothing():\n    pass\n")
+
+    def test_remote_script_compiles_and_embeds_patch(self):
+        script = setup._remote_script("t", "h", "203.0.113.9", "X")
+        compile(script, "remote.py", "exec")
+        self.assertIn("api_admin_devices", script)
 
 
 if __name__ == "__main__":

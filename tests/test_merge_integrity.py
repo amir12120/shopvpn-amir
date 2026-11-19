@@ -178,6 +178,11 @@ UPSTREAM_FEATURE_MODULES = (
     # --- upstream 9.7.0: Doctor DNS panel type, license source offer ---
     "panel_providers/doctordns_provider.py",
     "source_offer.py",
+    # --- upstream 9.8.2: tenant context, in-bot Telegram login, Doctor DNS SSH
+    # --- bootstrap, quota-pool first use, full-reseller conversion ---
+    "tenant_ctx.py",
+    "userbot_login.py",
+    "doctor_dns_ssh_setup.py",
 )
 
 # Upstream keeps re-uploading these with a module-level `from i18n import tr`
@@ -671,8 +676,12 @@ def test_seasons_quiz_and_lootbox_stay_wired():
     assert "import seasons" in bot_manager
     assert "from season_quiz_handlers import create_season_quiz_router" in bot_manager
     assert "from engagement_handlers import create_engagement_router" in bot_manager
-    assert "dp.include_router(create_season_quiz_router(db, is_main_bot=is_main_bot))" in bot_manager
-    assert "dp.include_router(create_engagement_router(db, is_main_bot=is_main_bot))" in bot_manager
+    # 4.38.0: upstream routes these through `full_access` (main bot + full
+    # resellers) instead of the raw `is_main_bot` flag. The wiring edge is the
+    # same; only the gate variable changed, so assert the edge, not the name.
+    assert "dp.include_router(create_season_quiz_router(db, is_main_bot=full_access))" in bot_manager
+    assert "dp.include_router(create_engagement_router(db, is_main_bot=full_access))" in bot_manager
+    assert "full_access = bool(db.is_full_access_bot(is_main_bot))" in bot_manager
     assert "asyncio.create_task(seasons.season_loop(db, bot))" in bot_manager
     assert "asyncio.create_task(daily_quiz.quiz_loop(db, bot))" in bot_manager
 
@@ -1618,3 +1627,98 @@ def test_upstream_980_batch_is_wired_end_to_end():
     # CI proves the new module imports on a lean install.
     workflow = (ROOT / ".github/workflows/deploy-smoke-test.yml").read_text(encoding="utf-8")
     assert '"doctor_dns_ssh_setup", "panel_providers.doctordns_provider"' in workflow
+
+
+def test_upstream_982_batch_is_wired_end_to_end():
+    """Upstream 9.8.2 (fork 4.38.0): per-tenant userbot/leak state, in-bot Telegram
+    login, the Doctor DNS SSH bootstrap, quota-pool "start on first use", the
+    accounting-priced service add-ons and full-reseller conversion.
+
+    Every edge is asserted, so a later sync cannot leave one of them half-wired.
+    """
+    for relative in ("tenant_ctx.py", "userbot_login.py", "doctor_dns_ssh_setup.py",
+                     "tests/test_doctordns_ssh_setup.py",
+                     "tests/test_accounting_service_addon.py",
+                     "tests/test_pool_first_use.py",
+                     "tests/test_ssh_udpgw_install.py"):
+        path = ROOT / relative
+        assert path.is_file(), f"{relative} is missing"
+        assert path.stat().st_size > 0, f"{relative} is empty"
+
+    # tenant_ctx: one context per bot, wired into the userbot and the leak scanner.
+    tenant = (ROOT / "tenant_ctx.py").read_text(encoding="utf-8")
+    for needle in ("CURRENT = contextvars.ContextVar(", "def key_for(", "def use(",
+                   "def current_key(", "def session_file(", "def middleware(",
+                   "class PerTenant("):
+        assert needle in tenant, f"tenant_ctx.py lost {needle}"
+    for module in ("userbot.py", "leak_scanner.py", "leak_discovery.py", "leak_admin.py"):
+        text = (ROOT / module).read_text(encoding="utf-8")
+        assert "import tenant_ctx" in text, f"{module} no longer imports tenant_ctx"
+    assert "tenant_ctx.use(db)" in (ROOT / "leak_scanner.py").read_text(encoding="utf-8")
+    assert "tenant_ctx.middleware(db)" in (ROOT / "leak_admin.py").read_text(encoding="utf-8")
+
+    # In-bot Telegram login: router registered for reseller bots in bot_manager.
+    login = (ROOT / "userbot_login.py").read_text(encoding="utf-8")
+    for needle in ("def create_login_router(", "class UbLogin(", "def login_buttons("):
+        assert needle in login, f"userbot_login.py lost {needle}"
+    manager = (ROOT / "bot_manager.py").read_text(encoding="utf-8")
+    assert "from userbot_login import create_login_router" in manager
+    assert "dp.include_router(create_login_router(db))" in manager
+    assert "from userbot_login import login_buttons" in (ROOT / "userbot_admin.py").read_text(encoding="utf-8")
+    assert "from userbot_login import login_buttons" in (ROOT / "leak_admin.py").read_text(encoding="utf-8")
+
+    # Doctor DNS SSH bootstrap: module + the admin-panel route that triggers it.
+    dns_setup = (ROOT / "doctor_dns_ssh_setup.py").read_text(encoding="utf-8")
+    for needle in ("def _patch_panel_source(", "def _remote_script(",
+                   "PANEL_TOO_OLD", "api_admin_devices"):
+        assert needle in dns_setup, f"doctor_dns_ssh_setup.py lost {needle}"
+    admin_panel = (ROOT / "admin_panel/server.py").read_text(encoding="utf-8")
+    assert '@app.post("/api/panel-servers/doctordns/auto-setup")' in admin_panel
+
+    # Quota pool "start on first use": db methods -> reconciler -> renewal -> catalog.
+    usage = (ROOT / "db/usage.py").read_text(encoding="utf-8")
+    for needle in ("def quota_pool_first_use_pending(", "def activate_quota_pool_first_use(",
+                   "def add_quota_pool_first_use_days("):
+        assert needle in usage, f"db/usage.py lost {needle}"
+    assert "quota_pool_first_use_pending" in (ROOT / "quota_reconciler.py").read_text(encoding="utf-8")
+    assert "activate_quota_pool_first_use" in (ROOT / "quota_reconciler.py").read_text(encoding="utf-8")
+    assert "quota_pool_first_use_pending" in (ROOT / "renewal_engine.py").read_text(encoding="utf-8")
+    assert "add_quota_pool_first_use_days" in (ROOT / "renewal_engine.py").read_text(encoding="utf-8")
+    assert "first_use_pending" in (ROOT / "db/catalog.py").read_text(encoding="utf-8")
+    dpp = (ROOT / "direct_panel_provision.py").read_text(encoding="utf-8")
+    assert "def pool_first_use(" in dpp and "_first_use_pool_meta" in dpp
+
+    # Accounting-priced service add-ons, reachable from the bot's volume/user flows.
+    accounting = (ROOT / "accounting.py").read_text(encoding="utf-8")
+    assert "def suggest_service_addon(" in accounting
+    handlers_user = (ROOT / "handlers_user.py").read_text(encoding="utf-8")
+    assert "accounting.suggest_service_addon" in handlers_user
+    assert handlers_user.count("suggest_service_addon") >= 2
+
+    # Full-reseller conversion: db helper -> admin callback -> keyboard -> state.
+    users_db = (ROOT / "db/users.py").read_text(encoding="utf-8")
+    assert "def is_unrestricted_full(" in users_db
+    resellers = (ROOT / "db/resellers.py").read_text(encoding="utf-8")
+    for needle in ("def get_reseller_membership_info(", "def convert_reseller_to_full(",
+                   "reseller_discount_percent_prev"):
+        assert needle in resellers, f"db/resellers.py lost {needle}"
+    handlers_admin = (ROOT / "handlers_admin.py").read_text(encoding="utf-8")
+    assert "adm_resbot_makefull:" in handlers_admin
+    assert "adm_resbot_makefull_ok:" in handlers_admin
+    keyboards = (ROOT / "keyboards.py").read_text(encoding="utf-8")
+    assert "def resbot_makefull_confirm_kb(" in keyboards
+    assert "adm_resbot_makefull:" in keyboards
+    states = (ROOT / "states.py").read_text(encoding="utf-8")
+    assert "class AdminResbotWebCreds(" in states
+
+    # The UDP gateway fix on SSH nodes, pinned by its own test.
+    agent = (ROOT / "deploy/install-shopvpn-ssh-agent.sh").read_text(encoding="utf-8")
+    assert "badvpn-udpgw" in agent
+    assert "127.0.0.1:7300" in agent
+    assert "shopvpn-udpgw.service" in agent
+    assert "udpgw" in (ROOT / "ssh_auto_install.py").read_text(encoding="utf-8")
+
+    # The fork's lean installer must not have been replaced by upstream's.
+    for protected in ("install.sh", "manage.sh", "update.sh", "preflight.sh",
+                      "cleanup.sh", "setup_local_translation.sh", "check_upstream.sh"):
+        assert (ROOT / protected).is_file(), f"{protected} disappeared"

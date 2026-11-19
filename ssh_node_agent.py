@@ -289,29 +289,69 @@ class Agent:
         spec = f"{low}/tcp" if low == high else f"{low}:{high}/tcp"
         self._run("ufw", "allow", spec, check=False)
 
+    SSHD_CONF_MARK = "# shopvpn-sshd-conf v2"
+
     def _write_account_sshd_config(self, account_id: str, username: str, port: int) -> str:
         root = Path("/etc/shopvpn/sshd")
         root.mkdir(parents=True, exist_ok=True)
         config_path = root / f"{account_id}.conf"
         Path(f"/run/sshd-shopvpn-{account_id}").mkdir(parents=True, exist_ok=True)
         Path("/run/sshd").mkdir(parents=True, exist_ok=True)
-        host_keys = [p for p in ("/etc/ssh/ssh_host_ed25519_key", "/etc/ssh/ssh_host_rsa_key") if os.path.isfile(p)]
+        host_keys = [p for p in ("/etc/ssh/ssh_host_ed25519_key", "/etc/ssh/ssh_host_rsa_key", "/etc/ssh/ssh_host_ecdsa_key") if os.path.isfile(p)]
         if not host_keys:
             raise RuntimeError("OpenSSH host keys are missing; run ssh-keygen -A")
-        lines = [
+        base = [
+            self.SSHD_CONF_MARK,
             f"Port {int(port)}", "AddressFamily any", "ListenAddress 0.0.0.0", "ListenAddress ::",
             *[f"HostKey {key}" for key in host_keys],
             f"PidFile /run/sshd-shopvpn-{account_id}/sshd.pid", "UsePAM yes",
             "PasswordAuthentication yes", "KbdInteractiveAuthentication no", "PubkeyAuthentication no",
-            "PermitRootLogin no", f"AllowUsers {username}", "AllowTcpForwarding yes",
+            "PermitRootLogin no", f"AllowUsers {username}",
+            # Tunnel-only account: forwarding allowed, no shell (ForceCommand exits at once).
+            "AllowTcpForwarding yes", "GatewayPorts no", "PermitOpen any",
             "AllowStreamLocalForwarding no", "AllowAgentForwarding no", "X11Forwarding no",
-            "PermitTTY no", "PermitTunnel no", "MaxSessions 0", "ForceCommand /usr/sbin/nologin",
+            "PermitTunnel no", "ForceCommand /usr/sbin/nologin",
+            # Many tunnel apps open a session channel (pty/shell/exec) after login; MaxSessions 0
+            # or PermitTTY no made them fail or drop. nologin makes these harmless.
+            "PermitTTY yes", "MaxSessions 64",
+            # Stability and speed for long-lived tunnels.
+            "TCPKeepAlive yes", "ClientAliveInterval 30", "ClientAliveCountMax 6",
+            "UseDNS no", "Compression no", "LoginGraceTime 30", "MaxAuthTries 6",
+            "MaxStartups 100:30:200", "PrintMotd no", "PrintLastLog no", "Banner none",
         ]
-        config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        os.chmod(config_path, 0o600)
-        self._run("sshd", "-t", "-f", str(config_path))
+        compat = [
+            # Old JSch/Dropbear-style Android clients only speak ssh-rsa and SHA-1 DH groups.
+            "HostKeyAlgorithms +ssh-rsa",
+            "KexAlgorithms +diffie-hellman-group14-sha1",
+        ]
+        for lines in (base + compat, base):
+            config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            os.chmod(config_path, 0o600)
+            try:
+                self._run("sshd", "-t", "-f", str(config_path))
+                return str(config_path)
+            except subprocess.CalledProcessError:
+                if lines is base:
+                    raise
         return str(config_path)
 
+    def _migrate_account_sshd_configs(self):
+        """Rewrite per-account sshd configs created by older agent versions and restart their units once."""
+        with self._conn() as db:
+            rows = db.execute("SELECT account_id,username,ssh_port,status FROM accounts WHERE ssh_port IS NOT NULL").fetchall()
+        for row in rows:
+            account_id = row["account_id"]
+            path = Path("/etc/shopvpn/sshd") / f"{account_id}.conf"
+            try:
+                if path.exists() and self.SSHD_CONF_MARK in path.read_text(encoding="utf-8"):
+                    continue
+                if not path.exists() and row["status"] != "active":
+                    continue
+                self._write_account_sshd_config(account_id, row["username"], int(row["ssh_port"]))
+                if row["status"] == "active":
+                    self._run("systemctl", "restart", self._unit_name(account_id), check=False)
+            except Exception:
+                logger.exception("sshd config migration failed for account %s", account_id)
 
     def _easyrsa(self, *args: str):
         binary = next((p for p in EASYRSA_CANDIDATES if os.path.isfile(p)), None) or shutil.which("easyrsa")
@@ -716,18 +756,42 @@ class Agent:
         if not supplied.startswith(prefix) or not hmac.compare_digest(supplied[len(prefix):].encode(), self.token):
             raise web.HTTPUnauthorized(text="unauthorized")
 
+    def _udpgw_status(self) -> dict:
+        """Return local UDPGW service/socket status without making health depend on it."""
+        import shutil
+        import subprocess
+        try:
+            service = subprocess.run(["systemctl", "is-active", "shopvpn-udpgw.service"],
+                                     capture_output=True, text=True, timeout=3).stdout.strip()
+        except Exception:
+            service = "unknown"
+        try:
+            sockets = subprocess.run(["ss", "-ltn"], capture_output=True, text=True, timeout=3).stdout
+            listening = any("127.0.0.1:7300" in line for line in sockets.splitlines())
+        except Exception:
+            listening = False
+        return {"enabled": "ssh" in getattr(self, "protocols", set()),
+                "service": service or "unknown", "listening": listening,
+                "host": "127.0.0.1", "port": 7300,
+                "ok": service == "active" and listening}
+
     async def health(self, request):
-        return web.json_response({"ok": True, "agent": "shopvpn-ssh", "version": 2, "protocols": sorted(self.protocols)})
+        result = {"ok": True, "agent": "shopvpn-ssh", "version": 2, "protocols": sorted(self.protocols)}
+        if "ssh" in self.protocols:
+            result["udpgw"] = self._udpgw_status()
+        return web.json_response(result)
 
     async def info(self, request):
         port, proto = self._ovpn_settings()
         low, high = self._default_ssh_port_range()
-        features = ["ssh_port_range"]
+        features = ["ssh_port_range", "remote_uninstall"]
+        udpgw = self._udpgw_status() if "ssh" in self.protocols else None
         if self._ovpn_ready():
             features.append("openvpn_username_password")
         return web.json_response({"ok": True, "version": 3, "protocols": sorted(self.protocols),
                                   "features": features,
-                                  "ssh": {"port_min": low, "port_max": high},
+                                  "ssh": {"port_min": low, "port_max": high,
+                                          "udpgw": udpgw},
                                   "openvpn": {"ready": self._ovpn_ready(), "port": port, "transport": proto}
                                   if "openvpn" in self.protocols else None,
                                   "wireguard": {"ready": self._wg_ready(), "port": self._wg_port(), "transport": "udp"}
@@ -1000,6 +1064,11 @@ class Agent:
             await asyncio.sleep(30)
 
     async def _start_enforcement(self, app):
+        if "ssh" in self.protocols:
+            try:
+                await asyncio.to_thread(self._migrate_account_sshd_configs)
+            except Exception:
+                logger.exception("sshd config migration crashed")
         if self.nft_accounting:
             try:
                 self._ensure_nft_table()
@@ -1099,6 +1168,183 @@ class Agent:
         return web.json_response({"ok": True, "account_id": account_id, "used_bytes": used,
                                   "reported_at": stamp, "quota_enforced": enforced})
 
+
+    async def uninstall_node(self, request):
+        """Remove only ShopVPN-managed node resources; shared OS packages/services remain installed."""
+        body = await request.json()
+        if body.get("confirm") != "UNINSTALL_SHOPVPN_NODE":
+            raise web.HTTPBadRequest(text="explicit uninstall confirmation required")
+        errors = []
+        removed_accounts = 0
+        with self._conn() as db:
+            rows = db.execute("SELECT account_id FROM accounts").fetchall()
+        for row in rows:
+            try:
+                if await self.delete_account_internal(str(row["account_id"])):
+                    removed_accounts += 1
+            except Exception as exc:
+                errors.append("account cleanup: " + type(exc).__name__)
+
+        if errors:
+            return web.json_response({
+                "ok": False, "removed_accounts": removed_accounts,
+                "removed_managed_files": False, "shared_packages_preserved": True,
+                "errors": errors,
+                "message": "Some node accounts could not be removed; remaining ShopVPN installation was preserved for retry",
+            })
+
+        # Stop only service units and interfaces created by the ShopVPN installer.
+        for unit in (
+            "openvpn-server@shopvpn.service", "openvpn@shopvpn.service",
+            "wg-quick@wg-shopvpn.service", "shopvpn-ovpn-nat.service",
+            "shopvpn-wg-nat.service",
+        ):
+            try:
+                self._run("systemctl", "disable", "--now", unit, check=False)
+            except Exception:
+                errors.append("stop " + unit)
+
+        try:
+            self._run("wg-quick", "down", "wg-shopvpn", check=False)
+        except Exception:
+            pass
+        try:
+            self._run("nft", "delete", "table", "inet", "shopvpn_ssh", check=False)
+            self._run("nft", "delete", "table", "ip", "shopvpn_nat", check=False)
+            self._run("nft", "delete", "table", "ip", "shopvpn_wg_nat", check=False)
+        except Exception:
+            errors.append("nftables cleanup")
+
+        # Restore OpenSSH config from the exact backup made by the installer.
+        sshd_cfg = Path("/etc/ssh/sshd_config")
+        backups = sorted(sshd_cfg.parent.glob("sshd_config.shopvpn-backup.*"))
+        try:
+            if sshd_cfg.exists():
+                content = sshd_cfg.read_text(errors="replace")
+                has_shopvpn_block = "# BEGIN SHOPVPN SSH ACCOUNT RESTRICTIONS" in content
+                if has_shopvpn_block or backups:
+                    content = re.sub(
+                        r"(?ms)\n?# BEGIN SHOPVPN SSH ACCOUNT RESTRICTIONS\n.*?\n# END SHOPVPN SSH ACCOUNT RESTRICTIONS\n?",
+                        "\n", content,
+                    )
+                    sshd_cfg.write_text(content)
+                    validation = self._run("sshd", "-t", check=False)
+                    if validation.returncode != 0:
+                        if backups:
+                            shutil.copy2(str(backups[-1]), str(sshd_cfg))
+                        errors.append("sshd config validation failed; original backup restored")
+                    else:
+                        for old in backups:
+                            old.unlink(missing_ok=True)
+        except Exception:
+            errors.append("sshd config cleanup")
+
+        # If ShopVPN added authentication hooks to a pre-existing OpenVPN config,
+        # remove only those exact directives; do not remove the administrator's config.
+        ovpn_conf = Path("/etc/openvpn/server/shopvpn.conf")
+        try:
+            if ovpn_conf.exists():
+                content = ovpn_conf.read_text(errors="replace")
+                generated_signature = (
+                    "server 10.89.0.0 255.255.0.0" in content
+                    and "management /run/openvpn-server/shopvpn.sock unix" in content
+                    and "ca /etc/openvpn/server/shopvpn/ca.crt" in content
+                )
+                if generated_signature:
+                    ovpn_conf.unlink()
+                else:
+                    auth_line = "auth-user-pass-verify /opt/shopvpn/ovpn-auth.py via-file"
+                    content = re.sub(r"(?m)^" + re.escape(auth_line) + r"\s*\n?", "", content)
+                    # Installer may append a duplicate username-as-common-name line;
+                    # remove only the last occurrence so a pre-existing directive survives.
+                    username_line = "username-as-common-name"
+                    matches = list(re.finditer(r"(?m)^" + re.escape(username_line) + r"\s*\n?", content))
+                    if matches:
+                        match = matches[-1]
+                        content = content[:match.start()] + content[match.end():]
+                    ovpn_conf.write_text(content)
+        except Exception:
+            errors.append("OpenVPN config cleanup")
+
+        # The installer never overwrites an existing WireGuard config. Remove it only
+        # when its exact ShopVPN interface/subnet signature proves it was generated here.
+        try:
+            wg_conf = Path("/etc/wireguard/wg-shopvpn.conf")
+            if wg_conf.exists():
+                wg_text = wg_conf.read_text(errors="replace")
+                if "[Interface]" in wg_text and "Address = 10.88.0.1/16" in wg_text:
+                    wg_conf.unlink()
+        except Exception:
+            errors.append("WireGuard config cleanup")
+
+        # Remove only known ShopVPN-owned files/directories and unit definitions.
+        files = [
+            "/opt/shopvpn/ssh_node_agent.py", "/opt/shopvpn/ovpn-auth.py",
+            "/opt/shopvpn/ovpn-disconnect.sh",
+            "/etc/shopvpn-ssh-agent.env",
+            "/etc/systemd/system/shopvpn-ssh-agent.service",
+            "/etc/systemd/system/shopvpn-sshd@.service",
+            "/etc/systemd/system/shopvpn-ovpn-nat.service",
+            "/etc/systemd/system/shopvpn-wg-nat.service",
+            "/etc/shopvpn/ovpn-nat.nft", "/etc/shopvpn/wg-nat.nft",
+            "/etc/sysctl.d/99-shopvpn-ovpn.conf", "/etc/sysctl.d/99-shopvpn-wg.conf",
+        ]
+        dirs = [
+            "/etc/shopvpn/sshd", "/etc/shopvpn/ovpn-pki",
+            "/etc/openvpn/server/shopvpn", "/var/lib/shopvpn-ovpn-events",
+        ]
+        for item in files:
+            try:
+                Path(item).unlink(missing_ok=True)
+            except Exception:
+                errors.append("remove " + item)
+        for item in dirs:
+            try:
+                shutil.rmtree(item, ignore_errors=False) if Path(item).exists() else None
+            except Exception:
+                errors.append("remove " + item)
+        try:
+            self._run("groupdel", "shopvpnssh", check=False)
+        except Exception:
+            pass
+        try:
+            self._run("systemctl", "daemon-reload", check=False)
+        except Exception:
+            errors.append("systemd reload")
+
+        # The agent cannot stop itself before sending the HTTP response. A transient
+        # systemd unit performs the final self-removal a few seconds after this reply.
+        cleanup = (
+            "systemctl disable --now shopvpn-ssh-agent.service >/dev/null 2>&1 || true; "
+            "rm -f /etc/systemd/system/shopvpn-ssh-agent.service "
+            "/etc/shopvpn-ssh-agent.env /opt/shopvpn/ssh_node_agent.py; "
+            "rm -rf /var/lib/shopvpn-ssh-agent; "
+            "rmdir /opt/shopvpn /etc/shopvpn 2>/dev/null || true; "
+            "systemctl daemon-reload"
+        )
+        if not errors:
+            try:
+                scheduled = self._run("systemd-run", "--unit=shopvpn-node-self-cleanup",
+                                      "--on-active=4s", "/bin/bash", "-lc", cleanup, check=False)
+                if scheduled.returncode != 0:
+                    errors.append("could not schedule final agent self-removal")
+            except Exception:
+                errors.append("schedule agent self-removal")
+        return web.json_response({
+            "ok": not errors, "removed_accounts": removed_accounts,
+            "removed_managed_files": True, "shared_packages_preserved": True,
+            "errors": errors,
+            "message": "ShopVPN resources removed; shared OS packages were preserved",
+        })
+
+    async def delete_account_internal(self, account_id: str) -> bool:
+        # Reuse the same deletion path exposed by the authenticated account API.
+        class _Request:
+            match_info = {"account_id": account_id, "action": "delete"}
+            can_read_body = False
+        response = await self.account_action(_Request())
+        return bool(response)
+
     def app(self):
         app = web.Application(client_max_size=64 * 1024)
         allowed = {x.strip() for x in os.getenv("SHOPVPN_AGENT_ALLOWED_IPS", "").split(",") if x.strip()}
@@ -1120,6 +1366,7 @@ class Agent:
         app.on_cleanup.append(self._stop_enforcement)
         app.router.add_get("/health", self.health)
         app.router.add_get("/v1/info", self.info)
+        app.router.add_post("/v1/uninstall", self.uninstall_node)
         app.router.add_post("/v1/accounts", self.create_account)
         app.router.add_get("/v1/accounts", self.list_accounts)
         app.router.add_post("/v1/accounts/{account_id}/{action:(enable|disable|delete)}", self.account_action)

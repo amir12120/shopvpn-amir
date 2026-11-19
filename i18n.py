@@ -416,6 +416,7 @@ _FRAGMENT_TRANSLATIONS.update({
 
 
 _DYNAMIC_PHRASES = [
+    ("تعداد باید بین ۱ تا {x} باشد.", "The quantity must be between 1 and {x}."),
     ("🤝 تبریک! یکی از زیرمجموعه‌های شما اولین خرید خود را انجام داد.\n💰 {x} تومان به کیف پول شما اضافه شد.", "🤝 Congratulations! One of your referrals made their first purchase.\n💰 {x} Toman was added to your wallet."),
     ("🤝 تبریک! یکی از زیرمجموعه‌های شما سرویسش را تمدید کرد.\n💰 {x} تومان پورسانت به کیف پول شما اضافه شد.", "🤝 Congratulations! One of your referrals renewed their service.\n💰 {x} Toman commission was added to your wallet."),
     ("🎁 هدیه‌ی عضویت شما فعال شد!\n{x} تومان به کیف پولت اضافه شد، همین حالا سرویس بگیر.", "🎁 Your signup gift is now active!\n{x} Toman was added to your wallet. Get your service now."),
