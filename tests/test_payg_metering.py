@@ -5,6 +5,7 @@
 """
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import time
@@ -365,6 +366,23 @@ class PaygMeteringTest(unittest.TestCase):
         asyncio_run(reconciler.reconcile_pool(pool))
         self.assertTrue(provider.limits, "single-member PAYG pool must set a panel volume limit")
         self.assertEqual(provider.limits[0][0], int(pool["limit_bytes"]))
+
+    def test_account_rate_reads_sqlite_rows_from_the_bot_flows(self):
+        """دکمهٔ «پرداخت به ازای مصرف» ردیف sqlite3.Row می‌دهد و Row متد get ندارد."""
+        self._activate()
+        with self.db._get_conn() as conn:
+            row = conn.execute("SELECT * FROM payg_accounts WHERE user_id=?", (USER_ID,)).fetchone()
+        self.assertIsInstance(row, sqlite3.Row)
+        expected = payg.get_rate(self.db)
+        self.assertEqual(payg._account_rate(row, payg._month_key(), expected), expected)
+        self.assertEqual(payg._account_rate(row, "1999-01", 4321), 4321)
+        status = payg.payg_status(self.db, USER_ID)
+        self.assertTrue(status["active"])
+        self.assertEqual(status["rate"], expected)
+        # فعال‌سازی دوباره هم ردیف Row را به همین تابع می‌دهد.
+        again = payg.activate_payg(self.db, USER_ID)
+        self.assertTrue(again.get("ok"), again)
+        self.assertTrue(again.get("existing"))
 
 
 def asyncio_run(coro):

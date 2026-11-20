@@ -497,7 +497,9 @@ def is_legacy_tiered(db) -> bool:
 
 def _account_rate(account, month: str, fallback: int = None) -> int:
     """The rate frozen for this account's current billing month (0 = none yet)."""
-    account = account or {}
+    # Callers pass both plain dicts and sqlite3.Row rows (payg_status/activate_payg),
+    # and Row has no .get(), so normalise it to a mapping first.
+    account = dict(account) if account else {}
     if str(account.get("month_key") or "") == str(month or ""):
         rate = _coerce_rate(account.get("month_rates") or "")
         if rate:

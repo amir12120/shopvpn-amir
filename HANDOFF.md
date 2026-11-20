@@ -10,6 +10,8 @@ Status values: `todo` · `claimed:<agent>` · `done` · `blocked:<reason>`
 | 2 | Migrate agent workspace from `E:\codegpt` to `e:\Z\new shop\Shopvpn` | `done` | CodeGPT | Files copied to `E:\Z\_backup_codegpt_workspace`; CodeGPT workspace key in its DB now points only at this repo. |
 | 3 | Add an on/off switch for the reseller (نمایندگی) section in the Telegram admin panel | `done` | freebuff | Toggle lives in admin → نمایندگی‌ها; hides user-facing reseller buttons and blocks their handlers when off. Changes are in the working tree (not committed). Tests: 132 passed, ruff/i18n clean. |
 
+| 4 | PAYG button in config purchase raised `AttributeError: sqlite3.Row has no .get` (`payg._account_rate`) | `done` | freebuff | Row normalised to a dict in `payg._account_rate`; regression test in `tests/test_payg_metering.py`; released as 4.40.0 (`v4.40.0`). |
+
 ## Rules
 
 - Claim a row (`claimed:codegpt` / `claimed:freebuff`) **before** editing files.
