@@ -3343,3 +3343,69 @@ EXTRA_DYNAMIC_PHRASES += [
     ('حجم فایل نباید بیشتر از {x} مگابایت باشد.', 'The file must not be larger than {x} megabytes.'),
     ('متن پیام حداکثر {x} نویسه باشد.', 'The message text must be at most {x} characters.'),
 ]
+
+# 4.39.0 sync: SSH node reachability/diagnostics, user-visible node accounts, PayG status text.
+EXTRA_PHRASES.update({
+    'ابتدا یک سرویس VPN یا SSH قابل\u200cاندازه\u200cگیری تهیه کنید. سرویس\u200cهایی که از قبل به استخر حجم دیگری متصل\u200cاند، بدون انتقال امن به این حساب اضافه نمی\u200cشوند.':
+        "First buy a measurable VPN or SSH service. Services already attached to another volume pool are not added to this account without a safe transfer.",
+    'این قابلیت در حال حاضر غیرفعال است.': "This feature is currently disabled.",
+    'با ساخت سرویس مصرفی، حجم و زمان ثابت نخواهید داشت و هزینه از کیف پول کسر می\u200cشود.':
+        "With a usage-based service you have no fixed volume or duration, and the cost is deducted from your wallet.",
+    'باز کردن لینک': "Open link",
+    'برای ساخت سرویس مصرفی جدید از دکمه زیر استفاده کنید.': "Use the button below to create a new usage-based service.",
+    'برای ساخت سرویس مصرفی، ابتدا کیف پول تومانی خود را شارژ کنید.': "Top up your toman wallet before creating a usage-based service.",
+    'برای شروع، کیف پول باید موجودی مثبت داشته باشد.': "To start, your wallet must have a positive balance.",
+    'برای فعال\u200cسازی ابتدا کیف پول را شارژ کنید.': "Top up your wallet to activate.",
+    'تعرفه هر سرویس بر اساس پنل و گروه/اینباند محل ساخت محاسبه می\u200cشود؛ هزینه ترافیک مصرفی، روزهای فعال و ظرفیت کاربران از کیف پول مشترک کسر خواهد شد.':
+        "Each service's rate is calculated from its panel and the group/inbound it is created in; traffic, active days and user capacity are deducted from the shared wallet.",
+    'حساب Pay As You Go شما توسط مدیریت تعلیق شده است.': "Your Pay As You Go account has been suspended by an administrator.",
+    'حساب نود یافت نشد یا متعلق به شما نیست.': "Node account not found or not yours.",
+    'در حال آماده\u200cسازی سرویس مصرفی...': "Preparing your usage-based service...",
+    'سرویس\u200cهای قابل صورتحساب فعلی: VPN و SSH با شمارنده مصرف معتبر.': "Currently billable services: VPN and SSH with a valid usage counter.",
+    'عملیات نامعتبر است.': "Invalid operation.",
+    'هنوز تراکنشی برای Pay As You Go ثبت نشده است.': "No Pay As You Go transactions have been recorded yet.",
+    'پنل': "Panel",
+    'پنل فعالی انتخاب نشده است': "No active panel selected",
+    'چندمقصدی': "Multi-target",
+    '⏳ درخواست ساخت سرویس شما در حال پردازش است؛ لطفاً چند لحظه صبر کنید.':
+        "⏳ Your service creation request is being processed. Please wait a moment.",
+    '⚠️ هنوز پنل فعال ساخت سرویس توسط مدیریت انتخاب نشده است.':
+        "⚠️ The administrator has not selected an active service-creation panel yet.",
+    '⚠️ پنل فعالی برای ساخت سرویس انتخاب نشده است.': "⚠️ No active panel has been selected for service creation.",
+    '⛔️ حساب Pay As You Go شما توسط مدیریت تعلیق شده است. برای پیگیری با پشتیبانی تماس بگیرید.':
+        "⛔️ Your Pay As You Go account has been suspended by an administrator. Contact support for help.",
+    '⛔️ ساب اختصاصی همه پنل\u200cهای انتخاب\u200cشده برای Pay As You Go غیرفعال است؛ مدیریت باید آن را روشن کند.':
+        "⛔️ Dedicated subscriptions are disabled on all selected Pay As You Go panels; the administrator must enable them.",
+    '⛔️ سرویس فعالی با آمار مصرف معتبر برای این حساب پیدا نشد.':
+        "⛔️ No active service with valid usage statistics was found for this account.",
+    '⛔️ فروش Pay As You Go در حال حاضر غیرفعال است.': "⛔️ Pay As You Go sales are currently disabled.",
+    '⛔️ هیچ پنل فعالی برای ساخت سرویس Pay As You Go توسط مدیریت انتخاب نشده است.':
+        "⛔️ No active panel has been selected by the administrator for Pay As You Go service creation.",
+    '⛔️ هیچ\u200cیک از پنل\u200cهای انتخاب\u200cشده فعال یا دارای ظرفیت کافی نیستند.':
+        "⛔️ None of the selected panels are active or have enough capacity.",
+    '✅ <b>سرویس Pay As You Go ساخته شد.</b>': "✅ <b>Pay As You Go service created.</b>",
+    '✅ Pay As You Go فعال شد. سرویس\u200cهای دارای اندازه\u200cگیری مصرف معتبر متصل شدند.':
+        "✅ Pay As You Go is now active. Services with valid usage metering were connected.",
+    '✅ سرویس Pay As You Go ساخته و فعال شده است. برای مشاهده لینک و وضعیت، دستور /payg را ارسال کنید.':
+        "✅ Your Pay As You Go service is created and active. Send /payg to view its link and status.",
+    '🎁 حالت رایگان مدیریت: بدون کسر از کیف پول و بدون سقف حجم':
+        "🎁 Admin free mode: no wallet deduction and no volume cap",
+    '🎁 حساب شما مدیریتی است؛ بدون شارژ کیف پول و بدون هزینه می\u200cتوانید سرویس بسازید.':
+        "🎁 Your account is an admin account; you can create services without topping up the wallet and at no cost.",
+    '🎁 رایگان برای مدیریت؛ هزینه\u200cای کسر نمی\u200cشود.\n\n': "🎁 Free for admin; no charge is deducted.\n\n",
+    '💳 هزینه از کیف پول تومانی شما کسر می\u200cشود.\n\n': "💳 The cost is deducted from your toman wallet.\n\n",
+    '📊 وضعیت و جزئیات مصرف': "📊 Usage status and details",
+    '📦 حجم: پرداخت به\u200cازای مصرف\n⏳ مدت: بدون انقضای ثابت\n':
+        "📦 Volume: pay as you go\n⏳ Duration: no fixed expiry\n",
+    '📦 حجم: پرداخت به\u200cازای مصرف؛ سقف متناسب با موجودی کیف پول تنظیم می\u200cشود.\n':
+        "📦 Volume: pay as you go; the cap is set according to your wallet balance.\n",
+    '🔗 <b>لینک\u200cهای اشتراک اختصاصی فعال:</b>': "🔗 <b>Active dedicated subscription links:</b>",
+    '🚀 ساخت سرویس مصرفی جدید': "🚀 Create a new usage-based service",
+    '🧾 <b>آخرین برداشت\u200cهای Pay As You Go</b>': "🧾 <b>Latest Pay As You Go charges</b>",
+    '🧾 تاریخچه برداشت\u200cها': "🧾 Billing history",
+})
+
+EXTRA_DYNAMIC_PHRASES += [
+    ('متن صفحه\u200cی وضعیت نمی\u200cتواند بیشتر از {x} نویسه باشد.',
+     "The status page text cannot be longer than {x} characters."),
+]

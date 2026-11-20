@@ -1722,3 +1722,81 @@ def test_upstream_982_batch_is_wired_end_to_end():
     for protected in ("install.sh", "manage.sh", "update.sh", "preflight.sh",
                       "cleanup.sh", "setup_local_translation.sh", "check_upstream.sh"):
         assert (ROOT / protected).is_file(), f"{protected} disappeared"
+
+
+def test_ssh_node_reachability_and_user_node_accounts_are_wired():
+    """4.39.0 sync: the "client says connected but nothing pings" fix must stay
+    reachable end to end, and node accounts must reach the buyer.
+
+    A firewall helper on the agent does nothing unless the agent actually calls
+    it at start-up and on a timer, the panel can ask the agent for a diagnosis,
+    and the buyer can see the account in the bot and the mini app.
+    """
+    agent = (ROOT / "ssh_node_agent.py").read_text(encoding="utf-8")
+    # Firewall/ICMP/IPv4 helpers exist and are idempotent.
+    for needle in ("def _firewall_ranges", "def _firewall_open_ranges", "def _nft_input_accept",
+                   "def _ensure_icmp_ping", "def _prefer_ipv4_resolution",
+                   "def _ensure_network_access", "def diagnose", "def diagnose_http"):
+        assert needle in agent, f"ssh_node_agent lost {needle}"
+    # …and they are actually reached: at start-up, on the enforcement timer, and over HTTP.
+    assert "await asyncio.to_thread(self._ensure_network_access)" in agent
+    assert "tick % 10 == 0" in agent
+    assert 'app.router.add_get("/v1/diagnose", self.diagnose_http)' in agent
+    assert '"--diagnose"' in agent and '"--fix"' in agent
+    # The default SSH port range is no longer skipped as "already open".
+    assert "if low >= 20000 and high <= 39999" not in agent
+
+    service = (ROOT / "ssh_service.py").read_text(encoding="utf-8")
+    assert "async def probe_ssh_endpoint(" in service
+    assert "async def diagnose_node(" in service
+    assert 'provider._request("GET", "/v1/diagnose")' in service
+    assert '"external_port_reachable"' in service
+    assert '"reachable": reachable' in service
+    assert "refresh: bool = False" in service
+
+    # Admin panel: the diagnose route is registered and the UI can ask for a refresh.
+    server = (ROOT / "admin_panel/server.py").read_text(encoding="utf-8")
+    assert '"/api/ssh/nodes/{node_id}/diagnose"' in server
+    assert "refresh=body.refresh" in server
+    assert "refresh: bool = False" in server
+
+    # Buyer-facing: the bot lists node accounts and offers the action callback.
+    handlers_user = (ROOT / "handlers_user.py").read_text(encoding="utf-8")
+    assert "db.list_ssh_accounts(user_tg_id)" in handlers_user
+    assert 'F.data.startswith("mo_ssh_action:")' in handlers_user
+    assert 'if kind == "ssh":' in handlers_user
+
+    # Mini app: owner-only endpoints plus the client that renders them.
+    miniapp = (ROOT / "miniapp/server.py").read_text(encoding="utf-8")
+    assert '"/api/ssh-accounts"' in miniapp
+    assert '"/api/ssh-accounts/{account_row_id}/action"' in miniapp
+    assert "db.list_ssh_accounts(tg_id)" in miniapp
+    miniapp_js = (ROOT / "miniapp/static/app.js").read_text(encoding="utf-8")
+    assert "renderNodeAccountDetail" in miniapp_js
+    assert "wireNodeAccountActions" in miniapp_js
+    assert "/api/ssh-accounts/" in miniapp_js
+
+    # PayG status text: the renderer, its keys, and the admin editor that feeds it.
+    payg = (ROOT / "payg.py").read_text(encoding="utf-8")
+    assert "def render_status_text(" in payg
+    assert "PAYG_STATUS_TEXT_ACTIVE_KEY" in payg and "PAYG_STATUS_TEXT_INACTIVE_KEY" in payg
+    assert "custom_text = render_status_text(db" in payg
+    assert "status_text_active" in server
+    assert "payg-status-active" in (ROOT / "admin_panel/static/app.js").read_text(encoding="utf-8")
+
+    # The fa/en-only rule: no third language may ride along in the PayG catalog.
+    import i18n
+    assert i18n.SUPPORTED_LANGUAGES == ("fa", "en")
+    assert set(i18n._PAYG_TRANSLATIONS) == {"en"}, "a third language came back into _PAYG_TRANSLATIONS"
+
+    # Rejected upstream paths from this round must stay out.
+    assert not (ROOT / "README.ru.md").exists(), "upstream's Russian README came back"
+    assert not (ROOT / "README.zh.md").exists(), "upstream's Chinese README came back"
+    assert not (ROOT / "update.json").exists(), "upstream's update.json came back"
+    # web_store/server.py must stay the fork's lean storefront, not upstream's miniapp copy.
+    ws = (ROOT / "web_store/server.py").read_text(encoding="utf-8")
+    assert len(ws.splitlines()) < 1200, "web_store/server.py was replaced by upstream's miniapp copy"
+    # ssh_auto_install must not reference deploy files the fork does not ship.
+    installer = (ROOT / "ssh_auto_install.py").read_text(encoding="utf-8")
+    for rel in ("deploy/shopvpn-ovpn-auth.py",):
+        assert rel not in installer, f"{rel} is referenced but not shipped"

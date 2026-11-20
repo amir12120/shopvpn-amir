@@ -666,12 +666,86 @@ def _english_source_text(text: str) -> Optional[str]:
     return None
 
 
+_PAYG_TRANSLATIONS = {
+    "en": {
+        '🚀 ساخت سرویس مصرفی جدید': '🚀 Create a new usage-based service',
+        '💰 شارژ کیف پول': '💰 Top up wallet',
+        '🧾 تاریخچه برداشت\u200cها': '🧾 Billing history',
+        '📊 وضعیت و جزئیات مصرف': '📊 Usage status and details',
+        '⬅️ بازگشت': '⬅️ Back',
+        'هنوز تراکنشی برای Pay As You Go ثبت نشده است.': 'No Pay As You Go transactions have been recorded yet.',
+        '⏳ درخواست ساخت سرویس شما در حال پردازش است؛ لطفاً چند لحظه صبر کنید.': '⏳ Your service creation request is being processed. Please wait a moment.',
+        '✅ سرویس Pay As You Go ساخته و فعال شده است. برای مشاهده لینک و وضعیت، دستور /payg را ارسال کنید.': '✅ Your Pay As You Go service is active. Send /payg to view its link and status.',
+        'در حال آماده\u200cسازی سرویس مصرفی...': 'Preparing your usage-based service...',
+        '⛔️ فروش Pay As You Go در حال حاضر غیرفعال است.': '⛔️ Pay As You Go sales are currently disabled.',
+        '⛔️ حساب Pay As You Go شما توسط مدیریت تعلیق شده است. برای پیگیری با پشتیبانی تماس بگیرید.': '⛔️ Your Pay As You Go account has been suspended by an administrator. Contact support for help.',
+        'برای ساخت سرویس مصرفی، ابتدا کیف پول تومانی خود را شارژ کنید.': 'Please top up your wallet before creating a usage-based service.',
+        '⛔️ هیچ پنل فعالی برای ساخت سرویس Pay As You Go توسط مدیریت انتخاب نشده است.': '⛔️ No active panel has been selected by the administrator for Pay As You Go service creation.',
+        '⛔️ ساب اختصاصی همه پنل\u200cهای انتخاب\u200cشده برای Pay As You Go غیرفعال است؛ مدیریت باید آن را روشن کند.': '⛔️ Dedicated subscriptions are disabled on all selected Pay As You Go panels. Ask the administrator to enable them.',
+        '⛔️ هیچ\u200cیک از پنل\u200cهای انتخاب\u200cشده فعال یا دارای ظرفیت کافی نیستند.': '⛔️ None of the selected panels are active or have enough capacity.',
+        'این قابلیت در حال حاضر غیرفعال است.': 'This feature is currently disabled.',
+        'حساب Pay As You Go شما توسط مدیریت تعلیق شده است.': 'Your Pay As You Go account has been suspended by an administrator.',
+        'برای فعال\u200cسازی ابتدا کیف پول را شارژ کنید.': 'Top up your wallet to activate Pay As You Go.',
+        'تعرفه هر سرویس بر اساس پنل و گروه/اینباند محل ساخت محاسبه می\u200cشود؛ هزینه ترافیک مصرفی، روزهای فعال و ظرفیت کاربران از کیف پول مشترک کسر خواهد شد.': 'Rates depend on the panel and its group/inbound. Traffic, active days and user capacity are charged to the shared wallet.',
+        'سرویس\u200cهای قابل صورتحساب فعلی: VPN و SSH با شمارنده مصرف معتبر.': 'Currently billable services: VPN and SSH with valid usage counters.',
+        'حداقل موجودی کیف پول برای ساخت سرویس جدید: {amount} تومان': 'Minimum wallet balance to create a service: {amount} toman',
+        'وضعیت: فعال\nموجودی کیف پول: {balance} تومان\n': 'Status: Active\nWallet balance: {balance} toman\n',
+        'هزینه این ماه: {spent} تومان\n': 'Cost this month: {spent} toman\n',
+        'مصرف ثبت\u200cشده: {used} GB\n': 'Recorded usage: {used} GB\n',
+        'سرویس\u200cهای متصل: {services}\n': 'Connected services: {services}\n',
+        'تسویه مصرف هر {cycle} انجام می\u200cشود.\n': 'Usage is settled every {cycle}.\n',
+        'پنل\u200cهای فعال ساخت سرویس: {panels}\n': 'Active service-creation panels: {panels}\n',
+        'موجودی کیف پول: {balance} تومان\n': 'Wallet balance: {balance} toman\n',
+        '⛔️ برای ساخت سرویس مصرفی، موجودی کیف پول باید حداقل {minimum} تومان باشد.\nموجودی فعلی شما: {current} تومان': '⛔️ Your wallet balance must be at least {minimum} toman to create a usage-based service.\nYour current balance: {current} toman',
+        '⛔️ حداکثر {count} سرویس Pay As You Go برای هر کاربر مجاز است.': '⛔️ Each user can have at most {count} Pay As You Go services.',
+        '⛔️ ساخت سرویس Pay As You Go ناموفق بود: {error}\nهیچ هزینه مصرفی برای این سرویس ثبت نشده است.': '⛔️ Pay As You Go service creation failed: {error}\nNo usage charges were recorded for this service.',
+        'وضعیت: فعال': 'Status: Active',
+        'ترافیک {amount} GB': 'Traffic {amount} GB',
+        'ظرفیت {amount} کاربر': 'Capacity {amount} users',
+        '{amount} روز فعال': '{amount} active days',
+        'آخرین برداشت\u200cهای Pay As You Go': 'Latest Pay As You Go charges',
+        'باز کردن لینک': 'Open link',
+        'لینک\u200cهای اشتراک اختصاصی فعال:': 'Active dedicated subscription links:',
+        'برای ساخت سرویس مصرفی جدید از دکمه زیر استفاده کنید.': 'Use the button below to create a new usage-based service.',
+        'با ساخت سرویس مصرفی، حجم و زمان ثابت نخواهید داشت و هزینه از کیف پول کسر می\u200cشود.': 'Usage-based services have no fixed data quota or duration; charges are deducted from your wallet.',
+        'برای شروع، کیف پول باید موجودی مثبت داشته باشد.': 'Your wallet must have a positive balance to get started.',
+        '🎁 حالت رایگان مدیریت: بدون کسر از کیف پول و بدون سقف حجم': '🎁 Administrator free mode: no wallet deductions and no traffic cap',
+        '🎁 حساب شما مدیریتی است؛ بدون شارژ کیف پول و بدون هزینه می\u200cتوانید سرویس بسازید.': '🎁 Your account is an administrator account. You can create services without topping up or paying.',
+        '⚠️ پنل فعالی برای ساخت سرویس انتخاب نشده است.': '⚠️ No active panel is selected for service creation.',
+        '⚠️ هنوز پنل فعال ساخت سرویس توسط مدیریت انتخاب نشده است.': '⚠️ The administrator has not selected an active panel for service creation yet.',
+        '⛔️ سرویس فعالی با آمار مصرف معتبر برای این حساب پیدا نشد.': '⛔️ No active service with valid usage statistics was found for this account.',
+        'ابتدا یک سرویس VPN یا SSH قابل\u200cاندازه\u200cگیری تهیه کنید. سرویس\u200cهایی که از قبل به استخر حجم دیگری متصل\u200cاند، بدون انتقال امن به این حساب اضافه نمی\u200cشوند.': 'First obtain a measurable VPN or SSH service. Services already attached to another quota pool will not be added without a safe transfer.',
+        '🧾 <b>آخرین برداشت\u200cهای Pay As You Go</b>': '🧾 <b>Latest Pay As You Go charges</b>',
+        '🔗 <b>لینک\u200cهای اشتراک اختصاصی فعال:</b>': '🔗 <b>Active dedicated subscription links:</b>',
+        '✅ Pay As You Go فعال شد. سرویس\u200cهای دارای اندازه\u200cگیری مصرف معتبر متصل شدند.': '✅ Pay As You Go is active. Services with valid usage measurement have been connected.',
+        'چندمقصدی': 'Multi-destination',
+        'پنل فعالی انتخاب نشده است': 'No active panel selected',
+        'تومان': 'toman',
+        'سرویس': 'Service',
+        'پنل': 'Panel',
+        '✅ <b>سرویس Pay As You Go ساخته شد.</b>': '✅ <b>Your Pay As You Go service has been created.</b>',
+        '👤 نام کاربری: <code>{username}</code>\n': '👤 Username: <code>{username}</code>\n',
+        '🧩 مقصدها: {panels} پنل + {nodes} نود\n': '🧩 Destinations: {panels} panels + {nodes} nodes\n',
+        '📦 حجم: پرداخت به\u200cازای مصرف\n⏳ مدت: بدون انقضای ثابت\n': '📦 Data: pay as you go\n⏳ Duration: no fixed expiry\n',
+        '🎁 رایگان برای مدیریت؛ هزینه\u200cای کسر نمی\u200cشود.\n\n': '🎁 Free for administrators; no charges will be deducted.\n\n',
+        '💳 هزینه از کیف پول تومانی شما کسر می\u200cشود.\n\n': '💳 Charges will be deducted from your toman wallet.\n\n',
+        '🔗 <a href="{url}">دریافت لینک اشتراک</a>\n\n': '🔗 <a href="{url}">Get subscription link</a>\n\n',
+        'مصرف همه مقصدها با هم جمع و هر {cycle} تسویه می\u200cشود.': 'Usage across all destinations is combined and settled every {cycle}.',
+        'مصرف هر {cycle} محاسبه و تسویه می\u200cشود.': 'Usage is calculated and settled every {cycle}.',
+        '⚠️ تعداد {count} سرویس به دلیل اتصال به استخر سهمیه\u200cی دیگری وارد Pay As You Go نشد؛ ': '⚠️ {count} services were not added to Pay As You Go because they are connected to another quota pool; ',
+        'برای جلوگیری از تداخل سهمیه\u200cها، انتقال آن\u200cها خودکار انجام نشد.': 'They were not transferred automatically to avoid quota conflicts.',
+    },
+}
+
 def tr(text: str, language: Optional[str] = None) -> str:
     if text is None:
         return text
     lang = normalize_language(language or get_language())
     if lang == "fa":
         return text
+    payg_translation = _PAYG_TRANSLATIONS.get(lang, {}).get(text)
+    if payg_translation:
+        return payg_translation
     catalog = _TRANSLATIONS.get(lang, {})
     if text in catalog:
         return catalog[text]

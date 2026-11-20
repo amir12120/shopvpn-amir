@@ -808,6 +808,7 @@ class SSHNodeAddProtocolsBody(BaseModel):
     ovpn_port: int = 1194
     ovpn_proto: str = "udp"
     wg_port: int = 51820
+    refresh: bool = False  # true = همان پروتکل‌های نصب‌شده را دوباره نصب کن (به‌روزرسانی Agent/فایروال)
 
 
 class SSHNodeCreateBody(BaseModel):
@@ -5182,6 +5183,8 @@ class PaygSettingsBody(BaseModel):
     cycle_seconds: Optional[int] = None
     max_services: Optional[int] = None
     delivery_text: Optional[str] = None
+    status_text_active: Optional[str] = None
+    status_text_inactive: Optional[str] = None
     min_balance: Optional[int] = None
 
 
@@ -5308,6 +5311,9 @@ def api_payg_overview(admin=Depends(require_permission("catalog")), _mt=Depends(
         "delivery_text": db.get_setting(payg.PAYG_DELIVERY_TEXT_KEY, "") or "",
         "delivery_has_photo": bool(db.get_setting(payg.PAYG_DELIVERY_PHOTO_KEY, "")),
         "delivery_text_max": payg.PAYG_DELIVERY_TEXT_MAX,
+        "status_text_active": db.get_setting(payg.PAYG_STATUS_TEXT_ACTIVE_KEY, "") or "",
+        "status_text_inactive": db.get_setting(payg.PAYG_STATUS_TEXT_INACTIVE_KEY, "") or "",
+        "status_text_max": payg.PAYG_STATUS_TEXT_MAX,
         "mode": payg.get_payg_mode(db),
         "dsub_enabled": bool(dedicated_sub.is_enabled(db)),
         "ssh_protocols": payg.get_payg_ssh_protocols(db),
@@ -5359,6 +5365,15 @@ def api_payg_settings(body: PaygSettingsBody, admin=Depends(require_permission("
             raise HTTPException(400, tr(f"متن پیام نمی‌تواند بیشتر از {payg.PAYG_DELIVERY_TEXT_MAX} نویسه باشد."))
         db.set_setting(payg.PAYG_DELIVERY_TEXT_KEY, text)
         changes.append("delivery_text")
+    for field, key in (("status_text_active", payg.PAYG_STATUS_TEXT_ACTIVE_KEY),
+                       ("status_text_inactive", payg.PAYG_STATUS_TEXT_INACTIVE_KEY)):
+        value = getattr(body, field)
+        if value is not None:
+            value = value.strip()
+            if len(value) > payg.PAYG_STATUS_TEXT_MAX:
+                raise HTTPException(400, tr(f"متن صفحه‌ی وضعیت نمی‌تواند بیشتر از {payg.PAYG_STATUS_TEXT_MAX} نویسه باشد."))
+            db.set_setting(key, value)
+            changes.append(field)
     if changes:
         db.log_admin_action(admin["id"], "payg_settings_change", f"{', '.join(changes)} (پنل وب - {admin['username']})", "setting", "payg")
     return {"ok": True}
@@ -8767,11 +8782,22 @@ async def api_ssh_node_add_protocols(node_id: int, body: SSHNodeAddProtocolsBody
     import ssh_service
     try:
         job_id = ssh_service.start_node_upgrade(db, node_id=node_id, username=body.username, password=body.password, protocols=body.protocols,
-                                                ovpn_port=body.ovpn_port, ovpn_proto=body.ovpn_proto, wg_port=body.wg_port)
+                                                ovpn_port=body.ovpn_port, ovpn_proto=body.ovpn_proto, wg_port=body.wg_port,
+                                                refresh=body.refresh)
     except ssh_service.SSHServiceError as exc:
         raise HTTPException(exc.status, str(exc))
     db.log_admin_action(admin["id"], "ssh_node_add_protocols", f"SSH node #{node_id}: +{','.join(body.protocols)}", "ssh")
     return {"ok": True, "job_id": job_id}
+
+
+@app.get("/api/ssh/nodes/{node_id}/diagnose")
+async def api_ssh_node_diagnose(node_id: int, admin=Depends(require_permission("panels")), _fa=Depends(require_full_access_tenant)):
+    """عیب‌یابی لایه‌به‌لایه‌ی نود SSH: sshd، UDPGW، فایروال، ICMP، DNS، خروجی اینترنت و دسترسی پورت از بیرون."""
+    import ssh_service
+    try:
+        return await ssh_service.diagnose_node(db, node_id)
+    except ssh_service.SSHServiceError as exc:
+        raise HTTPException(exc.status, str(exc))
 
 
 @app.get("/api/ssh/nodes/install-jobs/{job_id}")
