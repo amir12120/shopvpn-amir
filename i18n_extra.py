@@ -2282,6 +2282,10 @@ EXTRA_PHRASES.update({
     'شمارنده صفر شد.': 'Counter reset.',
     'ذخیره شد.': 'Saved.',
     '❌ این نام کاربری قبلاً استفاده شده. لطفاً نام دیگری انتخاب کنید.': '❌ This username is already taken. Please choose another one.',
+    # 4.41.0 sync: central/dedicated sub profiles, per-panel sub links, PayG in the mini app.
+    '🔴 غیرفعال‌کردن همه': "🔴 Disable all",
+    '🟢 فعال‌کردن همه': "🟢 Enable all",
+    'خطای غیرمنتظره‌ای رخ داد. دوباره تلاش کنید.': "An unexpected error occurred. Please try again.",
 })
 
 EXTRA_DYNAMIC_PHRASES += [

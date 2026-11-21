@@ -181,6 +181,8 @@ jobs:
               # Upstream 9.8.0 batch: Doctor DNS SSH bootstrap (asyncssh) and the
               # scoped-device (user count) provider path.
               "doctor_dns_ssh_setup", "panel_providers.doctordns_provider",
+              # Upstream 9.9.0 batch: dedicated-sub profiles + PayG in the mini app.
+              "payg", "miniapp.server",
               # New third-party dependencies from requirements.txt: prove the
               # lean install can actually import them on the target box.
               "telethon", "arabic_reshaper", "bidi", "asyncssh",

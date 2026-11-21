@@ -1800,3 +1800,143 @@ def test_ssh_node_reachability_and_user_node_accounts_are_wired():
     installer = (ROOT / "ssh_auto_install.py").read_text(encoding="utf-8")
     for rel in ("deploy/shopvpn-ovpn-auth.py",):
         assert rel not in installer, f"{rel} is referenced but not shipped"
+
+
+def test_central_sub_profiles_and_panel_links_are_wired():
+    """4.41.0 sync (upstream 9.9.0): multi-domain dedicated-sub profiles and the
+    per-panel sub links must stay reachable end to end.
+
+    A profile row is useless unless the request path actually resolves a profile
+    from the Host header, the link builder uses it, the sub server scopes a
+    service to one panel, and the admin panel exposes the CRUD routes the UI
+    calls. File existence alone would not catch a dropped wire.
+    """
+    ds = (ROOT / "dedicated_sub.py").read_text(encoding="utf-8")
+    for needle in ("PROFILE_OWN_KEYS", "PROFILE_SETTING_KEYS", "def all_settings(db, profile",
+                   "def get_profile", "def list_profiles", "def profile_for_host",
+                   "def profile_for_panel", "def profile_for_config", "def sort_panel_ids",
+                   "def is_scoped", "def panel_entries", "def scoped_config",
+                   "def panel_page_links", "SCOPE_KEY"):
+        assert needle in ds, f"dedicated_sub lost {needle}"
+    # The profile-aware signatures must actually be called with a profile.
+    assert "def base_url(db, profile" in ds
+    assert "def is_enabled(db, profile" in ds
+    assert "def link_for_token(db, token: str, profile" in ds
+    assert "profile_for_config(db, config_id, cc)" in ds
+    # A scoped (single-panel) view must not leak node/SSH accounts.
+    assert "if is_scoped(cc):" in ds
+
+    db_ds = (ROOT / "db/dedicated_sub.py").read_text(encoding="utf-8")
+    for needle in ("def dsp_list", "def dsp_get", "def dsp_get_by_host", "def dsp_create",
+                   "def dsp_update", "def dsp_set_settings", "def dsp_delete",
+                   "def dsp_panel_ids", "def dsp_set_panels", "def dsp_for_panel"):
+        assert needle in db_ds, f"db/dedicated_sub lost {needle}"
+    # The table and the panel column are created by the schema, not assumed.
+    base = (ROOT / "db/_base.py").read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS dsub_profiles" in base
+    assert '"panel_servers", "dsub_profile_id"' in base
+    assert '"dsub_profile_id"' in (ROOT / "db/panels.py").read_text(encoding="utf-8")
+
+    # Sub server: the Host header picks the profile and /p/{pid} scopes the service.
+    server = (ROOT / "sub_server/server.py").read_text(encoding="utf-8")
+    assert "async def _profile(request" in server
+    assert "ds.profile_for_host" in server
+    assert "async def _cc_for(request" in server
+    assert "ds.scoped_config" in server
+    assert "ds.all_settings, db, prof" in server
+    assert "ds.is_enabled(db, prof)" in server
+    assert "async def _page_panels(" in server
+    assert "ds.panel_page_links" in server
+    # Every per-panel route is registered, not just the plain one.
+    for route in ('"/s/{token}/p/{pid:int}"', '"/s/{token}/p/{pid:int}/qr.png"',
+                  '"/s/{token}/p/{pid:int}/ovpn/{n:int}"', '"/s/{token}/p/{pid:int}/wg/{n:int}"',
+                  '"/s/{token}/p/{pid:int}/dns/login"', '"/s/{token}/p/{pid:int}/vpn/{n:int}/ca"',
+                  '"/s/{token}/p/{pid:int}/reveal"'):
+        assert route in server, f"sub_server lost the route {route}"
+    # The W-UI/DNS caches are keyed per account, not per config, or two panels collide.
+    assert "_wui_cache: Dict[tuple, tuple]" in server
+    assert "_dns_cache: Dict[tuple, tuple]" in server
+    assert 'key = (cid, str(cc["username"]))' in server
+
+    # The page renders the per-panel section.
+    page = (ROOT / "sub_server/sub_page.html").read_text(encoding="utf-8")
+    assert 'id="pnsec"' in page and "D.show.panels" in page
+
+    # Admin panel: the CRUD/SSL/settings routes the web UI calls.
+    admin = (ROOT / "admin_panel/server.py").read_text(encoding="utf-8")
+    for route in ('@app.get("/api/dsub-profiles")', '@app.post("/api/dsub-profiles")',
+                  '@app.put("/api/dsub-profiles/{profile_id}")',
+                  '@app.delete("/api/dsub-profiles/{profile_id}")',
+                  '@app.put("/api/dsub-profiles/{profile_id}/panels")',
+                  '@app.get("/api/dsub-profiles/{profile_id}/settings")',
+                  '@app.put("/api/dsub-profiles/{profile_id}/settings")',
+                  '@app.post("/api/dsub-profiles/{profile_id}/ssl")'):
+        assert route in admin, f"admin_panel lost {route}"
+    assert "def _dsp_clean_url(" in admin
+    assert "def _dsp_guard(" in admin
+    # The live preview can render a profile, not only the central settings.
+    assert "def api_sub_page_preview(profile: Optional[int] = Query(None)" in admin
+    assert "ds.all_settings(db, prof)" in admin
+
+    # The web UI actually calls those routes.
+    appjs = (ROOT / "admin_panel/static/app.js").read_text(encoding="utf-8")
+    assert "function dsubProfilesCardHtml(" in appjs
+    assert "async function bindDsubProfiles(" in appjs
+    assert "/dsub-profiles" in appjs
+
+
+def test_payg_miniapp_provisioning_is_wired():
+    """4.41.0 sync: the mini app can read PayG state and create a service.
+
+    The bot's rules must be the same ones the mini app applies, so the shared
+    helpers are pinned, and both endpoints must reach them.
+    """
+    payg = (ROOT / "payg.py").read_text(encoding="utf-8")
+    for needle in ("class PaygProvisionError", "def provision_blocker",
+                   "async def provision_service_for_user", "def miniapp_overview",
+                   "def _ensure_schema_once", "def _max_services_per_user",
+                   "def _active_service_count"):
+        assert needle in payg, f"payg lost {needle}"
+    # The fork bills one per-GB rate; the tiered upstream helpers must stay out.
+    assert "def get_rates(" not in payg, "tiered PayG rates were pulled back in"
+    assert "get_rates(" not in payg
+    # A missing PayG account must not KeyError on the usage field.
+    assert "int(status.get('month_used_bytes') or 0)" in payg
+
+    miniapp = (ROOT / "miniapp/server.py").read_text(encoding="utf-8")
+    assert '@app.get("/api/payg/info")' in miniapp
+    assert '@app.post("/api/payg/provision")' in miniapp
+    assert "payg.miniapp_overview(db, tg_id)" in miniapp
+    assert "await payg.provision_service_for_user(db, tg_id)" in miniapp
+    assert "except payg.PaygProvisionError as e:" in miniapp
+    # PayG stays a main-bot feature, never a reseller bot's.
+    assert "def _payg_available(tenant)" in miniapp
+
+    appjs = (ROOT / "miniapp/static/app.js").read_text(encoding="utf-8")
+    assert "/payg/info" in appjs and "/payg/provision" in appjs
+
+
+def test_account_hub_bulk_toggle_is_wired():
+    """4.41.0 sync: the admin can switch every account-hub button at once, and
+    the «configs» button honours its own toggle."""
+    consts = (ROOT / "db/constants.py").read_text(encoding="utf-8")
+    assert '"svc_show_links"' in consts
+    assert "BULK_TOGGLE_KEYS = [k for k, _l, _d in ACCOUNT_TOGGLE_KEYS" in consts
+
+    kb = (ROOT / "keyboards.py").read_text(encoding="utf-8")
+    assert 'callback_data="adm_acct_all:0"' in kb
+    assert 'callback_data="adm_acct_all:1"' in kb
+    assert '("svc_links", "\U0001F4CB \u06a9\u0627\u0646\u0641\u06cc\u06af\u200c\u0647\u0627\u06cc \u062a\u06a9\u06cc", "svc_show_links", False)' in kb
+
+    admin = (ROOT / "handlers_admin.py").read_text(encoding="utf-8")
+    assert 'F.data.startswith("adm_acct_all:")' in admin
+    assert "from db.constants import BULK_TOGGLE_KEYS" in admin
+
+    user = (ROOT / "handlers_user.py").read_text(encoding="utf-8")
+    assert 'db.get_setting, "svc_show_links", "1"' in user
+
+    # Both copies of the button registry stay in step and expose the toggle.
+    for rel in ("button_registry.py", "admin_panel/static/button_registry.py"):
+        reg = (ROOT / rel).read_text(encoding="utf-8")
+        assert 'toggle = kb._ACCOUNT_HUB_CALLBACKS[key][0]' in reg, rel
+        assert '"togglable": True' in reg, rel
