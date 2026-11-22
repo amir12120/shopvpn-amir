@@ -3413,3 +3413,70 @@ EXTRA_DYNAMIC_PHRASES += [
     ('متن صفحه\u200cی وضعیت نمی\u200cتواند بیشتر از {x} نویسه باشد.',
      "The status page text cannot be longer than {x} characters."),
 ]
+EXTRA_PHRASES.update({'⏱ زمان این محصول از چه لحظه\u200cای شروع شود؟\n\n🛒 از لحظه خرید: مدت از همان لحظه\u200cی خرید حساب می\u200cشود.\n📡 از اولین اتصال: مدت بعد از اولین اتصال کاربر شروع می\u200cشود.': "When should this product's time start?\n\n🛒 From purchase: the period counts from the moment of purchase.\n📡 From first connection: the period starts after the user's first connection.", '✅ شروع زمان محصول ذخیره شد.': '✅ Product start time saved.', 'این نوع پنل شروع زمان از اولین اتصال را پشتیبانی نمی\u200cکند.': 'This panel type does not support starting time from the first connection.', '🛒 از لحظه خرید': '🛒 From purchase', '📡 از اولین اتصال': '📡 From first connection', '✅ 🛒 از لحظه خرید': '✅ 🛒 From purchase', '✅ 📡 از اولین اتصال': '✅ 📡 From first connection', '⏱ شروع زمان: از اولین اتصال': '⏱ Start time: from first connection', '⏱ شروع زمان: از لحظه خرید': '⏱ Start time: from purchase', '⏱ شروع زمان: طبق تنظیم پنل': '⏱ Start time: per panel setting', 'ساخت\u200cهای بعدی این محصول طبق انتخاب جدید انجام می\u200cشود؛ سرویس\u200cهای قبلاً ساخته\u200cشده تغییر نمی\u200cکنند.': 'Future services of this product follow the new choice; already created services are unchanged.'})
+
+
+EXTRA_PHRASES.update({
+    '🎁 عضویت شما تکمیل شد! برای دریافت اشتراک هدیه روی دکمه\u200cی زیر بزنید.': '🎁 Your membership is complete! Tap the button below to get your gift subscription.',
+    '🎁 یکی از اشتراک\u200cهای هدیه را انتخاب کنید:': '🎁 Choose one of the gift subscriptions:',
+    '🎁 این اشتراک فقط یک\u200cبار قابل دریافت است.': '🎁 This subscription can only be received once.',
+    'باشه؛ سهمیه\u200cی هدیه\u200cی شما محفوظ است. هر زمان خواستید از «حساب کاربری» روی «🎁 اشتراک هدیه عضویت» بزنید.': 'Okay, your gift allowance is saved. Whenever you want it, open "Account" and tap "🎁 Membership gift subscription".',
+    'هدیه\u200cی عضویت در حال حاضر غیرفعال است.': 'The membership gift is currently disabled.',
+    'شما قبلاً اشتراک هدیه عضویت را دریافت کرده\u200cاید.': 'You have already received the membership gift subscription.',
+    'درخواست هدیه\u200cی شما قبلاً ثبت شده و در حال آماده\u200cسازی است.': 'Your gift request has already been submitted and is being prepared.',
+    '🎁 درخواست ثبت شد؛ اشتراک پس از نوبت شما ارسال می\u200cشود.': '🎁 Request submitted; the subscription will be sent when it is your turn.',
+    '🎁 درخواست اشتراک هدیه ثبت شد؛ به\u200cزودی برای شما ارسال می\u200cشود.': '🎁 Your gift subscription request was submitted; it will be sent to you shortly.',
+    'در حال حاضر اشتراک هدیه\u200cای موجود نیست.': 'No gift subscription is available right now.',
+    'این گزینه دیگر فعال نیست.': 'This option is no longer active.',
+    'ابتدا در همه\u200cی کانال\u200cهای عضویت اجباری عضو شوید.': 'Please join all the required channels first.',
+    'امکان ثبت درخواست هدیه وجود ندارد؛ تنظیمات را بررسی کنید.': 'The gift request cannot be submitted; please check the settings.',
+    '✅ دریافت الان': '✅ Get it now',
+    '⏳ الان نیازی ندارم، بعداً دریافت می\u200cکنم': "⏳ I don't need it now, I'll get it later",
+    '🎁 دریافت کانفیگ هدیه': '🎁 Get gift config',
+    '🎁 اشتراک هدیه عضویت': '🎁 Membership gift subscription',
+    'اشتراک هدیه عضویت فقط برای بات اصلی قابل تنظیم است.': 'The membership gift subscription can only be configured for the main bot.',
+    'عنوان گزینه الزامی است.': 'The option title is required.',
+    'محصول انتخاب\u200cشده معتبر نیست (باید به پنل/نود متصل باشد).': 'The selected product is not valid (it must be connected to a panel/node).',
+    'این گزینه یافت نشد.': 'This option was not found.',
+    'هیچ گزینه\u200cی هدیه\u200cای تعریف نشده است.': 'No gift option has been defined.',
+    'این گزینه فعال نیست.': 'This option is not active.',
+})
+
+EXTRA_DYNAMIC_PHRASES.extend([
+    ('{x} نامعتبر است.', '{x} is invalid.'),
+    ('{x} باید عدد باشد (یا خالی).', '{x} must be a number (or empty).'),
+])
+
+EXTRA_PHRASES.update({
+    '✏️ عنوان دکمه را بفرست (مثلاً: 🛍 خرید همین محصول):': '✏️ Send the button title (for example: 🛍 Buy this product):',
+    'پارامتر دیپ\u200cلینک نامعتبر یا طولانی است. محدودیت تلگرام حداکثر ۶۴ کاراکتر از حروف انگلیسی، عدد، خط تیره و زیرخط است.': 'The deep-link parameter is invalid or too long. Telegram allows at most 64 characters of English letters, digits, hyphen and underscore.',
+    '🔗 مقصد دکمه را انتخاب کن. پس از انتخاب مقصد، عنوان دکمه را وارد می\u200cکنی.': '🔗 Choose the button destination. After choosing the destination, you enter the button title.',
+    'دکمه دیپ\u200cلینک اضافه نشد.': 'The deep-link button was not added.',
+    'در صورت نیاز دکمه دیپ\u200cلینک اضافه کن؛ در غیر این صورت «ارسال پیام» را بزن.': 'Add a deep-link button if needed; otherwise tap «Send message».',
+    'ابتدا پیام موردنظر را ارسال کنید.': 'Send the intended message first.',
+    'عنوان دکمه باید بین ۱ تا ۶۴ کاراکتر باشد. دوباره بفرست:': 'The button title must be between 1 and 64 characters. Send it again:',
+    'اطلاعات دیپ\u200cلینک ناقص است؛ دوباره تلاش کن.': 'The deep-link data is incomplete; please try again.',
+    'حداکثر ۸ دکمه برای هر پیام قابل افزودن است.': 'At most 8 buttons can be added to each message.',
+    'اطلاعات پیام ناقص است.': 'The message data is incomplete.',
+    'ارسال زمان\u200cبندی\u200cشده هنوز دکمه\u200cهای دیپ\u200cلینک را پشتیبانی نمی\u200cکند؛ ارسال فوری را انتخاب کن.': 'Scheduled sending does not support deep-link buttons yet; choose immediate sending.',
+    'پارامتر نامعتبر بود. فقط حروف انگلیسی، عدد، خط تیره و زیرخط بفرست:': 'The parameter was invalid. Send only English letters, digits, hyphen and underscore:',
+    '↩️ پاسخ به تیکت\u200cها فقط از داخل تاپیک تیکت\u200cهای گروه انجام می\u200cشود.': '↩️ Tickets can only be answered from inside the group tickets topic.',
+    '👇 برای ادامه از دکمه زیر استفاده کن:': '👇 Use the button below to continue:',
+    '🔗 افزودن دکمه دیپ\u200cلینک': '🔗 Add a deep-link button',
+    '✅ ارسال پیام': '✅ Send message',
+    '🔗 افزودن دکمه دیگر': '🔗 Add another button',
+    '👛 کیف پول': '👛 Wallet',
+    '📋 سرویس\u200cهای من': '📋 My services',
+    '🤝 دعوت دوستان': '🤝 Invite friends',
+    '📱 مینی\u200cاپ فروشگاه': '📱 Store mini app',
+    '👤 حساب کاربری': '👤 Account',
+    '📚 آموزش\u200cها': '📚 Tutorials',
+    '🆘 پشتیبانی': '🆘 Support',
+})
+
+EXTRA_DYNAMIC_PHRASES.extend([
+    ('✅ دکمه «{x}» اضافه شد. تعداد دکمه\u200cها: {x}\nمی\u200cتوانی دکمه دیگری اضافه کنی یا ارسال را ادامه بدهی.', '✅ Button «{x}» added. Buttons: {x}\nYou can add another button or continue sending.'),
+    ('👁 پیش\u200cنمایش پیام برای کاربر {x}:', '👁 Preview of the message for user {x}:'),
+    ('❌ ارسال پیام ناموفق بود: {x}', '❌ Sending the message failed: {x}'),
+])
+

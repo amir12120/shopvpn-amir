@@ -1298,12 +1298,30 @@ class DatabaseBase:
                     expires_at TEXT,
                     credential_enc TEXT,
                     custom_config_id INTEGER,
+                    node_subscription_id INTEGER,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(node_id,account_id),
                     UNIQUE(node_id,username)
                 );
                 CREATE INDEX IF NOT EXISTS idx_ssh_accounts_user ON ssh_accounts(user_id,status);
+
+                CREATE TABLE IF NOT EXISTS node_subscriptions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    token TEXT UNIQUE,
+                    user_id INTEGER NOT NULL,
+                    order_id INTEGER,
+                    product_id INTEGER,
+                    quota_pool_id INTEGER,
+                    display_name TEXT NOT NULL DEFAULT '',
+                    volume_gb REAL NOT NULL DEFAULT 0,
+                    duration_days REAL NOT NULL DEFAULT 0,
+                    expires_at TEXT,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_node_subscriptions_user ON node_subscriptions(user_id,status);
+                CREATE INDEX IF NOT EXISTS idx_node_subscriptions_pool ON node_subscriptions(quota_pool_id);
 
                 CREATE TABLE IF NOT EXISTS product_extra_targets (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1432,6 +1450,32 @@ class DatabaseBase:
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE INDEX IF NOT EXISTS idx_welcome_gift_queue_due ON welcome_gift_queue(status, due_at);
+
+                CREATE TABLE IF NOT EXISTS welcome_gift_options (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    product_id INTEGER NOT NULL,
+                    volume_gb TEXT NOT NULL DEFAULT '',
+                    days TEXT NOT NULL DEFAULT '',
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS welcome_gift_resends (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    option_id INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    error TEXT,
+                    result_json TEXT,
+                    due_at INTEGER NOT NULL,
+                    updated_at INTEGER,
+                    requested_by INTEGER,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_welcome_gift_resends_due ON welcome_gift_resends(status, due_at);
 
                 CREATE TABLE IF NOT EXISTS product_waitlist (
                     product_id INTEGER NOT NULL,
@@ -1809,7 +1853,7 @@ class DatabaseBase:
     FACTORY_RESET_TABLES = (
         "users", "categories", "products", "configs", "config_activity", "test_configs",
         "test_config_plans", "wheel_prizes", "orders", "discount_codes", "discount_redemptions", "wallet_topups",
-        "crypto_invoices", "support_messages", "support_conversations", "welcome_gift_queue",
+        "crypto_invoices", "support_messages", "support_conversations", "welcome_gift_queue", "welcome_gift_options", "welcome_gift_resends",
         "admin_presence", "tickets", "ticket_messages", "ticket_departments", "ticket_department_admins", "admin_logs",
         "abangateway_invoices", "blupal_invoices", "noapay_invoices", "extra_gateway_invoices", "custom_gateways", "custom_gateway_invoices",
         "card_to_card_cards", "card_to_card_invoices", "payment_cards", "payment_card_assignments", "quota_enforcement_state", "quota_pool_members", "quota_pool_adjustments",
@@ -1939,6 +1983,11 @@ class DatabaseBase:
             conn.execute("ALTER TABLE ssh_accounts ADD COLUMN custom_config_id INTEGER")
         if self._column_exists(conn, "ssh_accounts", "id") and not self._column_exists(conn, "ssh_accounts", "protocol"):
             conn.execute("ALTER TABLE ssh_accounts ADD COLUMN protocol TEXT NOT NULL DEFAULT 'ssh'")
+        if self._column_exists(conn, "ssh_accounts", "id") and not self._column_exists(conn, "ssh_accounts", "node_subscription_id"):
+            conn.execute("ALTER TABLE ssh_accounts ADD COLUMN node_subscription_id INTEGER")
+        conn.execute("CREATE TABLE IF NOT EXISTS node_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT UNIQUE, user_id INTEGER NOT NULL, order_id INTEGER, product_id INTEGER, quota_pool_id INTEGER, display_name TEXT NOT NULL DEFAULT '', volume_gb REAL NOT NULL DEFAULT 0, duration_days REAL NOT NULL DEFAULT 0, expires_at TEXT, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_node_subscriptions_user ON node_subscriptions(user_id,status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_node_subscriptions_pool ON node_subscriptions(quota_pool_id)")
 
         # Additive migration for unified quota counter epochs. Older DBs stored
         # only the provider's raw used_bytes, which could move backwards after a panel reset.
@@ -2057,6 +2106,7 @@ class DatabaseBase:
             ("products", "duration_days", "INTEGER DEFAULT 30"),
             ("users", "test_limit_override", "INTEGER"),
             ("welcome_gift_queue", "result_json", "TEXT"),
+            ("welcome_gift_queue", "option_id", "INTEGER"),
             ("products", "is_hidden", "INTEGER DEFAULT 0"),
             ("products", "btn_style", "TEXT DEFAULT ''"),
             ("products", "product_kind", "TEXT DEFAULT 'config'"),

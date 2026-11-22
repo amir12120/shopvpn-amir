@@ -1314,8 +1314,26 @@ async def _provision_payg_multi(db, uid: int, panel_ids, node_ids, protocols) ->
     with db._get_conn() as conn:
         account = conn.execute("SELECT status,quota_pool_id FROM payg_accounts WHERE user_id=?", (int(uid),)).fetchone()
     created_pool = False
+    # رفع باگ «سرویس VPN یا استخر سهمیه پیدا نشد»: attach_custom_config_to_quota_pool فقط به استخرِ
+    # status='active' وصل می‌شود، ولی استخر حساب PayG موجود می‌تواند stale/exceeded/expired/error شده باشد
+    # (مثلاً وقتی همه‌ی سرویس‌هایش حذف شده یا موجودی تمام شده بود) یا اصلاً پاک شده باشد. قبلاً در این
+    # حالت ساخت سرویس جدید روی همه‌ی پنل‌ها انجام می‌شد و بعد با همین خطا کامل rollback می‌شد.
+    pool_restore = {"status": None, "old_pool_id": None}
     if account and account["status"] == "active" and account["quota_pool_id"]:
         pool_id = int(account["quota_pool_id"])
+        with db._get_conn() as conn:
+            pool_row = conn.execute("SELECT user_id,status FROM quota_pools WHERE id=?", (pool_id,)).fetchone()
+        if pool_row and int(pool_row["user_id"]) == int(uid):
+            if str(pool_row["status"]) != "active":
+                pool_restore["status"] = str(pool_row["status"])
+                # تا چرخه‌ی بعدی quota_reconciler فعال می‌ماند؛ اگر هنوز سقف/موجودی تمام باشد همان‌جا دوباره تعلیق می‌شود.
+                db.set_quota_pool_status(pool_id, "active")
+        else:
+            pool_restore["old_pool_id"] = pool_id
+            pool_id = int(db.create_quota_pool(int(uid), 1_000_000_000, label="Pay As You Go", metadata={"payg": True}))
+            created_pool = True
+            with db._get_conn() as conn:
+                conn.execute("UPDATE payg_accounts SET quota_pool_id=? WHERE user_id=?", (pool_id, int(uid)))
     else:
         pool_id = int(db.create_quota_pool(int(uid), 1_000_000_000, label="Pay As You Go", metadata={"payg": True}))
         created_pool = True
@@ -1356,8 +1374,17 @@ async def _provision_payg_multi(db, uid: int, panel_ids, node_ids, protocols) ->
                 conn.execute("DELETE FROM quota_enforcement_state WHERE service_kind='vpn' AND service_id=?", (sid_key,))
                 conn.execute("DELETE FROM usage_snapshots WHERE service_kind='vpn' AND service_id=?", (sid_key,))
                 conn.execute("DELETE FROM custom_configs WHERE id=?", (int(primary["custom_config_id"]),))
+        if pool_restore["old_pool_id"] is not None:
+            with db._get_conn() as conn:
+                conn.execute("UPDATE payg_accounts SET quota_pool_id=? WHERE user_id=?",
+                             (pool_restore["old_pool_id"], int(uid)))
         if created_pool:
             db.delete_quota_pool(pool_id)
+        elif pool_restore["status"]:
+            try:
+                db.set_quota_pool_status(pool_id, pool_restore["status"])
+            except Exception:
+                logger.exception("PAYG multi rollback: pool status restore failed")
 
     try:
         ssh_product_base = {"name": "Pay As You Go", "auto_provision_volume_gb": 0, "duration_days": 0}
@@ -1432,6 +1459,17 @@ async def _provision_payg_multi(db, uid: int, panel_ids, node_ids, protocols) ->
             "subscription_url": link, "config_link": primary.get("subscription_url"),
             "panels": len(panel_ids), "nodes": len(node_plan),
             "ssh_accounts": len(ssh_items)}
+
+
+def _central_link(db, custom_config_id, upstream_url) -> str:
+    """لینک ساب مرکزی سرویس PayG (هر سرویس PayG همیشه ساب مرکزی می‌گیرد، چه تک‌پنلی چه چندمقصدی).
+    اگر ساب مرکزی خاموش باشد یا خطایی رخ دهد همان لینک پنل برمی‌گردد."""
+    url = str(upstream_url or "").strip()
+    try:
+        import dedicated_sub
+        return str(dedicated_sub.display_link(db, int(custom_config_id), url) or url).strip()
+    except Exception:
+        return url
 
 
 def _is_multi_service(db, custom_config_id: int) -> bool:
@@ -1594,9 +1632,7 @@ def create_payg_router(db, is_main_bot=True):
             for item in service_rows:
                 url = str(item["subscription_url"] or "").strip()
                 multi = await asyncio.to_thread(_is_multi_service, db, int(item["id"]))
-                if multi:
-                    import dedicated_sub
-                    url = str(dedicated_sub.display_link(db, int(item["id"]), url) or url).strip()
+                url = await asyncio.to_thread(_central_link, db, int(item["id"]), url)
                 if not url:
                     continue
                 safe_url = url.replace("&", "&amp;").replace('"', "&quot;")
@@ -1826,13 +1862,15 @@ def create_payg_router(db, is_main_bot=True):
             # the config, so the metered service is never handed over as "unlimited".
             await _reconcile_user_pool(db, uid)
             enrolled_ok = True
+            central_url = await asyncio.to_thread(_central_link, db, int(provisioned["custom_config_id"]),
+                                                  provisioned["subscription_url"])
             try:
-                await _deliver_payg_configs(call.bot, db, uid, [provisioned.get("subscription_url")],
+                await _deliver_payg_configs(call.bot, db, uid, [central_url],
                                             header_text="🍃 سرویس پرداخت به ازای مصرف شما")
             except Exception:
                 logger.exception("PAYG config delivery failed for user=%s", uid)
                 await call.message.answer("⚠️ سرویس ساخته شد ولی ارسال کانفیگ ناموفق بود؛ از «کانفیگ‌های من» یا /payg اقدام کنید.")
-            safe_url = str(provisioned["subscription_url"]).replace("&", "&amp;").replace('"', "&quot;")
+            safe_url = central_url.replace("&", "&amp;").replace('"', "&quot;")
             default_text = (
                 tr("✅ <b>سرویس Pay As You Go ساخته شد.</b>") + "\n\n"
                 + _tformat("👤 نام کاربری: <code>{username}</code>\n", username=provisioned["username"])
@@ -2073,7 +2111,8 @@ async def provision_service_for_user(db, uid: int) -> dict:
                 "⛔️ ساخت سرویس Pay As You Go ناموفق بود: {error}\nهیچ هزینه مصرفی برای این سرویس ثبت نشده است.",
                 error=str(exc)[:250])) from exc
         return {"username": provisioned["username"], "custom_config_id": int(provisioned["custom_config_id"]),
-                "subscription_url": provisioned["subscription_url"], "multi": False, "panels": 1, "nodes": 0}
+                "subscription_url": _central_link(db, int(provisioned["custom_config_id"]), provisioned["subscription_url"]),
+                "multi": False, "panels": 1, "nodes": 0}
     finally:
         await asyncio.to_thread(_release_provision_lock, db, uid)
 

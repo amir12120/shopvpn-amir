@@ -1940,3 +1940,194 @@ def test_account_hub_bulk_toggle_is_wired():
         reg = (ROOT / rel).read_text(encoding="utf-8")
         assert 'toggle = kb._ACCOUNT_HUB_CALLBACKS[key][0]' in reg, rel
         assert '"togglable": True' in reg, rel
+
+
+def test_node_only_subscriptions_are_wired_end_to_end():
+    """4.42.0 sync: node-only products get a real dedicated-subscription page.
+
+    A `node_subscriptions` row is useless unless provisioning creates it, the
+    sub server can serve its token, the buyer can renew/rename it, and a failed
+    provision rolls it back.
+    """
+    base = (ROOT / "db/_base.py").read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS node_subscriptions" in base
+    assert "node_subscription_id INTEGER" in base
+    assert '"node_subscriptions"' in base or "idx_node_subscriptions_user" in base
+    # SQLite ALTER for DBs created before this release.
+    assert "ALTER TABLE ssh_accounts ADD COLUMN node_subscription_id" in base
+
+    usage = (ROOT / "db/usage.py").read_text(encoding="utf-8")
+    for needle in (
+        "def create_node_subscription",
+        "def link_ssh_account_to_node_subscription",
+        "def rename_owned_node_subscription",
+        "def ds_node_sub_get_or_create_token",
+        "def ssh_accounts_for_node_subscription",
+        "def node_subscription_quota_info",
+    ):
+        assert needle in usage, f"db/usage.py lost {needle}"
+
+    orders = (ROOT / "db/orders.py").read_text(encoding="utf-8")
+    assert "def list_node_subscription_renewals" in orders
+    assert "renewal_target_kind='node'" in orders
+
+    dsub = (ROOT / "dedicated_sub.py").read_text(encoding="utf-8")
+    assert "def link_for_node_subscription" in dsub
+    assert "is_node_subscription" in dsub
+    assert "def ssh_uris_for_config" in dsub
+
+    prov = (ROOT / "direct_panel_provision.py").read_text(encoding="utf-8")
+    assert "db.create_node_subscription(" in prov
+    assert "node_subscription_id=node_sub_id" in prov
+    assert "dedicated_sub.link_for_node_subscription" in prov
+    # A failed subscription link must not leave paid accounts behind.
+    assert "DELETE FROM node_subscriptions WHERE id=?" in prov
+
+    server = (ROOT / "sub_server/server.py").read_text(encoding="utf-8")
+    assert 'cc.get("is_node_subscription")' in server
+    assert "db.node_subscription_quota_info" in server
+
+    renew = (ROOT / "renewal_engine.py").read_text(encoding="utf-8")
+    assert 'if kind == "node":' in renew
+    assert "UPDATE node_subscriptions SET volume_gb=?" in renew
+
+    user = (ROOT / "handlers_user.py").read_text(encoding="utf-8")
+    for needle in (
+        "async def _ssh_service_kb(",
+        'F.data.startswith("mo_ssh_refresh:")',
+        'F.data.startswith("svc_node_history:")',
+        'F.data.startswith("svc_node_rename:")',
+        'F.data.startswith("svc_node_inquiry:")',
+        'F.data.startswith("svc_node_disruption:")',
+    ):
+        assert needle in user, f"handlers_user.py lost {needle}"
+    assert "waiting_node_display_name = State()" in (ROOT / "states.py").read_text(encoding="utf-8")
+    # The buyer-facing node menu must be reachable from the item view itself.
+    assert "markup = await _ssh_service_kb(account)" in user
+    assert "markup = await _ssh_service_kb(current, account_row_id)" in user
+
+    # The upstream node-only test ships with the suite.
+    assert (ROOT / "tests/test_dedicated_sub_node.py").is_file()
+
+
+def test_membership_gift_options_are_wired_end_to_end():
+    """4.42.0 sync: the gift subscription offers admin-defined options."""
+    base = (ROOT / "db/_base.py").read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS welcome_gift_options" in base
+    assert "CREATE TABLE IF NOT EXISTS welcome_gift_resends" in base
+    assert '"welcome_gift_options", "welcome_gift_resends"' in base, "factory reset must clear gift tables"
+
+    system = (ROOT / "db/system.py").read_text(encoding="utf-8")
+    for needle in (
+        "def get_welcome_gift_choices",
+        "def add_welcome_gift_option",
+        "def toggle_welcome_gift_option",
+        "def defer_welcome_gift",
+        "def welcome_gift_quota",
+        "def reset_all_welcome_gifts",
+        "def claim_due_welcome_gift_resends",
+        "def retry_or_fail_welcome_gift_resend",
+    ):
+        assert needle in system, f"db/system.py lost {needle}"
+
+    gift = (ROOT / "welcome_gift.py").read_text(encoding="utf-8")
+    assert "async def welcome_gift_resend_once" in gift
+    # The resend queue has to be polled, not just defined.
+    assert "await welcome_gift_resend_once(bot, db)" in gift
+
+    kb = (ROOT / "keyboards.py").read_text(encoding="utf-8")
+    assert 'callback_data="acct:wgift"' in kb, "account hub must expose the gift button"
+    user = (ROOT / "handlers_user.py").read_text(encoding="utf-8")
+    assert 'F.data == "acct:wgift"' in user
+    assert 'F.data == "wg_now"' in user and 'F.data == "wg_later"' in user
+    assert 'F.data.startswith("wg_pick:")' in user
+
+    admin_server = (ROOT / "admin_panel/server.py").read_text(encoding="utf-8")
+    for route in (
+        '@app.get("/api/welcome-gift")',
+        '@app.post("/api/welcome-gift/options")',
+        '@app.put("/api/welcome-gift/options/{option_id}")',
+        '@app.delete("/api/welcome-gift/options/{option_id}")',
+        '@app.post("/api/welcome-gift/reset-all")',
+        '@app.post("/api/users/{tg_id}/welcome-gift/resend")',
+    ):
+        assert route in admin_server, f"admin panel lost {route}"
+    appjs = (ROOT / "admin_panel/static/app.js").read_text(encoding="utf-8")
+    assert "/welcome-gift/choices" in appjs
+    assert "wgift-reset-all" in appjs
+    assert (ROOT / "tests/test_welcome_gift_options.py").is_file()
+
+
+def test_ticket_and_live_chat_topics_are_split():
+    """4.42.0 sync: tickets and live chat report into separate group topics."""
+    router = (ROOT / "report_router.py").read_text(encoding="utf-8")
+    assert 'TopicSpec("live_chat"' in router
+    assert 'TICKET_TOPIC = "support"' in router
+    assert 'LIVE_CHAT_TOPIC = "live_chat"' in router
+    assert "async def notify_live_chat(" in router
+    assert "async def notify_live_chat_raw(" in router
+    assert "def ticket_group_mode(" in router
+    assert 'SUPPORT_PRIVATE_KEY = "support_to_admin_private"' in router
+    assert "async def _handle_group_live_chat_reply" in router
+
+    tickets = (ROOT / "db/tickets.py").read_text(encoding="utf-8")
+    assert "def link_live_chat_group_message" in tickets
+    assert "def get_live_chat_user_by_group_message" in tickets
+    assert "def find_recent_duplicate_admin_reply" in tickets
+
+    consts = (ROOT / "db/constants.py").read_text(encoding="utf-8")
+    assert '"support_to_admin_private": "0"' in consts
+    schema = (ROOT / "extra_settings_schema.py").read_text(encoding="utf-8")
+    assert '_b("support_to_admin_private"' in schema
+
+    user = (ROOT / "handlers_user.py").read_text(encoding="utf-8")
+    assert "report_router.notify_live_chat(bot, db, user.id" in user
+    miniapp = (ROOT / "miniapp/server.py").read_text(encoding="utf-8")
+    assert "report_router.notify_live_chat_raw" in miniapp
+    admin = (ROOT / "handlers_admin.py").read_text(encoding="utf-8")
+    assert "report_router.ticket_group_mode(db)" in admin
+    # A double-clicked reply must not reach the user twice (web panel, mini app).
+    admin_server = (ROOT / "admin_panel/server.py").read_text(encoding="utf-8")
+    assert "db.find_recent_duplicate_admin_reply, user_id, text" in admin_server
+    assert "db.find_recent_duplicate_admin_reply(user_id, text)" in miniapp
+    assert (ROOT / "tests/test_support_topics_split.py").is_file()
+
+
+def test_broadcast_deeplinks_node_actions_and_payg_pool_repair_are_wired():
+    """4.42.0 sync: deep-link buttons in broadcasts, honest node actions,
+    PayG pool repair."""
+    admin = (ROOT / "handlers_admin.py").read_text(encoding="utf-8")
+    for needle in (
+        'F.data == "adm_bc_dl_pick"',
+        'F.data == "adm_bc_single_send"',
+        'AdminBroadcast.waiting_deeplink_button_text',
+        'AdminBroadcast.waiting_custom_param',
+        "broadcast_deeplink_buttons",
+    ):
+        assert needle in admin, f"handlers_admin.py lost {needle}"
+    kb = (ROOT / "keyboards.py").read_text(encoding="utf-8")
+    assert 'callback_data="adm_bc_dl_pick"' in kb
+    states = (ROOT / "states.py").read_text(encoding="utf-8")
+    assert "waiting_deeplink_button_text = State()" in states
+
+    ssh = (ROOT / "ssh_service.py").read_text(encoding="utf-8")
+    assert "async def refresh_account(" in ssh
+    # enable/disable/delete are only recorded when the node acknowledges them.
+    assert "if changed is not True" in ssh
+    assert "if deleted is not True" in ssh
+    user = (ROOT / "handlers_user.py").read_text(encoding="utf-8")
+    assert 'await ssh_service.account_action(db, account["account_id"], action, force=False)' in user
+
+    payg = (ROOT / "payg.py").read_text(encoding="utf-8")
+    assert "pool_restore = {" in payg
+    assert "def _central_link(db, custom_config_id, upstream_url)" in payg
+    assert "db.set_quota_pool_status(pool_id, \"active\")" in payg
+    assert (ROOT / "tests/test_payg_multi_stale_pool.py").is_file()
+
+    # The deploy script must keep the badvpn build working on new CMake.
+    agent_installer = (ROOT / "deploy/install-shopvpn-ssh-agent.sh").read_text(encoding="utf-8")
+    assert "CMAKE_POLICY_VERSION_MINIMUM=3.5" in agent_installer
+    # Node sshd keeps the fork's hardening.
+    sshd_unit = (ROOT / "deploy/shopvpn-sshd@.service").read_text(encoding="utf-8")
+    assert "NoNewPrivileges=true" in sshd_unit
+    assert "ProtectSystem=full" in sshd_unit

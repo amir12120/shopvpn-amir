@@ -827,6 +827,8 @@ def account_hub_kb(db, is_main_bot: bool = True) -> InlineKeyboardMarkup:
         text = tr(db.get_setting(f"{key}_text", ACCOUNT_HUB_META[key]["default_text"]))
         entries.append((key, text, _styled_inline(db, text, callback_data, f"{key}_style")))
     rows = _layout_group_rows(db, "account_hub", entries)
+    if db.is_full_access_bot(is_main_bot) and db.get_setting("welcome_gift_enabled", "0") == "1" and db.get_welcome_gift_choices():
+        rows.append([InlineKeyboardButton(text=tr("🎁 اشتراک هدیه عضویت"), callback_data="acct:wgift")])
     if _widgets_on(db):
         rows.append([InlineKeyboardButton(text=tr("🧩 ویجت‌ها"), callback_data="u_widgets")])
     rows.append([InlineKeyboardButton(text=tr(LANGUAGE_BTN_TEXT), callback_data="acct:language")])
@@ -2914,6 +2916,7 @@ def admin_broadcast_duration_kb(pin_after_send: bool = False, allow_schedule: bo
         ],
         [InlineKeyboardButton(text=tr("✏️ مدت دلخواه (دقیقه)"), callback_data="adm_broadcast_dur:custom")],
         [InlineKeyboardButton(text=pin_label, callback_data="adm_broadcast_toggle_pin")],
+        [InlineKeyboardButton(text=tr("🔗 افزودن دکمه دیپ‌لینک"), callback_data="adm_bc_dl_pick")],
         [InlineKeyboardButton(text=tr("✏️ ویرایش متن/عکس"), callback_data="adm_broadcast_edit")],
         [InlineKeyboardButton(text=tr("❌ لغو ارسال"), callback_data="adm_broadcast_cancel")],
     ]
@@ -3210,6 +3213,13 @@ def deeplink_type_picker_kb(back_callback: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=tr("🎟 کد تخفیف"), callback_data="adm_dlp_type:disc")],
         [InlineKeyboardButton(text=tr("🧪 کانفیگ تست"), callback_data="adm_dlp_type:test")],
         [InlineKeyboardButton(text=tr("🎡 گردونه شانس"), callback_data="adm_dlp_type:wheel")],
+        [InlineKeyboardButton(text=tr("👛 کیف پول"), callback_data="adm_dlp_type:wallet")],
+        [InlineKeyboardButton(text=tr("📋 سرویس‌های من"), callback_data="adm_dlp_type:svc")],
+        [InlineKeyboardButton(text=tr("🤝 دعوت دوستان"), callback_data="adm_dlp_type:invite")],
+        [InlineKeyboardButton(text=tr("📱 مینی‌اپ فروشگاه"), callback_data="adm_dlp_type:btn_miniapp")],
+        [InlineKeyboardButton(text=tr("👤 حساب کاربری"), callback_data="adm_dlp_type:btn_btn_my_orders")],
+        [InlineKeyboardButton(text=tr("📚 آموزش‌ها"), callback_data="adm_dlp_type:btn_btn_tutorial")],
+        [InlineKeyboardButton(text=tr("🆘 پشتیبانی"), callback_data="adm_dlp_type:btn_btn_contact")],
         [InlineKeyboardButton(text=tr("🏷 پارامتر دلخواه (فقط آمار منبع)"), callback_data="adm_dlp_type:custom")],
         [InlineKeyboardButton(text=tr("⬅️ بازگشت"), callback_data=back_callback)],
     ])
