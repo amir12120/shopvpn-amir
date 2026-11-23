@@ -2131,3 +2131,21 @@ def test_broadcast_deeplinks_node_actions_and_payg_pool_repair_are_wired():
     sshd_unit = (ROOT / "deploy/shopvpn-sshd@.service").read_text(encoding="utf-8")
     assert "NoNewPrivileges=true" in sshd_unit
     assert "ProtectSystem=full" in sshd_unit
+
+
+def test_card_auto_webhook_address_is_shown_and_copyable():
+    """The bot's admin screen for the BankSmsForwarder app must show the server
+    webhook address and give a one-tap copy button (CopyTextButton)."""
+    admin = (ROOT / "handlers_admin.py").read_text(encoding="utf-8")
+    assert "CopyTextButton" in admin
+    assert 'tr("📋 کپی آدرس وب‌هوک سرور")' in admin
+    assert "copy_text=CopyTextButton(text=webhook_url)" in admin
+    assert 'f"{base_url}/api/webhooks/sms-forwarder"' in admin
+    # Reseller bots must call their own tenant's webhook, not the main one.
+    assert 'db.get_setting, "miniapp_tenant_id", ""' in admin
+    assert 'webhook_url += f"?b={tenant_id}"' in admin
+    import i18n_extra
+
+    assert i18n_extra.EXTRA_PHRASES.get(
+        "📋 کپی آدرس وب‌هوک سرور"
+    ) == "📋 Copy server webhook address"

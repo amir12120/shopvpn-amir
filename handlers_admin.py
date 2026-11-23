@@ -25,7 +25,7 @@ import zipfile
 from aiogram import Router, F, Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import Message, CallbackQuery, FSInputFile, BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply
+from aiogram.types import Message, CallbackQuery, FSInputFile, BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, CopyTextButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.filters import Command, StateFilter
@@ -5466,19 +5466,39 @@ def create_admin_router(db, is_main_bot: bool = True, bot_manager=None) -> Route
         # MINIAPP_URL ممکن است ?app=1 داشته باشد؛ برای ساخت مسیر API فقط اسکیم+هاست لازم است.
         _parts = urlsplit(_raw_base) if _raw_base else None
         base_url = f"{_parts.scheme}://{_parts.netloc}" if _parts and _parts.netloc else ""
-        webhook_url = f"{base_url}/api/webhooks/sms-forwarder" if base_url else None
+        # در بات نمایندگی همین آدرس باید تننت خودش را صدا بزند (b=...)؛ برای بات
+        # اصلی تنظیم خالی است و همان تننت پیش‌فرض استفاده می‌شود.
+        tenant_id = (await asyncio.to_thread(db.get_setting, "miniapp_tenant_id", ""))
+        webhook_url = None
+        if base_url:
+            webhook_url = f"{base_url}/api/webhooks/sms-forwarder"
+            if tenant_id:
+                webhook_url += f"?b={tenant_id}"
+        if webhook_url:
+            url_line = f"<code>{html.escape(webhook_url)}</code>"
+            copy_hint = "\n\n📋 با دکمه‌ی زیر همین آدرس را یک‌جا کپی کن."
+        else:
+            url_line = "⚠️ آدرس مینی‌اپ روی سرور تنظیم نشده."
+            copy_hint = ""
         text = (
             "📡 اتصال اپ BankSmsForwarder:\n\n"
-            f"آدرس وب‌هوک: {webhook_url or '⚠️ آدرس مینی‌اپ روی سرور تنظیم نشده.'}\n"
-            f"توکن: {'✅ تنظیم شده (برای دیدن مجدد، بازتولید کن)' if token else '❌ هنوز ساخته نشده'}\n\n"
+            f"آدرس وب‌هوک سرور: {url_line}\n"
+            f"توکن: {'✅ تنظیم شده (برای دیدن مجدد، بازتولید کن)' if token else '❌ هنوز ساخته نشده'}"
+            f"{copy_hint}\n\n"
             "آدرس و توکن را داخل تنظیمات اپ اندروید BankSmsForwarder وارد کن."
         )
-        rows = [
+        rows = []
+        if webhook_url:
+            rows.append([InlineKeyboardButton(
+                text=tr("📋 کپی آدرس وب‌هوک سرور"),
+                copy_text=CopyTextButton(text=webhook_url),
+            )])
+        rows.extend([
             [InlineKeyboardButton(text=tr("🔁 ساخت/بازتولید توکن"), callback_data="adm_card_auto_webhook_regen")],
             [InlineKeyboardButton(text=tr("📖 راهنمای کامل نصب و دانلود"), callback_data="adm_card_auto_webhook_guide")],
             [InlineKeyboardButton(text=tr("⬅️ بازگشت"), callback_data="adm_card_auto")],
-        ]
-        await safe_edit(call, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        ])
+        await safe_edit(call, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="HTML")
         await call.answer()
 
     @router.callback_query(F.data == "adm_card_auto_webhook_guide")

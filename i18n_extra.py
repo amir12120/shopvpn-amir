@@ -3472,6 +3472,7 @@ EXTRA_PHRASES.update({
     '👤 حساب کاربری': '👤 Account',
     '📚 آموزش\u200cها': '📚 Tutorials',
     '🆘 پشتیبانی': '🆘 Support',
+    '📋 کپی آدرس وب‌هوک سرور': '📋 Copy server webhook address',
 })
 
 EXTRA_DYNAMIC_PHRASES.extend([
