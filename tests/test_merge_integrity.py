@@ -183,6 +183,9 @@ UPSTREAM_FEATURE_MODULES = (
     "tenant_ctx.py",
     "userbot_login.py",
     "doctor_dns_ssh_setup.py",
+    # --- upstream 10.0.0: PayG alerts/cut/retention, socat port forwarding,
+    # --- per-panel delivery templates, gifted configs in "my orders" ---
+    "port_forward.py",
 )
 
 # Upstream keeps re-uploading these with a module-level `from i18n import tr`
@@ -2149,3 +2152,49 @@ def test_card_auto_webhook_address_is_shown_and_copyable():
     assert i18n_extra.EXTRA_PHRASES.get(
         "📋 کپی آدرس وب‌هوک سرور"
     ) == "📋 Copy server webhook address"
+
+def test_payg_alerts_retention_port_forward_and_delivery_templates_are_wired():
+    """4.43.0 sync (upstream 10.0.0): configurable PayG alerts/cut/retention,
+    the socat/iptables port-forward panel and per-panel delivery templates."""
+    payg = (ROOT / "payg.py").read_text(encoding="utf-8")
+    for needle in (
+        "def get_alert(db, n: int):",
+        "def cutoff_reached(db, user_id: int, balance: int) -> bool",
+        "def render_alert_text(db, n: int, used: int, initial: int, balance: int, percent: float)",
+        "async def retention_sweep(db, bot=None)",
+        "await retention_sweep(self.db, self.bot)",
+        'PAYG_NAME_KEY = "payg_name"',
+        'PAYG_RETENTION_KEY = "payg_retention_days"',
+        '"ALTER TABLE payg_accounts ADD COLUMN cut_at TEXT NOT NULL DEFAULT',
+    ):
+        assert needle in payg, f"payg.py lost {needle}"
+
+    admin = (ROOT / "admin_panel/server.py").read_text(encoding="utf-8")
+    for needle in (
+        '@app.get("/api/port-forwards")',
+        '@app.post("/api/port-forwards/{rule_id}/action")',
+        "import port_forward",
+        '@app.get("/api/products/delivery-text")',
+        "alert3_value: Optional[int] = None",
+    ):
+        assert needle in admin, f"admin_panel/server.py lost {needle}"
+    app_js = (ROOT / "admin_panel/static/app.js").read_text(encoding="utf-8")
+    assert 'id="pf-card"' in app_js
+    assert "bindPortForwards()" in app_js
+
+    pf = (ROOT / "port_forward.py").read_text(encoding="utf-8")
+    assert 'SETTING_KEY = "port_forward_rules"' in pf
+    assert "shopvpn-fwd-" in pf
+    assert "def build_apply(rule: dict) -> str:" in pf
+
+    delivery = (ROOT / "config_delivery.py").read_text(encoding="utf-8")
+    assert "def default_delivery_template(key: str) -> str:" in delivery
+    assert "def split_custom_delivery_text(text: str):" in delivery
+    keyboard = (ROOT / "keyboards.py").read_text(encoding="utf-8")
+    assert 'payg_custom_name = (db.get_setting("payg_name", "") or "").strip()' in keyboard
+    catalog = (ROOT / "db/catalog.py").read_text(encoding="utf-8")
+    assert "def get_gifted_in_configs(self, user_tg_id: int):" in catalog
+    user = (ROOT / "handlers_user.py").read_text(encoding="utf-8")
+    assert "db.get_gifted_in_configs(user_tg_id)" in user
+    assert (ROOT / "tests/test_port_forward.py").is_file()
+    assert (ROOT / "tests/test_threexui_stale_inbound.py").is_file()

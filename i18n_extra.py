@@ -3481,3 +3481,17 @@ EXTRA_DYNAMIC_PHRASES.extend([
     ('❌ ارسال پیام ناموفق بود: {x}', '❌ Sending the message failed: {x}'),
 ])
 
+# 4.43.0 sync: PayG alerts/retention, delivery templates, product delivery text.
+EXTRA_PHRASES.update({
+    'مهلت نگهداری باید بین ۰ تا ۳۶۵۰ روز باشد.': 'The retention period must be between 0 and 3650 days.',
+    'نوع آستانه هشدار باید درصد یا تومان باشد.': 'The alert threshold type must be percent or toman.',
+    'آستانه هشدار باید بین ۰ تا ۱۰۰ درصد باشد.': 'The alert threshold must be between 0 and 100 percent.',
+    'مبلغ آستانه هشدار باید عددی مثبت (یا ۰ برای خاموش) باشد.': 'The alert threshold amount must be a positive number (or 0 to turn it off).',
+    'قالب تحویل نمی‌تواند بیشتر از ۳۵۰۰ نویسه باشد.': 'The delivery template cannot be longer than 3500 characters.',
+})
+
+EXTRA_DYNAMIC_PHRASES.extend([
+    ('نام اشتراک نمی‌تواند بیشتر از {x} نویسه باشد.', 'The subscription name cannot be longer than {x} characters.'),
+    ('متن هشدار نمی‌تواند بیشتر از {x} نویسه باشد.', 'The alert text cannot be longer than {x} characters.'),
+    ('متن تحویل کانفیگ نمی‌تواند بیشتر از {x} نویسه باشد.', 'The config delivery text cannot be longer than {x} characters.'),
+])

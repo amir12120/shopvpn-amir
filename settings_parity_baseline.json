@@ -59,6 +59,7 @@
   "dsub_show_qr",
   "dsub_support_url",
   "dsub_theme",
+  "post_delivery_custom_text",
   "test_max_per_user"
  ]
 }
