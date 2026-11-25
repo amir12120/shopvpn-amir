@@ -7,14 +7,16 @@ from types import SimpleNamespace
 
 from force_join_channels import is_not_member_error, membership_from_status
 
-try:  # the CI unit job installs no aiogram; a full install has it
+try:
     from aiogram.types import Chat, Message, User
 
     import force_join as fj
 except ImportError:
     HAVE_AIOGRAM = False
 else:
-    HAVE_AIOGRAM = True
+    # tests/_aiogram_stub.py exposes a minimal fake aiogram in lean
+    # environments; the middleware flow needs the real Message API.
+    HAVE_AIOGRAM = hasattr(Message, "answer") and hasattr(Message, "model_construct")
 
 
 class FakeBot:
