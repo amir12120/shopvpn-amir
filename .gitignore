@@ -45,3 +45,7 @@ Thumbs.db
 
 # SSH node credentials key (auto-generated at runtime, never commit)
 .ssh_credential_key
+
+# SQLite sidecar files (WAL/SHM) created at runtime by the local imports
+*.db-wal
+*.db-shm

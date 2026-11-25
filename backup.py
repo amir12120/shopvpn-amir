@@ -368,7 +368,10 @@ def _raw_replace_db_file(src_path: str, target_path: str) -> str:
     try:
         shutil.copyfile(src_path, staged_path)
         _validate_sqlite_integrity(staged_path)
-        with open(staged_path, "rb") as stream:
+        # fsync needs a writable handle: a read-only one raises EBADF on
+        # Windows, which would abort every reseller restore there.
+        with open(staged_path, "r+b") as stream:
+            stream.flush()
             os.fsync(stream.fileno())
         for suffix in ("-wal", "-shm"):
             stale = target_path + suffix

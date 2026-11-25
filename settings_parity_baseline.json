@@ -7,6 +7,7 @@
   "card_photo_file_id",
   "card_sticky_minutes",
   "delivery_message_template_default",
+  "dsub_custom_template",
   "firebase_api_key",
   "firebase_app_id",
   "firebase_project_id",
