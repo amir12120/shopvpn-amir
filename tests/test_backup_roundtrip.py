@@ -7,13 +7,20 @@
 """
 import json
 import os
+import sys
 import tempfile
-import time
 import unittest
 import zipfile
 
 os.environ.setdefault("BOT_TOKEN", "123:test")
 os.environ.setdefault("OWNER_ID", "1")
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _aiogram_stub import install as _install_aiogram_stub  # noqa: E402
+
+# backup -> database pulls handlers that import aiogram; the lean CI job has no
+# aiogram, so install the fork's light stub first (real aiogram wins when present).
+_install_aiogram_stub()
 
 import backup  # noqa: E402
 import config  # noqa: E402
