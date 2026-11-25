@@ -2198,3 +2198,51 @@ def test_payg_alerts_retention_port_forward_and_delivery_templates_are_wired():
     assert "db.get_gifted_in_configs(user_tg_id)" in user
     assert (ROOT / "tests/test_port_forward.py").is_file()
     assert (ROOT / "tests/test_threexui_stale_inbound.py").is_file()
+
+def test_payg_emoji_daily_report_qr_fallback_and_reseller_db_paths_are_wired():
+    """4.44.0 sync: PayG emoji and daily report, the QR fallback on web
+    deliveries, the web-store catalog tree and reseller-database relocation."""
+    payg = (ROOT / "payg.py").read_text(encoding="utf-8")
+    for needle in (
+        'PAYG_EMOJI_KEY = "payg_emoji"',
+        "def get_payg_emoji(db=None) -> str:",
+        "def button_texts(db) -> list:",
+        "def build_payg_daily_report(db, day_key: str = None) -> str:",
+        '@router.message(F.text.func(lambda t: t in button_texts(db)))',
+    ):
+        assert needle in payg, f"payg.py lost {needle}"
+    keyboard = (ROOT / "keyboards.py").read_text(encoding="utf-8")
+    assert "_payg.get_payg_emoji(db)" in keyboard
+    admin = (ROOT / "admin_panel/server.py").read_text(encoding="utf-8")
+    for needle in (
+        "payg.PAYG_EMOJI_MAX",
+        "db.set_setting(payg.PAYG_EMOJI_KEY, emoji)",
+        '@app.post("/api/payg/settings")',
+    ):
+        assert needle in admin, f"admin_panel/server.py lost {needle}"
+
+    # The QR must survive a delivery template whose HTML Telegram rejects.
+    web_delivery = (ROOT / "admin_panel/config_delivery_web.py").read_text(encoding="utf-8")
+    assert "from config_delivery import qr_bytes_with_fallback" in web_delivery
+    assert "qr_bytes = await qr_bytes_with_fallback(link, db)" in web_delivery
+
+    # Web-store catalog tree: a parent category with only children is listed
+    # with its aggregated totals, parent id and readable path.
+    routes = (ROOT / "web_store/routes.py").read_text(encoding="utf-8")
+    assert "def _web_catalog_payload(db: Database) -> list:" in routes
+    assert "categories = await asyncio.to_thread(_web_catalog_payload, tenant.db)" in routes
+    for key in ('"total":', '"parent_id":', '"path":'):
+        assert key in routes, f"web_store/routes.py lost {key}"
+
+    # Reseller databases follow the install: absolute paths from the source
+    # server are relocated and a missing tenant DB is never silently created.
+    backup = (ROOT / "backup.py").read_text(encoding="utf-8")
+    assert "from config import RESELLER_DBS_DIR, resolve_reseller_db_path" in backup
+    assert "main_db.set_reseller_db_path(reseller_id, target_path)" in backup
+    main = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "resolve_reseller_db_path(rb[\"db_path\"])" in main
+    assert "main_db.set_reseller_db_path(rb[\"id\"], resolved_path)" in main
+
+    for name in ("test_payg_emoji.py", "test_qr_delivery_fallback.py",
+                 "test_web_catalog_tree.py", "test_panel_resync.py"):
+        assert (ROOT / "tests" / name).is_file()

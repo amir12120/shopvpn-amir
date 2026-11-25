@@ -3495,3 +3495,9 @@ EXTRA_DYNAMIC_PHRASES.extend([
     ('متن هشدار نمی‌تواند بیشتر از {x} نویسه باشد.', 'The alert text cannot be longer than {x} characters.'),
     ('متن تحویل کانفیگ نمی‌تواند بیشتر از {x} نویسه باشد.', 'The config delivery text cannot be longer than {x} characters.'),
 ])
+
+# 4.44.0 sync: PayG emoji, PayG daily report, web-delivery QR fallback,
+# web-store catalog tree and reseller-database relocation.
+EXTRA_DYNAMIC_PHRASES.extend([
+    ('ایموجی نمی\u200cتواند بیشتر از {x} نویسه باشد.', 'The emoji cannot be longer than {x} characters.'),
+])

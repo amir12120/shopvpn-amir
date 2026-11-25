@@ -1031,7 +1031,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
             f"\n🕒 {_jstr(_dt.now(), with_time=True)}"
         )
         try:
-            await report_router.send_text(bot, db, "signup", text, kb.user_quick_actions_kb(message.from_user.id))
+            await report_router.report(bot, db, "signup", text, kb.user_quick_actions_kb(message.from_user.id))
         except Exception:
             logging.getLogger("handlers_user").warning("ارسال کارت ثبت‌نام به گروه گزارش ناموفق بود.", exc_info=True)
 
@@ -1331,7 +1331,9 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
         # BlockedUserMiddleware ردیف را قبل از رسیدن به این هندلر می‌سازد.
         # دیپ‌لینک‌ها در state می‌مانند و بعد از انتخاب زبان (در cb_language) اجرا می‌شوند.
         if not await asyncio.to_thread(db.is_user_language_selected, message.from_user.id):
-            if not existing_user:
+            # existing_user همیشه truthy است (BlockedUserMiddleware ردیف را قبل از این هندلر
+            # می‌سازد)، پس تشخیص تازه‌بودن با پرچم اتمی signup_reported انجام می‌شود.
+            if await asyncio.to_thread(db.claim_signup_report, message.from_user.id):
                 await _notify_new_signup(message, bot)
             await state.update_data(
                 pending_welcome=True, pending_terms=False, pending_post_start_actions=post_start_actions
@@ -2121,6 +2123,56 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
         )
         return True
 
+    async def _order_panel_line(order, product=None) -> str:
+        """خطوط «🖥 پنل: ...» و «🌐 نود: ...» برای گزارش تاپیک خرید؛ اگر چیزی مشخص نباشد رشته‌ی خالی."""
+        def work():
+            panel_ids, node_ids = [], []
+
+            def add(bucket, value):
+                try:
+                    value = int(value or 0)
+                except (TypeError, ValueError):
+                    return
+                if value and value not in bucket:
+                    bucket.append(value)
+
+            if order["is_renewal"]:
+                if order["renewal_target_kind"] == "custom" and order["renewal_target_id"]:
+                    cc = db.get_custom_config_by_id(order["renewal_target_id"])
+                    add(panel_ids, cc["panel_server_id"] if cc else None)
+            elif order["is_custom_config"]:
+                add(panel_ids, order["custom_panel_server_id"])
+            elif product is not None:
+                add(panel_ids, product["provision_server_id"])
+                add(node_ids, product["provision_ssh_node_id"])
+                extra = db.get_product_extra_targets(product["id"])
+                for pid in extra.get("panels", []):
+                    add(panel_ids, pid)
+                for nid in extra.get("ssh", []):
+                    add(node_ids, nid)
+            panels = []
+            for pid in panel_ids:
+                row = db.get_panel_server(pid)
+                if row and row["name"]:
+                    panels.append(escape_html(str(row["name"])))
+            nodes = []
+            for nid in node_ids:
+                row = db.get_ssh_node(nid)
+                if row and row.get("name"):
+                    nodes.append(escape_html(str(row["name"])))
+            return panels, nodes
+
+        try:
+            panels, nodes = await asyncio.to_thread(work)
+        except Exception:
+            return ""
+        out = ""
+        if panels:
+            out += "🖥 پنل: " + "، ".join(panels) + "\n"
+        if nodes:
+            out += "🌐 نود: " + "، ".join(nodes) + "\n"
+        return out
+
     async def _notify_admins_of_order(bot: Bot, order_id: int, receipt_file_id: str = None, receipt_type: str = "photo", ai_note: str = None, ai_available: bool = True, ai_rejected_note: str = None):
         order = (await asyncio.to_thread(db.get_order, order_id))
 
@@ -2135,6 +2187,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
                 f"🆔 آیدی عددی: {order['user_id']}\n"
                 f"{purchase_info_line}"
                 f"🛠 نام کاربری: {order['custom_username']}\n"
+                f"{await _order_panel_line(order)}"
                 f"📶 حجم: {order['custom_volume_gb']} گیگابایت\n"
                 f"💰 قیمت پایه: {order['base_price']:,} تومان\n"
             )
@@ -2232,6 +2285,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
                 f"{purchase_info_line}"
                 f"🔄 نوع: {mode_label}\n"
                 f"🎯 هدف: {target_label} #{order['renewal_target_id']}\n"
+                f"{await _order_panel_line(order)}"
             )
             if order["renewal_add_volume_gb"]:
                 caption += f"🔋 افزایش حجم: {order['renewal_add_volume_gb']} گیگابایت\n"
@@ -2284,6 +2338,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
             f"{purchase_info_line}"
             f"📦 محصول: {product['name']}"
             + (f" × {quantity}\n" if quantity > 1 else "\n")
+            + await _order_panel_line(order, product)
             + f"💰 قیمت پایه: {order['base_price']:,} تومان\n"
         )
         if order["user_limit"]:
@@ -3680,7 +3735,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
             link = _item_sub_link(item)
             if not link:
                 return "⚠️ این سرویس لینکی ندارد.", None
-            shown = await asyncio.to_thread(dedicated_sub.dedicated_link_for_upstream, db, link)
+            shown = await _shown_item_link(item, link)
             await bot.send_message(
                 user.id, f"🔗 <code>{html.escape(str(shown))}</code>", parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
@@ -4921,9 +4976,32 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
             return item["custom"]["subscription_url"] or ""
         return ""
 
+    async def _shown_item_link(item, link: str) -> str:
+        """لینکی که به کاربر نشان داده می‌شود (ساب اختصاصی/مرکزی در صورت فعال بودن).
+        برای سرویس‌های custom بر اساس شناسه‌ی سرویس ساخته می‌شود (نه جستجو با آدرس پنل)
+        تا با مینی‌اپ/وب‌استور یکسان باشد و لینک پنل اصلی لو نرود."""
+        try:
+            if item["kind"] == "custom":
+                return await asyncio.to_thread(dedicated_sub.display_link, db, item["custom"]["id"], link)
+            return await asyncio.to_thread(dedicated_sub.dedicated_link_for_upstream, db, link)
+        except Exception:
+            logging.getLogger("handlers_user").exception("ساخت لینک نمایشی سرویس ناموفق بود؛ لینک اصلی نمایش داده می‌شود.")
+            return link
+
     def _item_has_individual_links(item) -> bool:
         link = _item_sub_link(item)
         return str(link).startswith(("http://", "https://"))
+
+    async def _sub_info_block(link) -> str:
+        """متن مصرف/انقضا از روی لینک ساب. هر خطایی (پنل خاموش، هدر ناقص، دیتای استخر
+        مشترک ناقص و...) فقط همین بخش را به یک پیام کوتاه تبدیل می‌کند و صفحه‌ی
+        جزئیات سرویس را خراب نمی‌کند."""
+        try:
+            info = await fetch_sub_info(link)
+            return format_sub_info_fa(info)
+        except Exception:
+            logging.getLogger("handlers_user").exception("دریافت/قالب‌بندی اطلاعات مصرف ساب ناموفق بود")
+            return "⚠️ دریافت اطلاعات مصرف از سرور امکان‌پذیر نبود."
 
     async def _my_orders_item_text(item) -> str:
         kind = item["kind"]
@@ -4938,9 +5016,9 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
                 text += f"🗓 تاریخ خرید: {to_jalali_str(o['created_at'], with_time=True)}\n"
             if cfg["expires_at"]:
                 text += f"⏳ انقضا: {to_jalali_str(cfg['expires_at'], with_time=True)}\n"
-            text += f"🔗 `{cfg['link']}`\n"
-            info = await fetch_sub_info(cfg["link"])
-            text += f"\n{format_sub_info_fa(info)}"
+            shown_cfg_link = await _shown_item_link(item, cfg["link"])
+            text += f"🔗 `{shown_cfg_link}`\n"
+            text += f"\n{await _sub_info_block(cfg['link'])}"
             if str(cfg["link"]).startswith(("http://", "https://")):
                 text += "\n\n📋 برای دیدن کانفیگ‌های تکی این لینک، دکمه‌ی «کانفیگ‌های تکی» پایین را بزنید."
             return text
@@ -4999,7 +5077,6 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
                 lines.append(f"⏳ انقضا: {escape_html(to_jalali_str(account['expires_at'], with_time=True))}")
             if account.get("node_subscription_id"):
                 try:
-                    import dedicated_sub
                     node_sub_link = await asyncio.to_thread(dedicated_sub.link_for_node_subscription, db, int(account["node_subscription_id"]))
                     if node_sub_link:
                         lines.append(f"🔗 لینک اشتراک اختصاصی: <code>{escape_html(node_sub_link)}</code>")
@@ -5052,12 +5129,19 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
                     )
             if item.get("payg"):
                 import payg as _payg
-                st = await asyncio.to_thread(_payg.payg_status, db, cc["user_id"])
-                with db._get_conn() as conn:
-                    snap = conn.execute(
-                        "SELECT used_bytes FROM usage_snapshots WHERE service_kind='vpn' AND service_id=?",
-                        (f"custom_config:{int(cc['id'])}",),
-                    ).fetchone()
+                try:
+                    st = await asyncio.to_thread(_payg.payg_status, db, cc["user_id"])
+                except Exception:
+                    logging.getLogger("handlers_user").exception("payg_status ناموفق بود")
+                    st = {}
+                try:
+                    with db._get_conn() as conn:
+                        snap = conn.execute(
+                            "SELECT used_bytes FROM usage_snapshots WHERE service_kind='vpn' AND service_id=?",
+                            (f"custom_config:{int(cc['id'])}",),
+                        ).fetchone()
+                except Exception:
+                    snap = None
                 svc_gb = (int(snap["used_bytes"] or 0) / (1024 ** 3)) if snap else 0.0
                 enabled_now = (cc["enabled"] if "enabled" in cc.keys() else 1) == 1
                 text = (
@@ -5084,11 +5168,20 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
                 text += "⏳ انقضا: شروع از اولین اتصال\n"
             elif cc["expires_at"]:
                 text += f"📅 انقضا: {to_jalali_str(cc['expires_at'], with_time=True)}\n"
+            if not sub_url:
+                # سرویس بدون لینک پنل (مثلاً چندپنلی/نودی): اگر ساب اختصاصی/مرکزی فعال است همان را نشان بده
+                try:
+                    sub_url = await asyncio.to_thread(dedicated_sub.link_for_config, db, cc["id"]) or sub_url
+                except Exception:
+                    logging.getLogger("handlers_user").debug("ساخت لینک ساب برای سرویس بدون لینک پنل ناموفق بود", exc_info=True)
             if sub_url:
-                shown_url = await asyncio.to_thread(dedicated_sub.dedicated_link_for_upstream, db, sub_url)
+                try:
+                    shown_url = await asyncio.to_thread(dedicated_sub.display_link, db, cc["id"], sub_url)
+                except Exception:
+                    logging.getLogger("handlers_user").exception("ساخت لینک اشتراک اختصاصی ناموفق بود؛ لینک اصلی نمایش داده می‌شود.")
+                    shown_url = sub_url
                 text += f"🔗 `{shown_url}`\n"
-                info = await fetch_sub_info(sub_url)
-                text += f"\n{format_sub_info_fa(info)}"
+                text += f"\n{await _sub_info_block(sub_url)}"
                 if str(sub_url).startswith(("http://", "https://")):
                     text += "\n\n📋 برای دیدن کانفیگ‌های تکی این لینک، دکمه‌ی «کانفیگ‌های تکی» پایین را بزنید."
             return text
@@ -5718,7 +5811,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
             await call.answer(db.get_text('handlers_user.auto_4e32a60a', 'لینکی برای ساخت کیوآر پیدا نشد.'), show_alert=True)
             return
         await call.answer()
-        link = await asyncio.to_thread(dedicated_sub.dedicated_link_for_upstream, db, link)
+        link = await _shown_item_link(item, link)
         photo = BufferedInputFile(build_qr_bytes(link, db=db), filename="config_qr.png")
         await bot.send_photo(call.from_user.id, photo, caption=tr("⬜ کیوآر کانفیگ شما"))
 
@@ -9836,7 +9929,7 @@ def create_user_router(db, is_main_bot: bool = True, bot_manager=None) -> Router
         if not link:
             await message.answer(db.get_text('handlers_user.auto_1e7d994f', '⛔️ لینکی برای ساخت کیوآر پیدا نشد.'))
             return
-        link = await asyncio.to_thread(dedicated_sub.dedicated_link_for_upstream, db, link)
+        link = await _shown_item_link(item, link)
         photo = BufferedInputFile(build_qr_bytes(link, db=db), filename="config_qr.png")
         await bot.send_photo(user_id, photo, caption=tr("⬜ کیوآر کانفیگ شما"))
 
