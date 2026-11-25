@@ -3501,3 +3501,15 @@ EXTRA_DYNAMIC_PHRASES.extend([
 EXTRA_DYNAMIC_PHRASES.extend([
     ('ایموجی نمی\u200cتواند بیشتر از {x} نویسه باشد.', 'The emoji cannot be longer than {x} characters.'),
 ])
+
+# 4.45.0 sync: web-panel product assignment and chunked sub-page template upload.
+EXTRA_PHRASES.update({
+    'محصول یافت نشد یا غیرفعال است.': 'Product not found or inactive.',
+    'این محصول به پنل یا نود وصل نیست و بانک کانفیگ ندارد؛ از اینجا قابل اختصاص نیست.':
+        'This product is not linked to a panel or node and has no config bank, so it cannot be assigned here.',
+    'اندازه‌ی هر تکه بیش از حد مجاز است.': 'Each chunk exceeds the allowed size.',
+    'ساب پیدا نشد.': 'Subscription profile not found.',
+})
+EXTRA_DYNAMIC_PHRASES.extend([
+    ('موجودی بانک کانفیگ کافی نیست (موجودی: {x}).', 'Config bank stock is not enough (in stock: {x}).'),
+])

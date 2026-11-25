@@ -1590,7 +1590,7 @@ async function renderLinksSSL() {
       <pre class="mono" id="lm-output" style="display:none;white-space:pre-wrap;margin-top:10px"></pre>
     </div>`);
   bindPortForwards();
-  const val = id => document.getElementById(id)?.value?.trim() || '';
+  const val = sel => document.querySelector(sel)?.value?.trim() || '';
   $('#lm-save').onclick = async () => {
     const btn = $('#lm-save'); btn.disabled = true;
     try {
@@ -4550,6 +4550,7 @@ function renderUserAdminOps(u) {
       ${b('discount', '🎁 کد تخفیف اختصاصی')}
       ${b('invoice', '🧾 فاکتور کلی سرویس‌ها')}
       ${b('invoice-one', '🧾 فاکتور تکی')}
+      ${b('assign-product', '📦 اختصاص محصول به کاربر', 'btn-primary')}
       ${b('wgift-resend', '🎁 ارسال مجدد اشتراک هدیه عضویت')}
     </div>`;
 }
@@ -4588,6 +4589,7 @@ function wireUserAdminOps(body, tgId, close, ov) {
         toast(`فاکتور ارسال شد (${fmt(r.items)} سرویس، جمع ${fmt(r.total)} تومان).`);
       }
       else if (op === 'invoice-one') openUserInvoicePicker(tgId);
+      else if (op === 'assign-product') await openAssignProductModal(tgId, refresh);
       else if (op === 'wgift-resend') {
         const choices = await apiGet('/welcome-gift/choices');
         if (!choices.length) { toast('هیچ گزینه‌ی هدیه‌ای تعریف نشده است.', true); return; }
@@ -4604,6 +4606,47 @@ function wireUserAdminOps(body, tgId, close, ov) {
       }
     } catch (e) { handleErr(e); }
   }));
+}
+
+async function openAssignProductModal(tgId, onDone) {
+  const items = await apiGet(`/users/${tgId}/assignable-products`);
+  if (!items.length) { toast('محصول قابل اختصاصی وجود ندارد (محصولی فعال، وصل‌شده به پنل/نود یا با موجودی بانک کانفیگ).', true); return; }
+  items.sort((x, y) => Number(x.owned) - Number(y.owned));
+  const label = it => `${it.category ? it.category + ' › ' : ''}${it.name}${it.stock !== null ? ` — موجودی ${it.stock}` : ''}${it.owned ? ' ✔ قبلاً دارد' : ''}`;
+  openModal(`اختصاص محصول به کاربر ${tgId}`, `
+    <div class="form-grid">
+      <label class="field"><span>جستجوی محصول</span><input class="input" id="ap-search" type="text" placeholder="نام محصول یا دسته..."></label>
+      <label class="field"><span>محصول</span><select class="input" id="ap-product" size="8"></select></label>
+      <label class="field"><span>تعداد</span><input class="input" id="ap-qty" type="number" min="1" max="20" value="1"></label>
+      <div class="hint-text">محصول رایگان و مثل یک خرید تاییدشده برای کاربر ساخته/ارسال می‌شود. محصولاتی که کاربر قبلاً ندارد بالای لیست‌اند.</div>
+      <button class="btn btn-primary" id="ap-go">اختصاص محصول</button>
+    </div>`, (body, close) => {
+    const sel = $('#ap-product', body);
+    const fill = () => {
+      const q = $('#ap-search', body).value.trim().toLowerCase();
+      const list = items.filter(it => !q || label(it).toLowerCase().includes(q));
+      sel.innerHTML = list.map(it => `<option value="${it.id}">${esc(label(it))}</option>`).join('');
+      if (list.length) sel.selectedIndex = 0;
+    };
+    fill();
+    $('#ap-search', body).addEventListener('input', fill);
+    const go = $('#ap-go', body);
+    go.addEventListener('click', async () => {
+      const productId = Number(sel.value);
+      const quantity = Number($('#ap-qty', body).value || 1);
+      if (!productId) { toast('یک محصول انتخاب کنید.', true); return; }
+      if (!Number.isInteger(quantity) || quantity < 1 || quantity > 20) { toast('تعداد باید بین ۱ تا ۲۰ باشد.', true); return; }
+      const it = items.find(x => x.id === productId);
+      if (it && it.owned && !confirm('این کاربر قبلاً این محصول را دریافت کرده است. دوباره اختصاص داده شود؟')) return;
+      go.disabled = true;
+      try {
+        await apiPost(`/users/${tgId}/assign-product`, { product_id: productId, quantity });
+        toast('محصول اختصاص داده شد و برای کاربر ارسال می‌شود.');
+        close();
+        if (onDone) onDone();
+      } catch (e) { go.disabled = false; handleErr(e); }
+    });
+  });
 }
 
 function openUserDiscountModal(tgId) {
@@ -12738,16 +12781,26 @@ function bindSettingsGroupEvents(root) {
       if (!file) return;
       const ta = $('textarea[data-key="dsub_custom_template"]', root);
       if (!ta) return;
-      if (file.size > 2 * 1024 * 1024) { toast('حجم فایل بیش از ۲ مگابایت است.'); return; }
+      if (file.size > SUB_TPL_MAX_BYTES) { toast('حجم فایل بیش از ۲ مگابایت است.', true); return; }
       try {
         const text = await file.text();
-        if (!text.includes('__DATA__')) { toast('این فایل شامل __DATA__ نیست؛ قالب معتبر نیست (راهنمای متغیرها را ببین).'); return; }
+        if (!text.includes('__DATA__')) { toast('این فایل شامل __DATA__ نیست؛ قالب معتبر نیست (راهنمای متغیرها را ببین).', true); return; }
         if (ta.value.trim() && !confirm('متن فعلی قالب با محتوای فایل جایگزین شود؟')) return;
+        const frame = $('#sub-page-preview-frame', root);
+        const profileId = frame && frame.dataset.profile ? Number(frame.dataset.profile) : 0;
+        btn.disabled = true;
+        toast('در حال آپلود قالب...');
+        await uploadSubTemplate(text, profileId);
         ta.value = text;
+        ta.defaultValue = text;
         ta.dispatchEvent(new Event('input', { bubbles: true }));
-        toast('فایل در کادر قرار گرفت؛ برای ثبت «ذخیره تغییرات» را بزن.');
+        ta.dispatchEvent(new CustomEvent('sub-tpl-saved', { bubbles: true }));
+        toast('قالب آپلود و ذخیره شد.');
+        if (frame) { try { frame.contentWindow.location.reload(); } catch (e) {} }
       } catch (e) {
         handleErr(e);
+      } finally {
+        btn.disabled = false;
       }
     });
   });
@@ -12836,6 +12889,35 @@ function bindSettingsGroupEvents(root) {
   });
 }
 
+const SUB_TPL_MAX_BYTES = 2 * 1024 * 1024;
+const SUB_TPL_CHUNK_BYTES = 192 * 1024;
+const SUB_TPL_INLINE_BYTES = 256 * 1024;
+
+async function uploadSubTemplate(text, profileId) {
+  const blob = new Blob([text], { type: 'text/html;charset=utf-8' });
+  if (blob.size > SUB_TPL_MAX_BYTES) throw new Error('حجم قالب بیش از حد مجاز است (حداکثر ۲ مگابایت).');
+  const total = Math.max(1, Math.ceil(blob.size / SUB_TPL_CHUNK_BYTES));
+  const uid = (window.crypto && crypto.randomUUID ? crypto.randomUUID() : Date.now() + '-' + Math.random().toString(36).slice(2)).replace(/[^A-Za-z0-9_-]/g, '');
+  let res = null;
+  for (let i = 0; i < total; i++) {
+    for (let attempt = 0; ; attempt++) {
+      const fd = new FormData();
+      fd.append('upload_id', uid);
+      fd.append('index', String(i));
+      fd.append('total', String(total));
+      if (profileId) fd.append('profile_id', String(profileId));
+      fd.append('chunk', blob.slice(i * SUB_TPL_CHUNK_BYTES, (i + 1) * SUB_TPL_CHUNK_BYTES), 'part');
+      try { res = await apiMultipart('/settings/sub-page-template/chunk', fd); break; }
+      catch (e) {
+        if (attempt >= 2 || (e.status && e.status < 500)) throw e;
+        await new Promise(r => setTimeout(r, 700 * (attempt + 1)));
+      }
+    }
+  }
+  if (!res || !res.done) throw new Error('آپلود قالب کامل نشد؛ دوباره تلاش کن.');
+  return res;
+}
+
 async function collectAndSaveSettings(root, btn) {
   const items = [];
   $$('[data-key][data-type]:not(.switch)', root).forEach(el => items.push({ key: el.dataset.key, value: el.value }));
@@ -12864,7 +12946,15 @@ async function collectAndSaveSettings(root, btn) {
   btn.disabled = true;
   const prevTxt = btn.textContent; btn.textContent = 'در حال ذخیره...';
   try {
+    const tplArea = $('textarea[data-key="dsub_custom_template"]', root);
     for (const item of items) {
+      if (item.key === 'dsub_custom_template' && tplArea) {
+        if (item.value === tplArea.defaultValue) continue;
+        if (item.value && new Blob([item.value]).size > SUB_TPL_INLINE_BYTES) await uploadSubTemplate(item.value, 0);
+        else await apiPost('/settings', item);
+        tplArea.defaultValue = item.value;
+        continue;
+      }
       await apiPost('/settings', item);
     }
     toast('تنظیمات ذخیره شد.');
@@ -14966,22 +15056,66 @@ async function bindDsubProfiles(root) {
         };
         paint(key);
       });
+      const synced = {};
+      const tplEl = $('textarea[data-key="dsub_custom_template"]', body);
+      if (tplEl) tplEl.addEventListener('sub-tpl-saved', () => {
+        const k = 'dsub_custom_template';
+        synced[k] = readVal(tplEl); initial[k] = synced[k];
+        own.add(k); reset.delete(k); paint(k);
+      });
       $('#dsp-set-save', body).onclick = async () => {
         const values = {};
         els().forEach(el => {
           const key = el.dataset.key;
           if (readVal(el) !== initial[key]) own.add(key);
+          if (key in synced && readVal(el) === synced[key]) return;
           if (own.has(key) && !reset.has(key)) values[key] = readVal(el);
         });
         for (const k of ['dsub_accent_color', 'dsub_secondary_color']) { if (k in values) { const h = normalizeHex(values[k]); if (!h) { toast('رنگ نامعتبر است؛ مثل #6366F1 بنویس.', true); return; } values[k] = h; } }
+        const saveBtn = $('#dsp-set-save', body);
+        const previousLabel = saveBtn.textContent;
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'در حال ذخیره...';
         try {
-          await apiPut(`/dsub-profiles/${p.id}/settings`, { values, reset: [...reset] });
-          toast('تنظیمات ساب ذخیره شد.');
-          els().forEach(el => { initial[el.dataset.key] = readVal(el); });
+          const tplVal = values.dsub_custom_template;
+          if (tplVal && new Blob([tplVal]).size > SUB_TPL_INLINE_BYTES) {
+            await uploadSubTemplate(tplVal, p.id);
+            delete values.dsub_custom_template;
+            synced.dsub_custom_template = tplVal;
+          }
+
+          // ارسال مستقل کلیدهای اختصاصی و کلیدهای بازگشتی؛ سپس دریافت مجدد از DB
+          // تا وضعیت دکمه‌ها و مقادیر فرم دقیقاً با داده‌ی ذخیره‌شده هماهنگ شود.
+          const payload = { values, reset: [...reset] };
+          const saved = await apiPut(`/dsub-profiles/${p.id}/settings`, payload);
+          if (!saved || saved.ok !== true) throw new Error('سرور ذخیره تنظیمات را تأیید نکرد.');
+          const fresh = await apiGet(`/dsub-profiles/${p.id}/settings`);
+          if (!fresh || !fresh.settings || !Array.isArray(fresh.own_keys)) {
+            throw new Error('ذخیره ارسال شد، اما تأیید مجدد تنظیمات از سرور ناموفق بود.');
+          }
+
+          // وضعیت واقعی ذخیره‌شده مبنای فرم بعدی است، نه وضعیت موقت مرورگر.
+          own.clear();
+          fresh.own_keys.forEach(k => own.add(k));
           reset.clear();
+          els().forEach(el => {
+            const key = el.dataset.key;
+            if (!(key in fresh.settings)) return;
+            const value = String(fresh.settings[key] ?? '');
+            if (el.classList.contains('switch')) el.dataset.on = value === '1' ? '1' : '0';
+            else el.value = value;
+            initial[key] = readVal(el);
+          });
           Object.keys(badges).forEach(paint);
-          const fr = $('#sub-page-preview-frame', body); if (fr) { try { fr.contentWindow.location.reload(); } catch (e) {} }
-        } catch (e) { handleErr(e); }
+          toast('تنظیمات این ساب با موفقیت ذخیره و تأیید شد.');
+          const fr = $('#sub-page-preview-frame', body);
+          if (fr) { try { fr.contentWindow.location.reload(); } catch (e) {} }
+        } catch (e) {
+          handleErr(e);
+        } finally {
+          saveBtn.disabled = false;
+          saveBtn.textContent = previousLabel;
+        }
       };
     }, { wide: true });
   };

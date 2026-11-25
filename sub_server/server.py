@@ -39,6 +39,7 @@ from starlette.routing import Route
 import dedicated_sub as ds
 import panel_resync
 from panel_providers import get_provider
+from panel_providers.base import build_connector
 from config import DB_PATH, OWNER_ID
 from database import Database
 
@@ -104,6 +105,37 @@ async def _http_get(url: str, ua: str) -> Tuple[int, Dict[str, str], bytes]:
         if len(body) > MAX_BODY:
             raise ValueError("upstream response too large")
         return resp.status, {k.lower(): v for k, v in resp.headers.items()}, body
+
+
+async def _config_http_get(cc, url: str, ua: str) -> Tuple[int, Dict[str, str], bytes]:
+    """دریافت ساب با تنظیمات اتصال همان پنل؛ مخصوصاً SOCKS و گواهی‌های W-UI.
+
+    Providerهای پنل برای API از SOCKS و SSL غیرسخت‌گیرانه استفاده می‌کنند، اما
+    fetch عمومی ساب قبلاً این تنظیمات را نادیده می‌گرفت و مستقیم با SSL سخت‌گیرانه وصل می‌شد.
+    این اختلاف باعث می‌شد API پنل در دسترس باشد ولی لینک اختصاصی 502 بدهد.
+    """
+    server = None
+    try:
+        server = await asyncio.to_thread(panel_resync._server_for, db, cc)
+    except Exception:
+        server = None
+    if not server or str(server["panel_type"] or "").lower() != "wui":
+        return await _http_get(url, ua)
+    # فقط W-UI: همان سیاست SSL و SOCKS مورد استفاده‌ی WUIProvider
+    connector = build_connector(server, ssl=False)
+    import aiohttp
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+        async with session.get(url, headers={"User-Agent": (ua or PAGE_UA)[:200], "Accept": "*/*"},
+                              allow_redirects=True, max_redirects=5) as resp:
+            body = await resp.content.read(MAX_BODY + 1)
+            if len(body) > MAX_BODY:
+                raise ValueError("upstream response too large")
+            return resp.status, {k.lower(): v for k, v in resp.headers.items()}, body
+
+
+def _config_fetcher(cc):
+    return lambda url, ua: _config_http_get(cc, url, ua)
 
 
 class UpstreamCache:
@@ -284,7 +316,7 @@ async def _linked_panel_uris(cc, query: Dict[str, str], ua: str, ttl: int) -> Li
     return out
 
 
-async def _mergeable_primary(up, upstream_url: str, ttl: int, extra_uris) -> "Upstream":
+async def _mergeable_primary(up, upstream_url: str, ttl: int, extra_uris, fetcher=None) -> "Upstream":
     """اگر کلاینت فرمت غیرلینکی (Clash/JSON) خواسته و سرویس چندپنلی است، ساب پنل اصلی هم به‌صورت لیست لینک گرفته می‌شود
     تا ادغام با پنل‌های اضافه ممکن باشد (وگرنه فقط پنل اول برمی‌گشت)."""
     if not extra_uris or up is None or up.status != 200 or not up.body:
@@ -292,7 +324,7 @@ async def _mergeable_primary(up, upstream_url: str, ttl: int, extra_uris) -> "Up
     if ds.parse_body(up.body).kind == "uris" or ds.extract_uris(up.body):
         return up
     try:
-        alt = await cache.get(upstream_url, PAGE_UA, ttl)
+        alt = await cache.get(upstream_url, PAGE_UA, ttl, fetcher=fetcher)
     except Exception:
         return up
     if alt.status == 200 and alt.body and ds.extract_uris(alt.body):
@@ -327,7 +359,15 @@ async def _wui_bundle(cc, ttl: float = _WUI_TTL) -> Optional[dict]:
     if server is None:
         return None
     cid = int(cc["id"])
-    key = (cid, str(cc["username"]))
+    # مقصدهای انتخاب‌شده‌ی محصول باید در تمام مسیرهای اشتراک نیز اعمال شوند.
+    # در غیر این صورت W-UI با مجموعه‌ی interfaceهای قالب/کاربر نمونه‌ی پنل
+    # کار می‌کند و ZIP تمام حساب‌های آن مجموعه را برمی‌گرداند.
+    try:
+        effective_server = panel_resync._effective_server(server, cc)
+    except Exception:
+        effective_server = server
+    target_snapshot = cc["panel_target_config"] if "panel_target_config" in cc.keys() else None
+    key = (cid, str(cc["username"]), str(target_snapshot or ""))
     hit = _wui_cache.get(key)
     now = time.monotonic()
     if hit and now - hit[0] < ttl:
@@ -341,12 +381,23 @@ async def _wui_bundle(cc, ttl: float = _WUI_TTL) -> Optional[dict]:
             return list(hit[1].get("vpn") or []) if hit else []
 
     try:
-        provider = get_provider(server)
+        provider = get_provider(effective_server)
+        # W-UI's /clients/{id}/configs endpoint intentionally returns every
+        # account currently attached to that client. Reconcile the client to
+        # the product snapshot first, otherwise the first/sample user's panel
+        # template can leak additional interfaces into the subscription ZIP.
+        # Legacy services without a saved product snapshot remain untouched.
+        if (getattr(provider, "resync_needs_snapshot", False)
+                and panel_resync._snapshot_ok(provider, cc)):
+            await provider.resync_user_template(cc["username"])
         files, info, vpn = await asyncio.gather(
             provider.get_config_files(cc["username"]), provider.get_sub_info(cc["username"]), _logins(provider))
     except Exception as exc:
         log.warning("wui bundle failed cc=%s: %s", cid, type(exc).__name__)
-        if hit and now - hit[0] < STALE_MAX_AGE:
+        # A stale bundle is unsafe when this service has a product snapshot:
+        # it may contain interfaces that the product did not purchase.
+        has_product_snapshot = bool(target_snapshot)
+        if hit and now - hit[0] < STALE_MAX_AGE and not has_product_snapshot:
             return hit[1]
         return {"wg": [], "ovpn": [], "vpn": [], "info": {}, "live": False}
     wg, ovpn = [], []
@@ -562,12 +613,12 @@ async def sub_endpoint(request: Request) -> Response:
     # --- حالت خاموش: عبور خام بدون هیچ تغییری (لینک‌های قبلی کاربران قطع نمی‌شوند)
     if not enabled:
         try:
-            up = await cache.get(upstream_url, ua, ttl)
+            up = await cache.get(upstream_url, ua, ttl, fetcher=_config_fetcher(cc))
         except Exception:
             up = None
         extra_uris = await asyncio.to_thread(ds.ssh_uris_for_config, db, cc["id"], cc)
         extra_uris = list(extra_uris) + await _linked_panel_uris(cc, query, ua, ttl)
-        up = await _mergeable_primary(up, upstream_url, ttl, extra_uris)
+        up = await _mergeable_primary(up, upstream_url, ttl, extra_uris, fetcher=_config_fetcher(cc))
         if extra_uris:
             primary_ok = up is not None and up.status == 200 and bool(up.body)
             merged = ds.merge_extra_uris(up.body if primary_ok else b"", extra_uris)
@@ -597,7 +648,7 @@ async def sub_endpoint(request: Request) -> Response:
         if dns is not None:
             return await _dns_page(request, cc, dns, settings, brand, page_url, ttl)
         try:
-            up = await cache.get(_forward_query(cc["subscription_url"], {}), PAGE_UA, ttl)
+            up = await cache.get(_forward_query(cc["subscription_url"], {}), PAGE_UA, ttl, fetcher=_config_fetcher(cc))
         except Exception:
             up = Upstream(0, {}, b"", fresh=False)
         ok = up.status == 200 and bool(up.body)
@@ -610,7 +661,7 @@ async def sub_endpoint(request: Request) -> Response:
         uris = ds.extract_uris(up.body) if ok else []
         if not uris and up.status == 200 and await panel_resync.heal_config(db, cc):
             try:
-                up = await cache.get(_forward_query(cc["subscription_url"], {}), PAGE_UA, ttl, force=True)
+                up = await cache.get(_forward_query(cc["subscription_url"], {}), PAGE_UA, ttl, force=True, fetcher=_config_fetcher(cc))
             except Exception:
                 pass
             ok = up.status == 200 and bool(up.body)
@@ -651,12 +702,12 @@ async def sub_endpoint(request: Request) -> Response:
 
     # --- اپ VPN
     try:
-        up = await cache.get(upstream_url, ua, ttl)
+        up = await cache.get(upstream_url, ua, ttl, fetcher=_config_fetcher(cc))
     except Exception:
         up = Upstream(0, {}, b"", fresh=False)
     if up.status == 200 and not ds.extract_uris(up.body or b"") and await panel_resync.heal_config(db, cc):
         try:
-            up = await cache.get(upstream_url, ua, ttl, force=True)
+            up = await cache.get(upstream_url, ua, ttl, force=True, fetcher=_config_fetcher(cc))
         except Exception:
             pass
     if up.status == 200 and up.fresh:
@@ -672,7 +723,7 @@ async def sub_endpoint(request: Request) -> Response:
         )
     extra_uris = await asyncio.to_thread(ds.ssh_uris_for_config, db, cc["id"], cc)
     extra_uris = list(extra_uris) + await _linked_panel_uris(cc, query, ua, ttl)
-    up = await _mergeable_primary(up, upstream_url, ttl, extra_uris)
+    up = await _mergeable_primary(up, upstream_url, ttl, extra_uris, fetcher=_config_fetcher(cc))
     reply = ds.compose_client_reply(up.status, up.headers, up.body, cc, settings, brand, page_url,
                                     extra_uris=extra_uris)
     if reply is None:

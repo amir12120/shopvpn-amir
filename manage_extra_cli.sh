@@ -441,3 +441,80 @@ update_web_store() {
         echo -e "  ${RED}$(t install_failed "$STORE_SERVICE")${RESET}"
     fi
 }
+
+# ---------------------------------------------------------------------------
+# Telegram accounts (userbot + leak scanner)
+# The mother project exposes these logins from its own CLI; this fork had only
+# the in-bot flow, while userbot.py already ships login/logout/status commands.
+# Same capability with no extra footprint: telethon is already a requirement
+# and a session file is a few KB.
+# ---------------------------------------------------------------------------
+userbot_cli() {
+    ( cd "$INSTALL_DIR" && source venv/bin/activate && python userbot.py "$@"; deactivate )
+}
+
+ub_login() {   # ub_login <login|login-scanner>
+    if [ ! -f "$INSTALL_DIR/userbot.py" ] || [ ! -x "$INSTALL_DIR/venv/bin/python3" ]; then
+        echo -e "${RED}$(t ub_need_install)${RESET}"
+        return 1
+    fi
+    ( cd "$INSTALL_DIR" && source venv/bin/activate
+      if ! python -c 'import telethon' >/dev/null 2>&1; then
+          echo -e "${CYAN}$(t ub_installing_telethon)${RESET}"
+          pip install -q --no-cache-dir --disable-pip-version-check "telethon>=1.36.0"
+      fi
+      python userbot.py "$1" )
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}$(t ub_login_failed)${RESET}"
+        return 1
+    fi
+    rm -rf "$HOME/.cache/pip" 2>/dev/null || true
+    echo -e "${GREEN}$(t ub_login_ok)${RESET}"
+    restart_service_and_wait "$SERVICE_NAME" >/dev/null 2>&1 ||         echo -e "${YELLOW}$(t ub_restart_failed)${RESET}"
+    return 0
+}
+
+setup_userbot() { ub_login login; }
+
+setup_scanner_account() { ub_login login-scanner; }
+
+remove_userbot() {
+    userbot_cli logout
+    rm -f "$INSTALL_DIR/userbot_session.json" 2>/dev/null || true
+    echo -e "${GREEN}$(t ub_logout_ok)${RESET}"
+}
+
+remove_scanner_account() {
+    userbot_cli logout-scanner
+    rm -f "$INSTALL_DIR/leak_session.json" 2>/dev/null || true
+    echo -e "${GREEN}$(t ub_scanner_logout_ok)${RESET}"
+}
+
+show_accounts_status() {
+    echo -e "  ${CYAN}$(t ub_status_userbot)${RESET} $(userbot_cli status 2>/dev/null | head -1)"
+    echo -e "  ${CYAN}$(t ub_status_scanner)${RESET} $(userbot_cli status-scanner 2>/dev/null | head -1)"
+}
+
+telegram_accounts_menu() {
+    local ch
+    while true; do
+        echo ""
+        echo -e "${BOLD}$(t sec_accounts)${RESET}"
+        show_accounts_status
+        echo ""
+        echo "  1) $(t menu_ub_setup)"
+        echo "  2) $(t menu_ub_scanner)"
+        echo "  3) $(t menu_ub_logout)"
+        echo "  4) $(t menu_ub_scanner_logout)"
+        echo "  0) $(t menu_back)"
+        read -rp "$(t enter_choice_prompt) " ch || return 0
+        case "$ch" in
+            1) setup_userbot ;;
+            2) setup_scanner_account ;;
+            3) remove_userbot ;;
+            4) remove_scanner_account ;;
+            0) return 0 ;;
+            *) echo -e "${RED}$(t invalid_choice)${RESET}"; sleep 1 ;;
+        esac
+    done
+}

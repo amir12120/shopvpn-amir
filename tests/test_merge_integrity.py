@@ -186,6 +186,9 @@ UPSTREAM_FEATURE_MODULES = (
     # --- upstream 10.0.0: PayG alerts/cut/retention, socat port forwarding,
     # --- per-panel delivery templates, gifted configs in "my orders" ---
     "port_forward.py",
+    # --- upstream 10.1.0: portable full backup + server-migration assistant,
+    # --- web-panel product assignment, chunked sub-page template upload ---
+    "server_migration.py",
 )
 
 # Upstream keeps re-uploading these with a module-level `from i18n import tr`
@@ -918,7 +921,11 @@ def test_rejected_upstream_paths_stay_out():
     extra = (ROOT / "manage_extra_cli.sh").read_text(encoding="utf-8")
     assert "setup_web_store()" in extra
     assert "setup_dedicated_sub()" in extra
-    assert "telegram_accounts_menu()" not in extra
+    # Upstream's own bash block is still NOT copied into manage.sh (above), but the
+    # 4.45.0 sync ported the capability itself through the fork's own userbot.py
+    # commands, so the fork's extra-CLI file must keep that adapted menu.
+    assert "telegram_accounts_menu() {" in extra
+    assert "setup_userbot() { ub_login login; }" in extra
     assert "menu_item 33 menu_33" in manage
     assert "manage_extra_cli.sh" in manage
     assert "32) doctor; pause ;;" in manage
@@ -2238,7 +2245,9 @@ def test_payg_emoji_daily_report_qr_fallback_and_reseller_db_paths_are_wired():
     # server are relocated and a missing tenant DB is never silently created.
     backup = (ROOT / "backup.py").read_text(encoding="utf-8")
     assert "from config import RESELLER_DBS_DIR, resolve_reseller_db_path" in backup
-    assert "main_db.set_reseller_db_path(reseller_id, target_path)" in backup
+    assert "main_db.set_reseller_db_path(rid, target)" in backup
+    assert "resolve_reseller_db_path(f\"reseller_{rid}.db\")" in backup
+    assert "دیتابیس خالی ساخته نشد" in backup
     main = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "resolve_reseller_db_path(rb[\"db_path\"])" in main
     assert "main_db.set_reseller_db_path(rb[\"id\"], resolved_path)" in main
@@ -2246,3 +2255,102 @@ def test_payg_emoji_daily_report_qr_fallback_and_reseller_db_paths_are_wired():
     for name in ("test_payg_emoji.py", "test_qr_delivery_fallback.py",
                  "test_web_catalog_tree.py", "test_panel_resync.py"):
         assert (ROOT / "tests" / name).is_file()
+def test_product_grant_chunked_template_force_join_wui_and_migration_are_wired():
+    """Upstream 10.1.0: five behaviours must stay reachable, not merely present."""
+    admin = (ROOT / "admin_panel/server.py").read_text(encoding="utf-8")
+    for needle in (
+        '@app.get("/api/users/{tg_id}/assignable-products")',
+        '@app.post("/api/users/{tg_id}/assign-product")',
+        "def _grant_product_kind(product) -> str:",
+        'db.create_admin_grant_order, tg_id, product["id"], quantity',
+        "db.discard_admin_grant_order, order_id",
+        "await provision_direct(db, product, quantity, user_id=tg_id, order_id=order_id)",
+        '@app.post("/api/settings/sub-page-template/chunk")',
+        "ds.TEMPLATE_UPLOADS.add(owner, upload_id, index, total, data)",
+    ):
+        assert needle in admin, f"admin_panel/server.py lost {needle}"
+    orders = (ROOT / "db/orders.py").read_text(encoding="utf-8")
+    for needle in ("def create_admin_grant_order(", "def finish_admin_grant_order(",
+                   "def discard_admin_grant_order(", "def get_user_approved_product_ids("):
+        assert needle in orders, f"db/orders.py lost {needle}"
+    appjs = (ROOT / "admin_panel/static/app.js").read_text(encoding="utf-8")
+    for needle in ("async function openAssignProductModal(", "/assign-product",
+                   "async function uploadSubTemplate("):
+        assert needle in appjs, f"admin_panel/static/app.js lost {needle}"
+
+    # Chunked sub-page template upload keeps the 2 MB cap enforced server-side.
+    ds_src = (ROOT / "dedicated_sub.py").read_text(encoding="utf-8")
+    assert "class TemplateUploadBuffer:" in ds_src
+    assert "TEMPLATE_UPLOADS = TemplateUploadBuffer()" in ds_src
+    assert "> CUSTOM_TEMPLATE_MAX" in ds_src
+
+    # Portable full backup: hashed manifest, zip-slip preflight, migration marker.
+    backup = (ROOT / "backup.py").read_text(encoding="utf-8")
+    for needle in ('"format_version": 2',
+                   "def _safe_read_full_archive(zip_path: str, extract_dir: str) -> dict:",
+                   "from server_migration import create_pending_marker"):
+        assert needle in backup, f"backup.py lost {needle}"
+    migration = (ROOT / "server_migration.py").read_text(encoding="utf-8")
+    for needle in ("def create_pending_marker(manifest: dict) -> bool:",
+                   "def interactive_setup(",
+                   '"MINIAPP_URL", "API_BASE_URL", "DEDICATED_SUB_URL"'):
+        assert needle in migration, f"server_migration.py lost {needle}"
+    assert ".shopvpn_migration_pending.json" in (ROOT / "main.py").read_text(encoding="utf-8")
+    handlers_admin = (ROOT / "handlers_admin.py").read_text(encoding="utf-8")
+    assert "restore_full_backup, db, db.db_path, tmp_path" in handlers_admin
+
+    # Force-join membership: restricted/is_member and "user not found" are honoured.
+    fj = (ROOT / "force_join.py").read_text(encoding="utf-8")
+    assert ("from force_join_channels import parse_channels, join_link, membership_from_status, "
+            "is_not_member_error") in fj
+    assert 'membership_from_status(getattr(member, "status", None), getattr(member, "is_member", None))' in fj
+    fjc = (ROOT / "force_join_channels.py").read_text(encoding="utf-8")
+    assert "def membership_from_status(" in fjc
+    assert "def is_not_member_error(" in fjc
+    assert ("from force_join_channels import membership_from_status, is_not_member_error"
+            in (ROOT / "miniapp/server.py").read_text(encoding="utf-8"))
+
+    # W-UI services stay scoped to the product's chosen interfaces and are only
+    # resynced when the service carries its own target snapshot.
+    wui = (ROOT / "panel_providers/wui_provider.py").read_text(encoding="utf-8")
+    for needle in ("resync_needs_snapshot = True",
+                   'json={"interfaceIds": expected_ids}',
+                   'link = urljoin(self._base().rstrip("/") + "/", link)'):
+        assert needle in wui, f"wui_provider.py lost {needle}"
+    resync = (ROOT / "panel_resync.py").read_text(encoding="utf-8")
+    assert "def _snapshot_ok(provider, cc) -> bool:" in resync
+    assert "if not _snapshot_ok(provider, cc):" in resync
+    assert "if not _snapshot_ok(provider, row):" in resync
+    sub = (ROOT / "sub_server/server.py").read_text(encoding="utf-8")
+    for needle in ("async def _config_http_get(cc, url: str, ua: str)",
+                   "fetcher=_config_fetcher(cc)",
+                   "panel_resync._snapshot_ok(provider, cc)"):
+        assert needle in sub, f"sub_server/server.py lost {needle}"
+    reseller = (ROOT / "reseller_auto_provision.py").read_text(encoding="utf-8")
+    assert "from product_targets import apply_target_config" in reseller
+    assert "panel_target_config=(dict(target_cfg, panel_server_id=int(local_panel_id))" in reseller
+    extras = (ROOT / "delivery_extras.py").read_text(encoding="utf-8")
+    assert "server = panel_resync._effective_server(server, cc)" in extras
+    assert "await panel_resync.heal_config(db, cc)" in extras
+
+    for name in ("test_admin_assign_product.py", "test_force_join.py",
+                 "test_wui_subscription_targets.py"):
+        assert (ROOT / "tests" / name).is_file(), f"{name} was not moved into tests/"
+
+def test_telegram_accounts_cli_menu_is_wired():
+    """The mother project exposes userbot/scanner logins from its CLI; the fork
+    wires the same capability onto its own userbot.py commands and menu."""
+    extra = (ROOT / "manage_extra_cli.sh").read_text(encoding="utf-8")
+    for needle in ("userbot_cli() {", "setup_userbot() { ub_login login; }",
+                   "setup_scanner_account() { ub_login login-scanner; }",
+                   'pip install -q --no-cache-dir --disable-pip-version-check "telethon>=1.36.0"',
+                   "telegram_accounts_menu() {"):
+        assert needle in extra, f"manage_extra_cli.sh lost {needle}"
+    manage = (ROOT / "manage.sh").read_text(encoding="utf-8")
+    assert "44) telegram_accounts_menu; pause ;;" in manage
+    assert 'MSG_EN[menu_44]=' in manage and 'MSG_FA[menu_44]=' in manage
+    # userbot.py must keep the commands the menu calls.
+    userbot = (ROOT / "userbot.py").read_text(encoding="utf-8")
+    for needle in ('if cmd == "login":', 'if cmd == "login-scanner":',
+                   'if cmd == "status-scanner":'):
+        assert needle in userbot, f"userbot.py lost {needle}"

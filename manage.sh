@@ -834,6 +834,38 @@ MSG_EN[menu_42]="Remove dedicated sub server"
 MSG_FA[menu_42]="حذف سرور ساب اختصاصی"
 MSG_EN[menu_43]="Dedicated sub status"
 MSG_FA[menu_43]="وضعیت ساب اختصاصی"
+MSG_EN[sec_accounts]="TELEGRAM ACCOUNTS"
+MSG_FA[sec_accounts]="اکانت‌های تلگرام"
+MSG_EN[menu_44]="Telegram userbot / leak-scanner login and status"
+MSG_FA[menu_44]="ورود و وضعیت اکانت یوزربات / اسکنر لیک"
+MSG_EN[menu_ub_setup]="Log in the Telegram userbot account"
+MSG_FA[menu_ub_setup]="ورود اکانت یوزربات تلگرام"
+MSG_EN[menu_ub_scanner]="Log in a dedicated leak-scanner account"
+MSG_FA[menu_ub_scanner]="ورود اکانت اختصاصی اسکنر لیک"
+MSG_EN[menu_ub_logout]="Log out the userbot account"
+MSG_FA[menu_ub_logout]="خروج اکانت یوزربات"
+MSG_EN[menu_ub_scanner_logout]="Log out the scanner account"
+MSG_FA[menu_ub_scanner_logout]="خروج اکانت اسکنر"
+MSG_EN[menu_back]="Back"
+MSG_FA[menu_back]="بازگشت"
+MSG_EN[ub_need_install]="userbot.py or the venv is missing; install or update the bot first."
+MSG_FA[ub_need_install]="userbot.py یا venv موجود نیست؛ اول بات را نصب/به‌روزرسانی کن."
+MSG_EN[ub_installing_telethon]="Installing telethon (lean install, no pip cache)..."
+MSG_FA[ub_installing_telethon]="نصب telethon (سبک، بدون کش pip)..."
+MSG_EN[ub_login_ok]="Login saved."
+MSG_FA[ub_login_ok]="ورود ذخیره شد."
+MSG_EN[ub_login_failed]="Login failed; nothing was changed."
+MSG_FA[ub_login_failed]="ورود ناموفق بود؛ چیزی تغییر نکرد."
+MSG_EN[ub_restart_failed]="The session was saved but the bot restart was not confirmed; check the service status."
+MSG_FA[ub_restart_failed]="سشن ذخیره شد ولی ری‌استارت بات تأیید نشد؛ وضعیت سرویس را چک کن."
+MSG_EN[ub_logout_ok]="Userbot account logged out and its session removed."
+MSG_FA[ub_logout_ok]="اکانت یوزربات خارج شد و سشنش پاک شد."
+MSG_EN[ub_scanner_logout_ok]="Scanner account logged out; the scanner falls back to the userbot account."
+MSG_FA[ub_scanner_logout_ok]="اکانت اسکنر خارج شد؛ اسکنر از اکانت یوزربات استفاده می‌کند."
+MSG_EN[ub_status_userbot]="Userbot account:"
+MSG_FA[ub_status_userbot]="اکانت یوزربات:"
+MSG_EN[ub_status_scanner]="Leak scanner:"
+MSG_FA[ub_status_scanner]="اکانت اسکنر لیک:"
 MSG_EN[dsub_dir_missing]="⛔️ sub_server folder not found. Update the project code first (option 2)."
 MSG_FA[dsub_dir_missing]="⛔️ پوشه sub_server پیدا نشد. اول باید کد پروژه را آپدیت کنی (گزینه ۲)."
 MSG_EN[prompt_domain_dsub]="Enter a dedicated domain pointing to this server's IP for the sub links (e.g. sub.example.com): "
@@ -3210,6 +3242,8 @@ while true; do
     menu_item 41 menu_41
     menu_item 42 menu_42 "$RED"
     menu_item 43 menu_43
+    menu_section sec_accounts
+    menu_item 44 menu_44
     draw_rule
     menu_item L menu_lang "$MAGENTA"
     menu_item 0 menu_0 "$DIM"
@@ -3263,6 +3297,7 @@ while true; do
         41) update_dedicated_sub; pause ;;
         42) remove_dedicated_sub; pause ;;
         43) dedicated_sub_status; pause ;;
+        44) telegram_accounts_menu; pause ;;
         [Ll]) toggle_lang ;;
         0) echo -e "${CYAN}$(t goodbye)${RESET}"; exit 0 ;;
         *) echo -e "${RED}$(t invalid_choice)${RESET}"; sleep 1 ;;

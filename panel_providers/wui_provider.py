@@ -5,6 +5,7 @@ import re
 import time
 import zipfile
 from datetime import datetime, timezone
+from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 
@@ -151,8 +152,16 @@ class WUIProvider(BasePanelProvider):
     async def _link(self, session, client_id) -> str:
         data = await self._api(session, "GET", f"clients/{client_id}/subscription", "دریافت لینک اشتراک")
         link = data.get("link") if isinstance(data, dict) else ""
-        if not link:
+        if not isinstance(link, str) or not link.strip():
             raise PanelError("لینک اشتراک از W-UI دریافت نشد؛ سرویس Subscription را در پنل فعال کن.")
+        link = link.strip()
+        # بعضی نسخه‌های W-UI لینک نسبی (مثلاً /sub/TOKEN) برمی‌گردانند؛
+        # ذخیره‌ی همان مقدار باعث می‌شود سرویس ساب هنگام GET با URL نامعتبر مواجه شود.
+        if link.startswith(("/", "?")):
+            link = urljoin(self._base().rstrip("/") + "/", link)
+        parts = urlsplit(link)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            raise PanelError("W-UI لینک اشتراک معتبری برنگرداند (آدرس باید http/https کامل باشد).")
         return link
 
     @staticmethod
@@ -205,6 +214,27 @@ class WUIProvider(BasePanelProvider):
             created = await self._api(session, "POST", "clients", "ساخت کاربر", json=body)
             if not isinstance(created, dict) or not created.get("id"):
                 raise PanelError("پاسخ نامعتبر از پنل در ساخت کاربر.")
+            # W-UI's subscription ZIP is built from the client's actual accounts,
+            # not from ShopVPN's product settings. Verify the set returned by the
+            # panel and repair it immediately if the panel/template applied a
+            # different (for example, first sample client's) interface set.
+            expected_ids = sorted(set(int(i) for i in interface_ids))
+            try:
+                actual_client = await self._full(session, created["id"])
+                if self._account_interfaces(actual_client) != expected_ids:
+                    await self._api(
+                        session, "PATCH", f"clients/{created['id']}", "اعمال interfaceهای محصول",
+                        json={"interfaceIds": expected_ids},
+                    )
+                    actual_client = await self._full(session, created["id"])
+                    if self._account_interfaces(actual_client) != expected_ids:
+                        raise PanelError("W-UI interfaceهای انتخاب‌شده‌ی محصول را روی کاربر اعمال نکرد؛ ساخت سرویس متوقف شد تا لینک اشتباه تحویل نشود.")
+            except Exception:
+                try:
+                    await self._api(session, "DELETE", f"clients/{created['id']}", "پاکسازی کاربر با interface نادرست")
+                except Exception:
+                    pass
+                raise
             try:
                 link = await self._link(session, created["id"])
             except PanelError:
@@ -312,9 +342,13 @@ class WUIProvider(BasePanelProvider):
         return int(client.get("onlineNow") or 0) > 0
 
     supports_template_resync = True
+    # PATCH روی interfaceIds در W-UI مجموعه را «جایگزین» میکند: اضافه‌شده credential میگیرد و حذف‌شده credential‌هایش پاک میشود.
+    # پس همگام‌سازی فقط وقتی امن است که مقصد انتخاب‌شده‌ی همین سرویس (panel_target_config) ثبت شده باشد؛ وگرنه با قالب کل سرور
+    # interface های انتخاب‌نشده اضافه و interface های درست (مثلاً OpenVPN) حذف میشدند.
+    resync_needs_snapshot = True
 
     async def resync_user_template(self, username: str) -> bool:
-        """interface های مشتری را با قالب فعلی سرور در ربات یکی میکند."""
+        """interface های مشتری را با مقصد ثبت‌شده‌ی سرویس (همان _interface_ids) یکی میکند."""
         target = sorted(self._interface_ids())
         async with self._session() as session:
             client = await self._full(session, (await self._find(session, username))["id"])
